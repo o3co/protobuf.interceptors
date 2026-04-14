@@ -99,7 +99,11 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			if !ok {
 				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("request does not implement proto.Message"))
 			}
-			resource, action, err = interceptors.ResolveResource(policy, msg)
+			var fields map[string]string
+			resource, action, fields, err = interceptors.ResolveResourceWithFields(policy, msg)
+			if err == nil && len(fields) > 0 {
+				ctx = interceptors.WithExtractedFields(ctx, fields)
+			}
 		} else {
 			resource, action, err = interceptors.ResolveResource(policy, nil)
 		}

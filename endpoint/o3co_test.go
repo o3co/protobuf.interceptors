@@ -144,3 +144,62 @@ func TestO3coVerify_ForwardsRequestID(t *testing.T) {
 	ep, _ := NewO3coEndpoint(srv.URL)
 	_ = ep.Verify(ctxWithTokenAndRequestID("tok", "req-123"), "res", "act")
 }
+
+func TestO3coVerify_WithExtractedFields_IncludesContextInBody(t *testing.T) {
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx := interceptors.WithBearerToken(context.Background(), "tok")
+	ctx = interceptors.WithExtractedFields(ctx, map[string]string{"subscriber_did": "did:example:abc"})
+
+	ep, err := NewO3coEndpoint(srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = ep.Verify(ctx, "resource", "read")
+
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("failed to unmarshal body: %v", err)
+	}
+
+	contextVal, ok := body["context"]
+	if !ok {
+		t.Fatal("expected \"context\" key in request body, but it was absent")
+	}
+	contextMap, ok := contextVal.(map[string]any)
+	if !ok {
+		t.Fatalf("expected \"context\" to be a map, got %T", contextVal)
+	}
+	if contextMap["subscriber_did"] != "did:example:abc" {
+		t.Errorf("context[\"subscriber_did\"] = %v, want %q", contextMap["subscriber_did"], "did:example:abc")
+	}
+}
+
+func TestO3coVerify_WithoutExtractedFields_OmitsContextFromBody(t *testing.T) {
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ep, err := NewO3coEndpoint(srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = ep.Verify(ctxWithToken("tok"), "resource", "read")
+
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("failed to unmarshal body: %v", err)
+	}
+
+	if _, ok := body["context"]; ok {
+		t.Error("expected no \"context\" key in request body when no extracted fields are present")
+	}
+}

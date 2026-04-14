@@ -132,7 +132,10 @@ func (e *o3coEndpoint) Verify(ctx context.Context, resource, action string) erro
 	}
 
 	// --- Build request body ---------------------------------------------------
-	reqBody := map[string]string{"resource": resource, "action": action}
+	reqBody := map[string]any{"resource": resource, "action": action}
+	if fields, ok := interceptors.ExtractedFieldsFromContext(ctx); ok && len(fields) > 0 {
+		reqBody["context"] = fields
+	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request body: %w", err)

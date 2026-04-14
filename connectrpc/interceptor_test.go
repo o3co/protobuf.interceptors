@@ -195,3 +195,56 @@ func TestConnectChain_PassesBearerTokenToEndpoint(t *testing.T) {
 		t.Errorf("token = %q, want %q", capturedToken, "my-secret-token")
 	}
 }
+
+func TestConnectChain_FieldMappings_StoresExtractedFieldsInContext(t *testing.T) {
+	var capturedFields map[string]string
+	client, cleanup := startConnectServer(t,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(endpointtest.Func(
+			func(ctx context.Context, resource, action string) error {
+				capturedFields, _ = interceptors.ExtractedFieldsFromContext(ctx)
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	req := connect.NewRequest(&testpb.GetResourceByIdRequest{Id: "abc-123"})
+	req.Header().Set("Authorization", "Bearer tok")
+
+	_, err := client.GetResourceById(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedFields == nil {
+		t.Fatal("expected extracted fields in context, got nil")
+	}
+	if capturedFields["id"] != "abc-123" {
+		t.Errorf("fields[\"id\"] = %q, want %q", capturedFields["id"], "abc-123")
+	}
+}
+
+func TestConnectChain_NoFieldMappings_NoExtractedFieldsInContext(t *testing.T) {
+	var fieldsPresent bool
+	client, cleanup := startConnectServer(t,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(endpointtest.Func(
+			func(ctx context.Context, resource, action string) error {
+				_, fieldsPresent = interceptors.ExtractedFieldsFromContext(ctx)
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	req := connect.NewRequest(&testpb.GetResourceRequest{Id: "1"})
+	req.Header().Set("Authorization", "Bearer tok")
+
+	_, err := client.GetResource(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fieldsPresent {
+		t.Error("expected no extracted fields in context for method without field_mappings")
+	}
+}
