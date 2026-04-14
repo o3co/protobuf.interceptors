@@ -25,41 +25,53 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// ResolveResource resolves the resource string from a Policy and an optional
-// request message. If the policy has field_mappings, the request message is
-// used to substitute placeholders in the resource template.
-func ResolveResource(policy *pb.Policy, msg proto.Message) (resource, action string, err error) {
+// ResolveResourceWithFields resolves the resource string from a Policy and an
+// optional request message, and also returns a map of all extracted field values
+// keyed by placeholder name. ALL field_mappings are extracted regardless of
+// whether their placeholder appears in the resource template, so that callers
+// can forward the values via context (e.g. subscriber_did for downstream authz).
+func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, action string, fields map[string]string, err error) {
 	if policy.Resource == "" {
-		return "", "", fmt.Errorf("policy resource must not be empty")
+		return "", "", nil, fmt.Errorf("policy resource must not be empty")
 	}
 	if policy.Action == "" {
-		return "", "", fmt.Errorf("policy action must not be empty")
+		return "", "", nil, fmt.Errorf("policy action must not be empty")
 	}
 
 	resource = policy.Resource
+	fields = make(map[string]string)
 
 	for _, field := range policy.FieldMappings {
 		if field.Placeholder == "" || field.RequestField == "" {
-			return "", "", fmt.Errorf("invalid field mapping: placeholder and request_field must not be empty")
+			return "", "", nil, fmt.Errorf("invalid field mapping: placeholder and request_field must not be empty")
 		}
 
+		if msg == nil {
+			return "", "", nil, fmt.Errorf("request message is nil but field_mappings require field extraction")
+		}
+
+		value, extractErr := extractField(msg, field.RequestField)
+		if extractErr != nil {
+			return "", "", nil, fmt.Errorf("failed to extract field %s: %v", field.RequestField, extractErr)
+		}
+
+		fields[field.Placeholder] = value
+
 		placeholder := fmt.Sprintf("<%s>", field.Placeholder)
-
 		if strings.Contains(resource, placeholder) {
-			if msg == nil {
-				return "", "", fmt.Errorf("request message is nil but field_mappings require field extraction")
-			}
-
-			value, extractErr := extractField(msg, field.RequestField)
-			if extractErr != nil {
-				return "", "", fmt.Errorf("failed to extract field %s: %v", field.RequestField, extractErr)
-			}
-
 			resource = strings.ReplaceAll(resource, placeholder, value)
 		}
 	}
 
-	return resource, policy.Action, nil
+	return resource, policy.Action, fields, nil
+}
+
+// ResolveResource resolves the resource string from a Policy and an optional
+// request message. If the policy has field_mappings, the request message is
+// used to substitute placeholders in the resource template.
+func ResolveResource(policy *pb.Policy, msg proto.Message) (resource, action string, err error) {
+	resource, action, _, err = ResolveResourceWithFields(policy, msg)
+	return
 }
 
 func extractField(msg proto.Message, fieldName string) (string, error) {

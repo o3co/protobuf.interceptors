@@ -19,10 +19,11 @@ import "context"
 type ctxKey string
 
 const (
-	ctxKeyPolicy         ctxKey = "o3:policy"
-	ctxKeyInterceptorRan ctxKey = "o3:interceptor_ran"
-	ctxKeyBearerToken    ctxKey = "o3:bearer_token"
-	ctxKeyRequestID      ctxKey = "o3:request_id"
+	ctxKeyPolicy          ctxKey = "o3:policy"
+	ctxKeyInterceptorRan  ctxKey = "o3:interceptor_ran"
+	ctxKeyBearerToken     ctxKey = "o3:bearer_token"
+	ctxKeyRequestID       ctxKey = "o3:request_id"
+	ctxKeyExtractedFields ctxKey = "o3:extracted_fields"
 )
 
 // PolicyData holds the resolved authorization policy for an RPC method.
@@ -76,4 +77,17 @@ func RequestIDFromContext(ctx context.Context) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+func WithExtractedFields(ctx context.Context, fields map[string]string) context.Context {
+	return context.WithValue(ctx, ctxKeyExtractedFields, fields)
+}
+
+func ExtractedFieldsFromContext(ctx context.Context) (map[string]string, bool) {
+	v := ctx.Value(ctxKeyExtractedFields)
+	if v == nil {
+		return nil, false
+	}
+	m, ok := v.(map[string]string)
+	return m, ok
 }

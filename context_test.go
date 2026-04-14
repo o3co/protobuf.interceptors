@@ -85,3 +85,39 @@ func TestRequestIDFromContext_Empty(t *testing.T) {
 		t.Errorf("id = %q, want empty string", id)
 	}
 }
+
+func TestWithExtractedFields_ExtractedFieldsFromContext_RoundTrip(t *testing.T) {
+	fields := map[string]string{
+		"subscriber_did": "did:example:abc",
+		"tenant_id":      "tenant-123",
+	}
+	ctx := interceptors.WithExtractedFields(context.Background(), fields)
+	got, ok := interceptors.ExtractedFieldsFromContext(ctx)
+	if !ok {
+		t.Fatal("expected extracted fields in context")
+	}
+	if got["subscriber_did"] != "did:example:abc" {
+		t.Errorf("got[\"subscriber_did\"] = %q, want %q", got["subscriber_did"], "did:example:abc")
+	}
+	if got["tenant_id"] != "tenant-123" {
+		t.Errorf("got[\"tenant_id\"] = %q, want %q", got["tenant_id"], "tenant-123")
+	}
+}
+
+func TestExtractedFieldsFromContext_Empty(t *testing.T) {
+	_, ok := interceptors.ExtractedFieldsFromContext(context.Background())
+	if ok {
+		t.Fatal("expected no extracted fields in empty context")
+	}
+}
+
+func TestWithExtractedFields_EmptyMap(t *testing.T) {
+	ctx := interceptors.WithExtractedFields(context.Background(), map[string]string{})
+	got, ok := interceptors.ExtractedFieldsFromContext(ctx)
+	if !ok {
+		t.Fatal("expected extracted fields in context even for empty map")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
