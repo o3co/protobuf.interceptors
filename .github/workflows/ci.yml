@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  grpc:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: grpc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: grpc/go.mod
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  connectrpc:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: connectrpc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: connectrpc/go.mod
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  proto-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "34.0"
+      - name: Install protoc-gen-go
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
+      - name: Generate
+        run: make -C schema generate
+      - name: Check for drift
+        run: git diff --exit-code schema/
