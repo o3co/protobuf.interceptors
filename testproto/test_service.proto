@@ -1,0 +1,40 @@
+syntax = "proto3";
+package test.v1;
+
+option go_package = "github.com/o3co/protobuf.interceptors/testproto;testpb";
+
+import "policy.proto";
+
+service TestService {
+  rpc GetResource(GetResourceRequest) returns (GetResourceResponse) {
+    option (o3co.authz.v1.policy) = {
+      resource: "resource"
+      action: "read"
+    };
+  }
+
+  rpc CreateResource(CreateResourceRequest) returns (CreateResourceResponse) {
+    option (o3co.authz.v1.policy) = {
+      resource: "resource"
+      action: "write"
+    };
+  }
+
+  rpc GetResourceById(GetResourceByIdRequest) returns (GetResourceResponse) {
+    option (o3co.authz.v1.policy) = {
+      resource: "resource/<id>"
+      action: "read"
+      field_mappings: [{ placeholder: "id", request_field: "id" }]
+    };
+  }
+
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message GetResourceRequest { string id = 1; }
+message GetResourceByIdRequest { string id = 1; }
+message GetResourceResponse { string id = 1; string name = 2; }
+message CreateResourceRequest { string name = 1; }
+message CreateResourceResponse { string id = 1; }
+message HealthCheckRequest {}
+message HealthCheckResponse { string status = 1; }
