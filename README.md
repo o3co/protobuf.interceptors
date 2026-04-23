@@ -4,6 +4,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/o3co/protobuf.interceptors.svg)](https://pkg.go.dev/github.com/o3co/protobuf.interceptors)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+> This repository handles **authorization enforcement** (gRPC / ConnectRPC) in the three-layer separation of concerns ([authentication & token issuance](https://github.com/o3co/auth.provider) / [authorization decision](https://github.com/o3co/auth.policy-verifier) / authorization enforcement) of the [auth](https://github.com/o3co/auth) stack — delegating the allow/deny decision to auth.policy-verifier, OPA, Cedar, or any other `VerifierEndpoint`.
+
 Framework-agnostic protobuf method option authorization interceptors for Go. Declares access policy (resource + action) in `.proto` method options and enforces it at runtime via pluggable verification backends. Supports both gRPC and ConnectRPC.
 
 ## How it works
