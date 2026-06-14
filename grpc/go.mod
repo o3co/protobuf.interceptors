@@ -5,7 +5,7 @@ go 1.25.5
 replace github.com/o3co/protobuf.interceptors => ../
 
 require (
-	github.com/o3co/protobuf.interceptors v0.0.0-00010101000000-000000000000
+	github.com/o3co/protobuf.interceptors v0.2.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 )
