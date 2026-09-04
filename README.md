@@ -189,6 +189,21 @@ type VerifierEndpoint interface {
 
 Bearer token and request ID are passed via `context.Context`, set by the framework-specific `VerificationInterceptor`.
 
+## Streaming
+
+A stream is authorized **before its handler is invoked**, on both frameworks —
+a bidirectional or client-streaming handler that sends before it receives, or a
+server-streaming handler that never receives at all, is checked like any other.
+
+On gRPC the check is then repeated on each `RecvMsg`. The resource and action
+are fixed for the life of a stream, so that re-check is not a second opinion on
+the same question: it is what stops delivery on a long-lived stream whose grant
+has been revoked, or whose token expired, since the stream opened.
+
+`field_mappings` are not supported for streaming RPCs — there is no single
+request message to resolve them from — and a streaming method that declares one
+fails with `Internal`.
+
 ## Proto Schema
 
 The policy extension uses field tag 50000 in the `google.protobuf.MethodOptions` extension range:

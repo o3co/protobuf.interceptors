@@ -16,6 +16,7 @@ package grpc
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -35,8 +36,15 @@ type contextServerStream struct {
 
 func (s *contextServerStream) Context() context.Context { return s.ctx }
 
-// authServerStream wraps grpc.ServerStream and calls verifier.Verify on each
+// authServerStream wraps grpc.ServerStream and re-checks authorization on each
 // RecvMsg before delegating to the underlying stream.
+//
+// The stream is already authorized before the handler is invoked (see
+// VerificationStreamInterceptor), so this is not the first check and no longer
+// the one that decides whether the handler runs. It is kept because a stream is
+// long-lived while a decision is not: the resource and action are fixed for the
+// life of the stream, so re-asking the verifier is what stops delivery once a
+// grant is revoked or a token expires mid-stream.
 type authServerStream struct {
 	grpc.ServerStream
 	ctx      context.Context
@@ -50,7 +58,7 @@ func (s *authServerStream) Context() context.Context { return s.ctx }
 
 func (s *authServerStream) RecvMsg(m interface{}) error {
 	if err := s.verifier.Verify(s.ctx, s.resource, s.action); err != nil {
-		s.log.Error("authorization check failed on RecvMsg",
+		s.log.Error("authorization re-check failed on RecvMsg",
 			"resource", s.resource,
 			"action", s.action,
 			"error", err,
@@ -94,7 +102,9 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 
 		resource, action, err := interceptors.ResolveResource(policy, nil)
 		if err != nil {
-			return status.Errorf(codes.Internal, "failed to resolve resource: %v", err)
+			// See PolicyOptionInterceptor: a refused placeholder value is a
+			// denial, everything else is Internal.
+			return toGRPCError(fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -104,8 +114,8 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 }
 
 // VerificationStreamInterceptor returns a gRPC StreamServerInterceptor that
-// reads Policy from the stream context and calls the verifier endpoint on each
-// RecvMsg.
+// reads Policy from the stream context and authorizes the stream before the
+// handler is invoked, then re-checks on each RecvMsg.
 //
 // Panics if verifier is nil.
 func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option) grpc.StreamServerInterceptor {
@@ -137,6 +147,20 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			// No policy — pass through.
 			wrapped := &contextServerStream{ServerStream: ss, ctx: ctx}
 			return handler(srv, wrapped)
+		}
+
+		// Authorize before the handler runs, the way the ConnectRPC streaming
+		// interceptor does. Checking only inside RecvMsg left a bidirectional or
+		// client-streaming handler that sends before it receives running
+		// entirely unauthorized, and a handler that never receives — a
+		// server-streaming one — checked by nothing at all.
+		if err := verifier.Verify(ctx, policyData.Resource, policyData.Action); err != nil {
+			log.Error("authorization check failed before stream handler",
+				"resource", policyData.Resource,
+				"action", policyData.Action,
+				"error", err,
+			)
+			return toGRPCError(err)
 		}
 
 		wrapped := &authServerStream{
