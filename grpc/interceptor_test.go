@@ -248,3 +248,48 @@ func TestChain_PlaceholderValueWithinGrammar_IsResolved(t *testing.T) {
 		t.Errorf("resource = %q, want %q", capturedResource, "resource/42")
 	}
 }
+
+// TestChain_FieldMappings_ExtractedFieldsAreNotInContext is the gRPC half of a
+// cross-framework contract, and it exists to keep the README honest.
+//
+// connectrpc.PolicyOptionInterceptor resolves with ResolveResourceWithFields and
+// attaches the values with WithExtractedFields — pinned on the other side by
+// TestConnectChain_FieldMappings_StoresExtractedFieldsInContext. The gRPC unary
+// interceptor resolves with ResolveResource, which drops them, so the verifier
+// sees resource and action and nothing else.
+//
+// The difference is the whole reason the README cannot tell a gRPC deployment
+// that an id carrying '.' or ':' keeps working if its placeholder is taken out
+// of the resource template: on this path the value does not travel as request
+// context, it simply stops existing. If this test starts failing because the
+// fields are now present, the README's "Extracted field forwarding" table is
+// what has gone stale.
+func TestChain_FieldMappings_ExtractedFieldsAreNotInContext(t *testing.T) {
+	var fieldsPresent bool
+	var capturedResource string
+	client, cleanup := startServer(t,
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(endpointtest.Func(
+			func(ctx context.Context, resource, _ string) error {
+				_, fieldsPresent = interceptors.ExtractedFieldsFromContext(ctx)
+				capturedResource = resource
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	// GetResourceById declares resource "resource/<id>" with a mapping id->id,
+	// so the value is extracted and substituted on every framework.
+	_, err := client.GetResourceById(bearerCtx("tok"), &testpb.GetResourceByIdRequest{Id: "abc-123"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedResource != "resource/abc-123" {
+		t.Errorf("resource = %q, want %q: the value must still reach the template", capturedResource, "resource/abc-123")
+	}
+	if fieldsPresent {
+		t.Error("gRPC unary put extracted fields in context; " +
+			"forwarding is ConnectRPC-only and README \"Extracted field forwarding\" says so")
+	}
+}

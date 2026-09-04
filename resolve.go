@@ -28,8 +28,16 @@ import (
 // ResolveResourceWithFields resolves the resource string from a Policy and an
 // optional request message, and also returns a map of all extracted field values
 // keyed by placeholder name. ALL field_mappings are extracted regardless of
-// whether their placeholder appears in the resource template, so that callers
-// can forward the values via context (e.g. subscriber_did for downstream authz).
+// whether their placeholder appears in the resource template, so that a caller
+// can forward the values via WithExtractedFields (e.g. subscriber_did for
+// downstream authz).
+//
+// Returning the map is all this function does with it: whether the values ever
+// reach a decision is the caller's business, and today only
+// connectrpc.PolicyOptionInterceptor calls this. The gRPC unary interceptor
+// calls ResolveResource, which discards them, and neither stream interceptor
+// resolves a policy carrying field_mappings at all. See the README's "Extracted
+// field forwarding" section, which is the contract users are pointed at.
 func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, action string, fields map[string]string, err error) {
 	if policy.Resource == "" {
 		return "", "", nil, fmt.Errorf("policy resource must not be empty")
@@ -76,8 +84,10 @@ func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, 
 //
 // Every substituted value is validated first — see validateResourceValue.
 // Values not reached by the template are not validated: they never enter the
-// resource string, and are forwarded as request context where the verifier's
-// resource grammar does not apply (a DID, for instance, is all colons).
+// resource string, so the verifier's resource grammar does not apply to them (a
+// DID, for instance, is all colons). They are returned to the caller, which is
+// not the same as reaching the authorization decision — see
+// ResolveResourceWithFields for which callers forward them and which drop them.
 func substituteResource(template string, values map[string]string) (string, error) {
 	var b strings.Builder
 	b.Grow(len(template))

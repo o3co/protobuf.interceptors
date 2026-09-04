@@ -85,17 +85,60 @@ ConnectRPC interceptors map to `PermissionDenied` — the request is denied, the
 handler never runs, and the verifier is never asked.
 
 **If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
-dotted version — the request will now be denied where it used to be resolved.
-Either percent-encode the value before it reaches the mapped request field
-(percent-encoding round-trips through the grammar: `1%2Emember` stays one
-segment), or configure a `ResourceParser` on the verifier written for your
-syntax. A field mapping whose placeholder does **not** appear in the resource
-template is not affected — those values are forwarded as request context, where
-the resource grammar does not apply, so a `subscriber_did` mapping keeps working
-unchanged.
+dotted version, a non-Latin id — the request will now be denied where it used to
+be resolved. Three remedies work on every framework and every backend:
+
+- **Percent-encode the value before it reaches the mapped request field.**
+  Percent-encoding round-trips through the grammar (`1%2Emember` stays one
+  segment) and `%` is itself accepted, so the verifier can decode it back.
+- **Configure a `ResourceParser` on the verifier** written for your id syntax,
+  and encode to that syntax at the call site.
+- **Restructure the policy so the offending value is never substituted into the
+  resource.** Guard the type the RPC actually owns (`resource: "subscriptions"`,
+  `action: "read"`) and let the backend decide against the identity it already
+  holds from the bearer token, instead of naming a DID in the resource string.
+
+A fourth path — keeping the field mapping but dropping its placeholder from the
+resource template, so the value travels as request context instead — is **not
+portable**: it works on ConnectRPC with the o3co endpoint and nowhere else. Read
+[Extracted field forwarding](#extracted-field-forwarding) before relying on it.
 
 Substitution is a single pass over the template: a value that itself spells
 `<some-placeholder>` is left as data, never rewritten by another mapping.
+
+### Extracted field forwarding
+
+`ResolveResourceWithFields` extracts **every** `field_mappings` entry, including
+one whose placeholder never appears in the resource template. Such a value is
+never substituted, so the segment grammar above never applies to it — a DID,
+which is all colons, extracts without complaint. Whether it then reaches the
+authorization decision depends on the framework *and* on the backend:
+
+| Path | Extracted | Placed in context | Reaches the decision |
+|---|---|---|---|
+| ConnectRPC unary | yes | yes | only via the **o3co** endpoint |
+| ConnectRPC streaming | — | — | no — `field_mappings` refused with `Internal` |
+| gRPC unary | yes | **no, discarded** | **no** |
+| gRPC streaming | — | — | no — `field_mappings` refused with `Internal` |
+
+Only `connectrpc.PolicyOptionInterceptor` resolves with
+`ResolveResourceWithFields` and attaches the result via
+`interceptors.WithExtractedFields`. The gRPC unary interceptor resolves with
+`ResolveResource`, which drops the fields; both stream interceptors refuse a
+policy carrying `field_mappings` before resolving anything (see
+[Streaming](#streaming)). And of the four backends only `endpoint.NewO3coEndpoint`
+reads the context back out, sending it as the `context` object of `POST /verify`
+— OPA, Cedar and the static endpoint never look at it.
+
+**So on gRPC, moving a placeholder out of the resource template does not make its
+value available to the decision — it removes it**: the RPC stops being denied,
+but the verifier is asked a question with less information than before, which is
+worse than a denial. Use one of the three portable remedies above.
+
+Giving the gRPC unary path the same forwarding ConnectRPC has is a follow-up, not
+something this release does. The stream interceptors' refusal of `field_mappings`
+is a separate, longer-standing limitation: there is no single request message to
+resolve a mapping from, on either framework.
 
 [auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
 
@@ -221,6 +264,13 @@ type VerifierEndpoint interface {
 
 Bearer token and request ID are passed via `context.Context`, set by the framework-specific `VerificationInterceptor`.
 
+The interface carries only the resolved resource and action, so anything else an
+endpoint wants must come off the context itself. Only the o3co endpoint does:
+it forwards the extracted `field_mappings` values as the `context` object of
+`POST /verify`, when a framework put them there. OPA, Cedar and the static
+endpoint decide on resource and action alone — see
+[Extracted field forwarding](#extracted-field-forwarding).
+
 ## Streaming
 
 A stream is authorized **before its handler is invoked**, on both frameworks —
@@ -234,7 +284,11 @@ has been revoked, or whose token expired, since the stream opened.
 
 `field_mappings` are not supported for streaming RPCs — there is no single
 request message to resolve them from — and a streaming method that declares one
-fails with `Internal`.
+fails with `Internal`, on both frameworks, before any resolution is attempted.
+This is a standing limitation, not a consequence of the placeholder-value rule:
+it predates it and applies whether or not the values would have been accepted.
+A streaming RPC that needs a per-message identity has to carry it in the message
+and check it in the handler.
 
 ## Proto Schema
 

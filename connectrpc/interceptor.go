@@ -77,6 +77,13 @@ type policyOptionInterceptor struct{}
 // method option and injects the resolved Policy into context.
 //
 // This interceptor must be placed before VerificationInterceptor in the chain.
+//
+// For unary RPCs it resolves with interceptors.ResolveResourceWithFields and
+// attaches the extracted values with interceptors.WithExtractedFields, so a
+// field mapping whose placeholder is absent from the resource template still
+// reaches an endpoint that reads them (today, only the o3co endpoint). This is
+// a ConnectRPC-only capability: the gRPC unary interceptor discards the fields.
+// Streaming handlers refuse field_mappings outright, as gRPC's do.
 func PolicyOptionInterceptor() connect.Interceptor {
 	return &policyOptionInterceptor{}
 }

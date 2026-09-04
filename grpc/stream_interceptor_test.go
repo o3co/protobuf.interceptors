@@ -249,3 +249,73 @@ func TestVerificationStreamInterceptor_WithoutPolicyOptionInterceptor_IsInternal
 		t.Errorf("code = %v, want %v", status.Code(err), codes.Internal)
 	}
 }
+
+// TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal pins the stream
+// interceptor's outright refusal of a policy carrying field_mappings, which had
+// no test before.
+//
+// This is a standing limitation, older than and independent of the
+// placeholder-value rule: there is no single request message on a stream to
+// resolve a mapping from, so the interceptor fails closed rather than guess.
+// The consequence for a user is that the "move the placeholder out of the
+// resource template" workaround is not merely useless on a stream (as it is on
+// gRPC unary) — it makes the method unreachable, since the mere presence of
+// field_mappings is what is refused. The README's "Streaming" section says so.
+func TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal(t *testing.T) {
+	interceptor := policygrpc.PolicyOptionStreamInterceptor()
+	stream := &fakeServerStream{ctx: context.Background()}
+	handlerCalled := false
+
+	// GetResourceById is the method whose policy declares field_mappings. The
+	// policy lookup is by full method name against the proto registry and does
+	// not care that the method is not declared streaming, which is exactly the
+	// case being pinned: it is the option, not the cardinality, that is refused.
+	info := &grpc.StreamServerInfo{
+		FullMethod:     "/test.v1.TestService/GetResourceById",
+		IsServerStream: true,
+	}
+
+	err := interceptor(nil, stream, info, func(any, grpc.ServerStream) error {
+		handlerCalled = true
+		return nil
+	})
+
+	if err == nil {
+		t.Fatal("expected a policy with field_mappings to be refused on a stream")
+	}
+	if status.Code(err) != codes.Internal {
+		t.Errorf("code = %v, want %v", status.Code(err), codes.Internal)
+	}
+	if handlerCalled {
+		t.Error("handler ran for a policy the interceptor refused")
+	}
+}
+
+// TestPolicyOptionStreamInterceptor_NoFieldMappings_ResolvesPolicy is the
+// counterpart: the same interceptor resolves a policy without field_mappings and
+// leaves it on the stream context, so the refusal above is specific to
+// field_mappings and not a blanket failure of the streaming path.
+func TestPolicyOptionStreamInterceptor_NoFieldMappings_ResolvesPolicy(t *testing.T) {
+	interceptor := policygrpc.PolicyOptionStreamInterceptor()
+	stream := &fakeServerStream{ctx: context.Background()}
+	var captured *interceptors.PolicyData
+
+	info := &grpc.StreamServerInfo{
+		FullMethod:     "/test.v1.TestService/GetResource",
+		IsServerStream: true,
+	}
+
+	err := interceptor(nil, stream, info, func(_ any, ss grpc.ServerStream) error {
+		captured, _ = interceptors.PolicyFromContext(ss.Context())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("expected a resolved policy on the stream context")
+	}
+	if captured.Resource != "resource" || captured.Action != "read" {
+		t.Errorf("policy = %+v, want {Resource:resource Action:read}", captured)
+	}
+}
