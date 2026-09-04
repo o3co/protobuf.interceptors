@@ -121,14 +121,15 @@ func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 				return nil, status.Errorf(codes.Internal, "request does not implement proto.Message")
 			}
 			resource, action, err = interceptors.ResolveResource(policy, msg)
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "failed to resolve resource: %v", err)
-			}
 		} else {
 			resource, action, err = interceptors.ResolveResource(policy, nil)
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "failed to resolve resource: %v", err)
-			}
+		}
+		// Mapped, not blanket-Internal: resolution refuses a request field value
+		// that would change which resource the string names, and that refusal is
+		// a denial rather than a server fault. Anything else still maps to
+		// Internal — an unmapped error must never let the handler run.
+		if err != nil {
+			return nil, toGRPCError(fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)

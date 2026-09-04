@@ -17,6 +17,7 @@ package grpc_test
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -33,6 +34,9 @@ import (
 
 type testServer struct {
 	testpb.UnimplementedTestServiceServer
+	// getResourceByIDCalled records whether the handler was reached. Read from
+	// the test goroutine while the server writes it, so it is atomic.
+	getResourceByIDCalled atomic.Bool
 }
 
 func (s *testServer) GetResource(_ context.Context, req *testpb.GetResourceRequest) (*testpb.GetResourceResponse, error) {
@@ -41,6 +45,11 @@ func (s *testServer) GetResource(_ context.Context, req *testpb.GetResourceReque
 
 func (s *testServer) CreateResource(_ context.Context, req *testpb.CreateResourceRequest) (*testpb.CreateResourceResponse, error) {
 	return &testpb.CreateResourceResponse{Id: "new-id"}, nil
+}
+
+func (s *testServer) GetResourceById(_ context.Context, req *testpb.GetResourceByIdRequest) (*testpb.GetResourceResponse, error) {
+	s.getResourceByIDCalled.Store(true)
+	return &testpb.GetResourceResponse{Id: req.Id, Name: "found"}, nil
 }
 
 func (s *testServer) HealthCheck(_ context.Context, _ *testpb.HealthCheckRequest) (*testpb.HealthCheckResponse, error) {
@@ -54,8 +63,13 @@ func bearerCtx(token string) context.Context {
 
 func startServer(t *testing.T, interceptors ...grpc.UnaryServerInterceptor) (testpb.TestServiceClient, func()) {
 	t.Helper()
+	return startServerWithImpl(t, &testServer{}, interceptors...)
+}
+
+func startServerWithImpl(t *testing.T, impl testpb.TestServiceServer, interceptors ...grpc.UnaryServerInterceptor) (testpb.TestServiceClient, func()) {
+	t.Helper()
 	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(interceptors...))
-	testpb.RegisterTestServiceServer(srv, &testServer{})
+	testpb.RegisterTestServiceServer(srv, impl)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
@@ -173,3 +187,64 @@ func TestChain_VerifiesCorrectResourceAction(t *testing.T) {
 
 // Ensure interceptors package is used (bearer token / request ID wiring).
 var _ = interceptors.BearerTokenFromContext
+
+// TestChain_PlaceholderValueChangingResourceStructure_IsDenied pins the
+// end-to-end consequence of the resolution refusal: the policy on
+// GetResourceById is "resource/<id>", and an id of "1.member:2" would resolve
+// to "resource/1.member:2" — a different resource type for the verifier. The
+// request is denied before any backend is asked and the handler never runs.
+func TestChain_PlaceholderValueChangingResourceStructure_IsDenied(t *testing.T) {
+	var verified atomic.Bool
+	impl := &testServer{}
+	client, cleanup := startServerWithImpl(t, impl,
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(endpointtest.Func(
+			func(context.Context, string, string) error {
+				verified.Store(true)
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	_, err := client.GetResourceById(bearerCtx("tok"), &testpb.GetResourceByIdRequest{Id: "1.member:2"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	st, _ := status.FromError(err)
+	if st.Code() != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v (an unmapped error must not read as a server fault)", st.Code(), codes.PermissionDenied)
+	}
+	if impl.getResourceByIDCalled.Load() {
+		t.Error("handler was reached for a refused resource value")
+	}
+	if verified.Load() {
+		t.Error("verifier was called with a resource string that should never have been built")
+	}
+}
+
+func TestChain_PlaceholderValueWithinGrammar_IsResolved(t *testing.T) {
+	var capturedResource string
+	impl := &testServer{}
+	client, cleanup := startServerWithImpl(t, impl,
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(endpointtest.Func(
+			func(_ context.Context, resource, _ string) error {
+				capturedResource = resource
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	resp, err := client.GetResourceById(bearerCtx("tok"), &testpb.GetResourceByIdRequest{Id: "42"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Id != "42" {
+		t.Errorf("Id = %q, want %q", resp.Id, "42")
+	}
+	if capturedResource != "resource/42" {
+		t.Errorf("resource = %q, want %q", capturedResource, "resource/42")
+	}
+}

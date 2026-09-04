@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -29,7 +30,11 @@ import (
 )
 
 // testServiceHandler implements the ConnectRPC TestService.
-type testServiceHandler struct{}
+type testServiceHandler struct {
+	// getResourceByIDCalled records whether the handler was reached. Read from
+	// the test goroutine while the server writes it, so it is atomic.
+	getResourceByIDCalled atomic.Bool
+}
 
 func (h *testServiceHandler) GetResource(ctx context.Context, req *connect.Request[testpb.GetResourceRequest]) (*connect.Response[testpb.GetResourceResponse], error) {
 	return connect.NewResponse(&testpb.GetResourceResponse{Id: req.Msg.Id, Name: "test"}), nil
@@ -40,6 +45,7 @@ func (h *testServiceHandler) CreateResource(ctx context.Context, req *connect.Re
 }
 
 func (h *testServiceHandler) GetResourceById(ctx context.Context, req *connect.Request[testpb.GetResourceByIdRequest]) (*connect.Response[testpb.GetResourceResponse], error) {
+	h.getResourceByIDCalled.Store(true)
 	return connect.NewResponse(&testpb.GetResourceResponse{Id: req.Msg.Id, Name: "found"}), nil
 }
 
@@ -49,9 +55,14 @@ func (h *testServiceHandler) HealthCheck(ctx context.Context, req *connect.Reque
 
 func startConnectServer(t *testing.T, interceptorList ...connect.Interceptor) (testpbconnect.TestServiceClient, func()) {
 	t.Helper()
+	return startConnectServerWithImpl(t, &testServiceHandler{}, interceptorList...)
+}
+
+func startConnectServerWithImpl(t *testing.T, impl testpbconnect.TestServiceHandler, interceptorList ...connect.Interceptor) (testpbconnect.TestServiceClient, func()) {
+	t.Helper()
 	mux := http.NewServeMux()
 	path, handler := testpbconnect.NewTestServiceHandler(
-		&testServiceHandler{},
+		impl,
 		connect.WithInterceptors(interceptorList...),
 	)
 	mux.Handle(path, handler)
@@ -246,5 +257,69 @@ func TestConnectChain_NoFieldMappings_NoExtractedFieldsInContext(t *testing.T) {
 	}
 	if fieldsPresent {
 		t.Error("expected no extracted fields in context for method without field_mappings")
+	}
+}
+
+// TestConnectChain_PlaceholderValueChangingResourceStructure_IsDenied is the
+// ConnectRPC half of the resolution refusal: "resource/<id>" with an id of
+// "1.member:2" would name a different resource type to the verifier, so the
+// request is denied before any backend is asked and the handler never runs.
+func TestConnectChain_PlaceholderValueChangingResourceStructure_IsDenied(t *testing.T) {
+	var verified atomic.Bool
+	impl := &testServiceHandler{}
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(endpointtest.Func(
+			func(context.Context, string, string) error {
+				verified.Store(true)
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	req := connect.NewRequest(&testpb.GetResourceByIdRequest{Id: "1.member:2"})
+	req.Header().Set("Authorization", "Bearer tok")
+
+	_, err := client.GetResourceById(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := connect.CodeOf(err); got != connect.CodePermissionDenied {
+		t.Errorf("code = %v, want %v (an unmapped error must not read as a server fault)", got, connect.CodePermissionDenied)
+	}
+	if impl.getResourceByIDCalled.Load() {
+		t.Error("handler was reached for a refused resource value")
+	}
+	if verified.Load() {
+		t.Error("verifier was called with a resource string that should never have been built")
+	}
+}
+
+func TestConnectChain_PlaceholderValueWithinGrammar_IsResolved(t *testing.T) {
+	var capturedResource string
+	client, cleanup := startConnectServer(t,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(endpointtest.Func(
+			func(_ context.Context, resource, _ string) error {
+				capturedResource = resource
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	req := connect.NewRequest(&testpb.GetResourceByIdRequest{Id: "42"})
+	req.Header().Set("Authorization", "Bearer tok")
+
+	resp, err := client.GetResourceById(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Msg.Id != "42" {
+		t.Errorf("Id = %q, want %q", resp.Msg.Id, "42")
+	}
+	if capturedResource != "resource/42" {
+		t.Errorf("resource = %q, want %q", capturedResource, "resource/42")
 	}
 }

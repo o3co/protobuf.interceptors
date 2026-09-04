@@ -59,6 +59,46 @@ RPC request
           handler (your code)
 ```
 
+### Placeholder values
+
+A `<placeholder>` is filled from a request field, which the caller controls, and
+the result is parsed by the authorization backend. So a value is only allowed to
+fill one part of the resource string — never to change its structure.
+
+Resolution refuses a value unless every character of it is in the segment token
+of [auth.policy-verifier]'s dot-notation grammar: **printable ASCII except space,
+`"`, `\`, `.` and `:`**. An empty value is refused too, since it deletes a
+component of the template instead of filling it. `/`, `-`, `_`, `%` and the rest
+of printable ASCII are fine.
+
+`.` and `:` are the structural characters: `.` separates the segments a resource
+type is built from and `:` separates a type from its id. Without the refusal, a
+policy declaring `resource: "posts:<id>"` and a request whose id field carries
+`1.member:2` resolves to `posts:1.member:2`, which the verifier reads as the
+resource type `posts.member` — the decision is taken for a type the RPC was
+never guarding, and the rule that should have gated it never runs.
+
+The refusal happens during resolution, before any backend is called, because
+every backend (o3co, OPA, Cedar, static rules) consumes the same resolved
+string. It surfaces as `*interceptors.ResourceValueError`, which the gRPC and
+ConnectRPC interceptors map to `PermissionDenied` — the request is denied, the
+handler never runs, and the verifier is never asked.
+
+**If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
+dotted version — the request will now be denied where it used to be resolved.
+Either percent-encode the value before it reaches the mapped request field
+(percent-encoding round-trips through the grammar: `1%2Emember` stays one
+segment), or configure a `ResourceParser` on the verifier written for your
+syntax. A field mapping whose placeholder does **not** appear in the resource
+template is not affected — those values are forwarded as request context, where
+the resource grammar does not apply, so a `subscriber_did` mapping keeps working
+unchanged.
+
+Substitution is a single pass over the template: a value that itself spells
+`<some-placeholder>` is left as data, never rewritten by another mapping.
+
+[auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
+
 ## Modules
 
 Three independent Go modules with a deliberate separation of concerns:
@@ -139,6 +179,38 @@ The `endpoint` package provides four backends:
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | Local evaluation |
 
+### o3co endpoint options
+
+| Option | Effect |
+|---|---|
+| `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. |
+| `WithO3coMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. |
+| `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
+| `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. |
+| `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
+
+`WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
+optional `http.callerAuth` gate turned on. That gate expects a shared credential
+in a header of its own (`x-caller-token` by default) and answers a different
+question from the subject bearer token: *which service* may ask for a decision
+at all. Without a way to send it, enabling the gate rejects every Go enforcement
+point with `401 caller_unauthenticated`.
+
+```go
+verifier, err := endpoint.NewO3coEndpoint(
+    "http://localhost:3000",
+    endpoint.WithO3coHeaders(map[string]string{
+        "x-caller-token": os.Getenv("VERIFIER_CALLER_TOKEN"),
+    }),
+)
+```
+
+The headers the endpoint sets itself cannot be overridden here — `Content-Type`,
+`Accept`, `Authorization` and the configured request-ID header. `NewO3coEndpoint`
+returns an error rather than letting a static header quietly replace the subject
+token. (Disabling request-ID forwarding releases that one, since the endpoint
+then no longer sets it.)
+
 All backends implement the `endpoint.VerifierEndpoint` interface:
 
 ```go
@@ -148,6 +220,21 @@ type VerifierEndpoint interface {
 ```
 
 Bearer token and request ID are passed via `context.Context`, set by the framework-specific `VerificationInterceptor`.
+
+## Streaming
+
+A stream is authorized **before its handler is invoked**, on both frameworks —
+a bidirectional or client-streaming handler that sends before it receives, or a
+server-streaming handler that never receives at all, is checked like any other.
+
+On gRPC the check is then repeated on each `RecvMsg`. The resource and action
+are fixed for the life of a stream, so that re-check is not a second opinion on
+the same question: it is what stops delivery on a long-lived stream whose grant
+has been revoked, or whose token expired, since the stream opened.
+
+`field_mappings` are not supported for streaming RPCs — there is no single
+request message to resolve them from — and a streaming method that declares one
+fails with `Internal`.
 
 ## Proto Schema
 

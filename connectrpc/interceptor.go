@@ -107,8 +107,12 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 		} else {
 			resource, action, err = interceptors.ResolveResource(policy, nil)
 		}
+		// Mapped, not blanket-Internal: resolution refuses a request field value
+		// that would change which resource the string names, and that refusal is
+		// a denial rather than a server fault. Anything else still maps to
+		// Internal — an unmapped error must never let the handler run.
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("failed to resolve resource: %w", err))
+			return nil, toConnectError(fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -136,7 +140,9 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 
 		resource, action, err := interceptors.ResolveResource(policy, nil)
 		if err != nil {
-			return connect.NewError(connect.CodeInternal, fmt.Errorf("failed to resolve resource: %w", err))
+			// See WrapUnary: a refused placeholder value is a denial,
+			// everything else is Internal.
+			return toConnectError(fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
