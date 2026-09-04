@@ -59,6 +59,46 @@ RPC request
           handler (your code)
 ```
 
+### Placeholder values
+
+A `<placeholder>` is filled from a request field, which the caller controls, and
+the result is parsed by the authorization backend. So a value is only allowed to
+fill one part of the resource string — never to change its structure.
+
+Resolution refuses a value unless every character of it is in the segment token
+of [auth.policy-verifier]'s dot-notation grammar: **printable ASCII except space,
+`"`, `\`, `.` and `:`**. An empty value is refused too, since it deletes a
+component of the template instead of filling it. `/`, `-`, `_`, `%` and the rest
+of printable ASCII are fine.
+
+`.` and `:` are the structural characters: `.` separates the segments a resource
+type is built from and `:` separates a type from its id. Without the refusal, a
+policy declaring `resource: "posts:<id>"` and a request whose id field carries
+`1.member:2` resolves to `posts:1.member:2`, which the verifier reads as the
+resource type `posts.member` — the decision is taken for a type the RPC was
+never guarding, and the rule that should have gated it never runs.
+
+The refusal happens during resolution, before any backend is called, because
+every backend (o3co, OPA, Cedar, static rules) consumes the same resolved
+string. It surfaces as `*interceptors.ResourceValueError`, which the gRPC and
+ConnectRPC interceptors map to `PermissionDenied` — the request is denied, the
+handler never runs, and the verifier is never asked.
+
+**If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
+dotted version — the request will now be denied where it used to be resolved.
+Either percent-encode the value before it reaches the mapped request field
+(percent-encoding round-trips through the grammar: `1%2Emember` stays one
+segment), or configure a `ResourceParser` on the verifier written for your
+syntax. A field mapping whose placeholder does **not** appear in the resource
+template is not affected — those values are forwarded as request context, where
+the resource grammar does not apply, so a `subscriber_did` mapping keeps working
+unchanged.
+
+Substitution is a single pass over the template: a value that itself spells
+`<some-placeholder>` is left as data, never rewritten by another mapping.
+
+[auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
+
 ## Modules
 
 Three independent Go modules with a deliberate separation of concerns:
