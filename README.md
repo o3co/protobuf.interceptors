@@ -179,6 +179,38 @@ The `endpoint` package provides four backends:
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | Local evaluation |
 
+### o3co endpoint options
+
+| Option | Effect |
+|---|---|
+| `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. |
+| `WithO3coMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. |
+| `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
+| `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. |
+| `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
+
+`WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
+optional `http.callerAuth` gate turned on. That gate expects a shared credential
+in a header of its own (`x-caller-token` by default) and answers a different
+question from the subject bearer token: *which service* may ask for a decision
+at all. Without a way to send it, enabling the gate rejects every Go enforcement
+point with `401 caller_unauthenticated`.
+
+```go
+verifier, err := endpoint.NewO3coEndpoint(
+    "http://localhost:3000",
+    endpoint.WithO3coHeaders(map[string]string{
+        "x-caller-token": os.Getenv("VERIFIER_CALLER_TOKEN"),
+    }),
+)
+```
+
+The headers the endpoint sets itself cannot be overridden here — `Content-Type`,
+`Accept`, `Authorization` and the configured request-ID header. `NewO3coEndpoint`
+returns an error rather than letting a static header quietly replace the subject
+token. (Disabling request-ID forwarding releases that one, since the endpoint
+then no longer sets it.)
+
 All backends implement the `endpoint.VerifierEndpoint` interface:
 
 ```go

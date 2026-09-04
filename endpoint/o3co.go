@@ -35,6 +35,7 @@ type o3coBuildConfig struct {
 	maxResponseBodySize int64
 	logger              *slog.Logger
 	requestIDHeaderKey  string
+	headers             http.Header
 }
 
 // O3coOption configures the o3co endpoint.
@@ -75,6 +76,88 @@ func WithO3coRequestIDHeaderKey(key string) O3coOption {
 	}
 }
 
+// WithO3coHeaders adds static headers to every outgoing verify request. Later
+// calls merge into earlier ones, and win for a header both set.
+//
+// This exists for auth.policy-verifier's optional http.callerAuth gate, which
+// expects a shared credential in a header of its own (x-caller-token by
+// default). That credential answers "may you ask for a decision?", which is a
+// different question from the subject bearer token in Authorization — so
+// turning the gate on requires a header this endpoint would otherwise have no
+// way to send.
+//
+// The headers the endpoint controls itself may not be set here: Content-Type,
+// Accept, Authorization and the request-ID header (see
+// WithO3coRequestIDHeaderKey). NewO3coEndpoint returns an error rather than
+// letting a static header quietly replace the subject token or the content type
+// the verifier is answering. Disabling request-ID forwarding releases that
+// header, since the endpoint then no longer sets it.
+func WithO3coHeaders(headers map[string]string) O3coOption {
+	return func(c *o3coBuildConfig) {
+		if c.headers == nil {
+			c.headers = make(http.Header, len(headers))
+		}
+		for k, v := range headers {
+			c.headers.Set(k, v)
+		}
+	}
+}
+
+// endpointControlledHeaders are the headers Verify sets from its own state, and
+// which a static header therefore must not overwrite. The request-ID header is
+// added to this set at construction, since its name is configurable.
+var endpointControlledHeaders = []string{"Content-Type", "Accept", "Authorization"}
+
+// validateStaticHeaders refuses a static header that would override one of the
+// endpoint's own, or that is not a well-formed header at all. Rejecting CR, LF
+// and NUL in a value here means a bad value fails at construction rather than
+// at the first Verify.
+func validateStaticHeaders(headers http.Header, requestIDHeaderKey string) error {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	controlled := make(map[string]struct{}, len(endpointControlledHeaders)+1)
+	for _, name := range endpointControlledHeaders {
+		controlled[http.CanonicalHeaderKey(name)] = struct{}{}
+	}
+	if requestIDHeaderKey != "" {
+		controlled[http.CanonicalHeaderKey(requestIDHeaderKey)] = struct{}{}
+	}
+
+	for name, values := range headers {
+		if !validHeaderName(name) {
+			return fmt.Errorf("invalid header name %q", name)
+		}
+		if _, isControlled := controlled[http.CanonicalHeaderKey(name)]; isControlled {
+			return fmt.Errorf("header %q is set by the endpoint and must not be overridden", name)
+		}
+		for _, value := range values {
+			if strings.ContainsAny(value, "\r\n\x00") {
+				return fmt.Errorf("invalid value for header %q: control characters are not allowed", name)
+			}
+		}
+	}
+	return nil
+}
+
+// validHeaderName reports whether name is a non-empty RFC 7230 field-name.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // o3coEndpoint implements VerifierEndpoint by calling the o3co auth.policy-verifier REST API.
 type o3coEndpoint struct {
 	httpClient          *http.Client
@@ -82,6 +165,9 @@ type o3coEndpoint struct {
 	maxResponseBodySize int64
 	logger              *slog.Logger
 	requestIDHeaderKey  string
+	// headers are set on every request before the endpoint's own, and are
+	// never mutated after construction.
+	headers http.Header
 }
 
 // NewO3coEndpoint constructs an o3coEndpoint that calls POST {baseURL}/verify.
@@ -113,12 +199,19 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 		opt(cfg)
 	}
 
+	// After every option is applied: the request-ID header name a static header
+	// may collide with is only known once they all have been.
+	if err := validateStaticHeaders(cfg.headers, cfg.requestIDHeaderKey); err != nil {
+		return nil, err
+	}
+
 	return &o3coEndpoint{
 		httpClient:          &http.Client{Timeout: cfg.timeout},
 		verifyURL:           base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,
 		requestIDHeaderKey:  cfg.requestIDHeaderKey,
+		headers:             cfg.headers,
 	}, nil
 }
 
@@ -145,6 +238,14 @@ func (e *o3coEndpoint) Verify(ctx context.Context, resource, action string) erro
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.verifyURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Static headers first, so the endpoint's own always win even though the
+	// constructor already refused a static header that collides with one.
+	for name, values := range e.headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 
 	req.Header.Set("Content-Type", "application/json")

@@ -203,3 +203,123 @@ func TestO3coVerify_WithoutExtractedFields_OmitsContextFromBody(t *testing.T) {
 		t.Error("expected no \"context\" key in request body when no extracted fields are present")
 	}
 }
+
+// --- Static headers ---------------------------------------------------------
+//
+// auth.policy-verifier's optional http.callerAuth gate expects a shared
+// credential in its own header (x-caller-token by default). It answers a
+// different question from the subject bearer token in Authorization: which
+// service may ask for a decision at all.
+
+func TestO3coVerify_WithStaticHeaders_ForwardsThem(t *testing.T) {
+	var callerToken, subjectAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callerToken = r.Header.Get("x-caller-token")
+		subjectAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ep, err := NewO3coEndpoint(srv.URL, WithO3coHeaders(map[string]string{"x-caller-token": "shared-secret"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := ep.Verify(ctxWithToken("subject-token"), "resource", "read"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callerToken != "shared-secret" {
+		t.Errorf("x-caller-token = %q, want %q", callerToken, "shared-secret")
+	}
+	// The caller credential must not displace the subject token.
+	if subjectAuth != "Bearer subject-token" {
+		t.Errorf("Authorization = %q, want %q", subjectAuth, "Bearer subject-token")
+	}
+}
+
+func TestWithO3coHeaders_MergesAcrossCalls(t *testing.T) {
+	var first, second string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first = r.Header.Get("x-caller-token")
+		second = r.Header.Get("x-tenant")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ep, err := NewO3coEndpoint(srv.URL,
+		WithO3coHeaders(map[string]string{"x-caller-token": "one"}),
+		WithO3coHeaders(map[string]string{"x-tenant": "acme"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := ep.Verify(ctxWithToken("tok"), "resource", "read"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if first != "one" || second != "acme" {
+		t.Errorf("headers = (%q, %q), want (%q, %q)", first, second, "one", "acme")
+	}
+}
+
+func TestNewO3coEndpoint_StaticHeaderOverridingAControlledHeader_ReturnsError(t *testing.T) {
+	// Case-insensitively, since HTTP header names are.
+	for _, name := range []string{"Authorization", "authorization", "Content-Type", "content-type", "Accept", "x-request-id", "X-Request-Id"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewO3coEndpoint("http://localhost:3000", WithO3coHeaders(map[string]string{name: "x"}))
+			if err == nil {
+				t.Fatalf("expected an error for header %q, which the endpoint sets itself", name)
+			}
+		})
+	}
+}
+
+// TestNewO3coEndpoint_StaticHeaderCollidesWithCustomRequestIDKey checks the
+// collision is computed against the configured request-ID header, whichever
+// order the options are given in.
+func TestNewO3coEndpoint_StaticHeaderCollidesWithCustomRequestIDKey(t *testing.T) {
+	_, err := NewO3coEndpoint("http://localhost:3000",
+		WithO3coHeaders(map[string]string{"x-trace": "x"}),
+		WithO3coRequestIDHeaderKey("x-trace"),
+	)
+	if err == nil {
+		t.Fatal("expected an error: x-trace is the configured request-ID header")
+	}
+
+	_, err = NewO3coEndpoint("http://localhost:3000",
+		WithO3coRequestIDHeaderKey("x-trace"),
+		WithO3coHeaders(map[string]string{"x-trace": "x"}),
+	)
+	if err == nil {
+		t.Fatal("expected an error regardless of option order")
+	}
+}
+
+// TestNewO3coEndpoint_RequestIDHeaderAllowedWhenForwardingDisabled: with
+// forwarding switched off the endpoint no longer sets that header, so a static
+// one is not an override.
+func TestNewO3coEndpoint_RequestIDHeaderAllowedWhenForwardingDisabled(t *testing.T) {
+	_, err := NewO3coEndpoint("http://localhost:3000",
+		WithO3coRequestIDHeaderKey(""),
+		WithO3coHeaders(map[string]string{"x-request-id": "fixed"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewO3coEndpoint_MalformedStaticHeader_ReturnsError(t *testing.T) {
+	cases := map[string]map[string]string{
+		"empty name":        {"": "v"},
+		"space in name":     {"x caller": "v"},
+		"separator in name": {"x:caller": "v"},
+		"CR in value":       {"x-caller-token": "a\rb"},
+		"LF in value":       {"x-caller-token": "a\nb"},
+		"NUL in value":      {"x-caller-token": "a\x00b"},
+	}
+	for name, headers := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewO3coEndpoint("http://localhost:3000", WithO3coHeaders(headers)); err == nil {
+				t.Fatalf("expected an error for %v", headers)
+			}
+		})
+	}
+}
