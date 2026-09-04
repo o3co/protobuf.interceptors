@@ -95,6 +95,14 @@ func extractOrGenerateRequestID(ctx context.Context) string {
 
 // PolicyOptionInterceptor returns a gRPC UnaryServerInterceptor that reads
 // proto method options and injects the resolved Policy into context.
+//
+// It resolves with interceptors.ResolveResource, so extracted field_mappings
+// values are used to fill the resource template and then discarded — unlike
+// connectrpc.PolicyOptionInterceptor, which forwards them with
+// WithExtractedFields. A field mapping whose placeholder does not appear in the
+// resource template therefore has no effect at all on this path: it is not
+// substituted, and it does not reach the verifier. Pinned by
+// TestChain_FieldMappings_ExtractedFieldsAreNotInContext.
 func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 	_ = newConfig(opts) // reserve for future logging use
 	var cache sync.Map
