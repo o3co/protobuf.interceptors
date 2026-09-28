@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -286,11 +287,99 @@ func TestO3coVerify_OversizedBody_IsNotADecision(t *testing.T) {
 }
 
 // The body may not grant, but it may refuse: a 2xx that says anything but
-// allow is a verifier contradicting itself, and fails closed.
-func TestO3coVerify_2xxWhoseBodySaysDeny_FailsClosed(t *testing.T) {
+// allow is a verifier contradicting itself, and fails closed. The decision it
+// did send is still reported, so an observer can record what it said.
+func TestO3coVerify_2xxWhoseBodySaysDeny_FailsClosedAndReportsTheDecision(t *testing.T) {
 	e := newTestEndpoint(t, serve(t, http.StatusOK, denyWithEvaluation).URL)
-	if err := e.Verify(ctxWithToken("tok"), "r", "a"); err == nil {
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err == nil {
 		t.Fatal("expected an error for a 200 whose decision is deny")
+	}
+	if d == nil || d.Code != "cedar_deny" || len(d.Groups) != 1 {
+		t.Errorf("decision = %+v, want the deny the verifier sent", d)
+	}
+}
+
+// Whatever else is wrong with the body, a decision member that is not allow
+// refuses — an envelope too malformed to report must not be one that grants.
+func TestO3coVerify_2xxWhoseDecisionIsNotAllow_FailsClosed(t *testing.T) {
+	for name, body := range map[string]string{
+		"an unknown verdict":          `{"decision": "maybe"}`,
+		"a null verdict":              `{"decision": null}`,
+		"a verdict of the wrong type": `{"decision": true}`,
+		"a malformed deny":            `{"decision": "deny"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL)
+			d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+			if err == nil {
+				t.Fatalf("expected an error for %s", body)
+			}
+			if d != nil {
+				t.Errorf("decision = %+v, want nil for an envelope that is not whole", d)
+			}
+		})
+	}
+}
+
+// Every key the wire contract requires must be there, and not null, or the
+// body reports nothing — never part of a decision.
+func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testing.T) {
+	const ev = `"evaluation": {"status": "completed", "revision": "` + testDigest + `"}`
+	const outcome = `{"code": "c", "message": "m", "passed": true, ` + ev + `}`
+	const group = `{"ruleType": "cedar", "passed": true, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}`
+	cases := map[string]string{
+		"no resource":                                 `{"action": "a", "decision": "allow", "reason": {"groups": []}}`,
+		"no action":                                   `{"resource": "r", "decision": "allow", "reason": {"groups": []}}`,
+		"no reason":                                   `{"resource": "r", "action": "a", "decision": "allow"}`,
+		"a null reason":                               `{"resource": "r", "action": "a", "decision": "allow", "reason": null}`,
+		"no groups":                                   `{"resource": "r", "action": "a", "decision": "allow", "reason": {}}`,
+		"null groups":                                 `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": null}}`,
+		"a null resource":                             `{"resource": null, "action": "a", "decision": "allow", "reason": {"groups": []}}`,
+		"a group with no ruleType":                    `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"passed": true, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a passing group with no satisfiedBy":         `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [` + outcome + `]}]}}`,
+		"a failing group with a satisfiedBy":          `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": false, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"an outcome with no passed":                   `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m"}], "satisfiedBy": {"code": "c", "message": "m"}}]}}`,
+		"an outcome with a null code":                 `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": null, "message": "m", "passed": true}], "satisfiedBy": {"code": null, "message": "m", "passed": true}}]}}`,
+		"a null evaluation":                           `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m", "passed": true, "evaluation": null}], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": null}}]}}`,
+		"an evaluation with no status":                `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m", "passed": true, "evaluation": {"revision": "` + testDigest + `"}}], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"revision": "` + testDigest + `"}}}]}}`,
+		"a completed evaluation with no revision key": `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed"}}], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed"}}}]}}`,
+		"null determiningPolicies":                    `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": null}}], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": null}}}]}}`,
+		"a passed of the wrong type":                  `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": "yes", "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a JSON array":                                `[` + group + `]`,
+		"JSON null":                                   `null`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL)
+			d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if d != nil {
+				t.Errorf("decision = %+v, want nil", d)
+			}
+		})
+	}
+}
+
+// A deny made without a policy evaluation carries an empty reason: it is a
+// whole decision, whose Groups are empty rather than unknown.
+func TestO3coVerifyDecision_DenyWithNoGroups_IsADecision(t *testing.T) {
+	body := `{"resource": "r", "action": "a", "decision": "deny", "code": "collector_timeout", "message": "m", "reason": {"groups": []}}`
+	e := newTestEndpoint(t, serve(t, http.StatusForbidden, body).URL)
+	d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if d == nil || d.Code != "collector_timeout" || d.Groups == nil || len(d.Groups) != 0 {
+		t.Errorf("decision = %+v, want a deny with an empty, non-nil reason", d)
+	}
+}
+
+// The largest bound there is still reads the body.
+func TestO3coVerify_MaximalBodySizeBound_StillReadsTheBody(t *testing.T) {
+	e := newTestEndpoint(t, serve(t, http.StatusOK, allowWithEvaluation).URL, WithO3coMaxResponseBodySize(math.MaxInt64))
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err != nil || d == nil {
+		t.Errorf("VerifyDecision = (%+v, %v), want the decision", d, err)
 	}
 }
 

@@ -17,6 +17,7 @@ package endpoint
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"regexp"
 	"strings"
@@ -189,5 +190,95 @@ func TestWireContract_DenyCarriesItsCode(t *testing.T) {
 	}
 	if status := c.Status["deny"]; status != http.StatusForbidden {
 		t.Errorf("the contract's deny status is %d; this endpoint reads a denial from 403", status)
+	}
+}
+
+// An envelope missing any key the contract requires — or holding null where
+// the contract types a value — is not a decision, at every level. Only a
+// revision may be null: that is the explicit unknown.
+func TestWireContract_AnEnvelopeMissingARequiredKeyIsNotADecision(t *testing.T) {
+	c := wirecontract.Load(t)
+	ev := c.Evaluation.Evaluated
+
+	build := func(verdict string) map[string]any {
+		evaluation := fill(t, "an evaluation", ev.Required, map[string]any{"status": "completed", "revision": testDigest})
+		outcome := func() map[string]any {
+			o := fill(t, "a rule outcome", c.RuleOutcome.Required, map[string]any{"code": "c", "message": "m", "passed": verdict == "allow"})
+			o["evaluation"] = maps.Clone(evaluation)
+			return o
+		}
+		groupKeys := c.RuleGroup.Required
+		if verdict == "allow" {
+			groupKeys = append(append([]string{}, groupKeys...), c.RuleGroup.OnlyOnAPassingGroup...)
+		}
+		group := fill(t, "a rule group", groupKeys, map[string]any{
+			"ruleType": "cedar", "passed": verdict == "allow", "evaluated": []any{outcome()}, "satisfiedBy": outcome(),
+		})
+		keys := c.Decision.Required
+		if verdict == "deny" {
+			keys = append(append([]string{}, keys...), c.Decision.DenyAlsoCarries...)
+		}
+		return fill(t, "a decision", keys, map[string]any{
+			"resource": "r", "action": "a", "decision": verdict, "code": "c", "message": "m",
+			"reason": map[string]any{"groups": []any{group}},
+		})
+	}
+	group := func(env map[string]any) map[string]any {
+		return env["reason"].(map[string]any)["groups"].([]any)[0].(map[string]any)
+	}
+	outcome := func(env map[string]any) map[string]any {
+		return group(env)["evaluated"].([]any)[0].(map[string]any)
+	}
+	evaluation := func(env map[string]any) map[string]any {
+		return outcome(env)["evaluation"].(map[string]any)
+	}
+
+	type level struct {
+		name string
+		at   func(map[string]any) map[string]any
+		keys []string
+	}
+	for _, verdict := range []string{"allow", "deny"} {
+		status := c.Status[verdict]
+		topKeys := c.Decision.Required
+		if verdict == "deny" {
+			topKeys = append(append([]string{}, topKeys...), c.Decision.DenyAlsoCarries...)
+		}
+		levels := []level{
+			{"decision", func(env map[string]any) map[string]any { return env }, topKeys},
+			{"rule group", group, c.RuleGroup.Required},
+			{"rule outcome", outcome, c.RuleOutcome.Required},
+			{"evaluation", evaluation, ev.Required},
+		}
+
+		// The unmutated envelope is a decision, or the cases below prove nothing.
+		e := newTestEndpoint(t, serve(t, status, mustJSON(t, build(verdict))).URL)
+		if d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a"); d == nil {
+			t.Fatalf("%s: the whole envelope did not decode", verdict)
+		}
+
+		for _, l := range levels {
+			for _, key := range l.keys {
+				for _, mutation := range []string{"missing", "null"} {
+					if mutation == "null" && key == "revision" {
+						continue
+					}
+					t.Run(verdict+"/"+l.name+"/"+key+"/"+mutation, func(t *testing.T) {
+						env := build(verdict)
+						target := l.at(env)
+						if mutation == "missing" {
+							delete(target, key)
+						} else {
+							target[key] = nil
+						}
+						e := newTestEndpoint(t, serve(t, status, mustJSON(t, env)).URL)
+						d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+						if d != nil {
+							t.Errorf("decision = %+v, want nil", d)
+						}
+					})
+				}
+			}
+		}
 	}
 }

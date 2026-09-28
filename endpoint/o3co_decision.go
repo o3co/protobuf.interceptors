@@ -68,19 +68,140 @@ type wireEvaluation struct {
 	DeterminingPoliciesOmitted int      `json:"determiningPoliciesOmitted"`
 }
 
-// parseDecision reads body as a decision or error envelope. It returns nil for
-// anything else — empty, not JSON, a value of the wrong type anywhere, or no
-// decision at all — so that a body that is not a decision reports nothing
-// rather than part of one.
-func parseDecision(body []byte) *wireDecision {
-	if len(body) == 0 {
+// envelopeKind is which envelope a status answers with.
+type envelopeKind int
+
+const (
+	// decisionEnvelope is a 2xx or 403: the verdict and the reason behind it.
+	decisionEnvelope envelopeKind = iota
+	// errorEnvelope is any other status: decision, code and message.
+	errorEnvelope
+)
+
+// decodeObject decodes body as a JSON object, and reports whether it is one.
+func decodeObject(body []byte) (map[string]any, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
+}
+
+// parseEnvelope reads body, decoded as obj, as an envelope of kind. It returns
+// nil unless every key the wire contract requires of that kind is there, none
+// is null where the contract types a value, and each has the right type — so
+// that a body that is not a whole envelope reports nothing rather than part of
+// one.
+func parseEnvelope(body []byte, obj map[string]any, kind envelopeKind) *wireDecision {
+	valid := false
+	switch kind {
+	case decisionEnvelope:
+		valid = validDecision(obj)
+	case errorEnvelope:
+		valid = present(obj, "decision", "code", "message")
+	}
+	if !valid {
 		return nil
 	}
+	// Presence is checked above; the typed decode checks every value's type.
 	var w wireDecision
-	if err := json.Unmarshal(body, &w); err != nil || w.Decision == "" {
+	if err := json.Unmarshal(body, &w); err != nil {
 		return nil
 	}
 	return &w
+}
+
+// present reports whether obj holds each of keys, none of them null.
+func present(obj map[string]any, keys ...string) bool {
+	for _, k := range keys {
+		if v, ok := obj[k]; !ok || v == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func validDecision(obj map[string]any) bool {
+	if !present(obj, "resource", "action", "decision", "reason") {
+		return false
+	}
+	switch obj["decision"] {
+	case "allow":
+	case "deny":
+		if !present(obj, "code", "message") {
+			return false
+		}
+	default:
+		return false
+	}
+	reason, ok := obj["reason"].(map[string]any)
+	if !ok {
+		return false
+	}
+	groups, ok := reason["groups"].([]any)
+	if !ok {
+		return false
+	}
+	for _, g := range groups {
+		if !validGroup(g) {
+			return false
+		}
+	}
+	return true
+}
+
+func validGroup(v any) bool {
+	g, ok := v.(map[string]any)
+	if !ok || !present(g, "ruleType", "passed", "evaluated") {
+		return false
+	}
+	evaluated, ok := g["evaluated"].([]any)
+	if !ok {
+		return false
+	}
+	for _, o := range evaluated {
+		if !validOutcome(o) {
+			return false
+		}
+	}
+	// satisfiedBy marks a pass: a passing group names the rule that satisfied
+	// it, and a failing one, where every alternative refused, names none.
+	satisfiedBy, has := g["satisfiedBy"]
+	if g["passed"] == true {
+		return has && validOutcome(satisfiedBy)
+	}
+	return !has
+}
+
+func validOutcome(v any) bool {
+	o, ok := v.(map[string]any)
+	if !ok || !present(o, "code", "message", "passed") {
+		return false
+	}
+	evaluation, has := o["evaluation"]
+	return !has || validEvaluation(evaluation)
+}
+
+func validEvaluation(v any) bool {
+	e, ok := v.(map[string]any)
+	if !ok || !present(e, "status") {
+		return false
+	}
+	for _, k := range []string{"loadedRevision", "determiningPolicies", "determiningPoliciesOmitted"} {
+		if x, has := e[k]; has && x == nil {
+			return false
+		}
+	}
+	switch e["status"] {
+	case string(interceptors.EvaluationCompleted), string(interceptors.EvaluationFailed):
+		// An evaluated answer always names its revision, and null is one: the
+		// explicit unknown.
+		_, has := e["revision"]
+		return has
+	}
+	// not_invoked carries nothing else, and a status added after this library
+	// was written is passed through as it came.
+	return true
 }
 
 // toDecision converts w, sent with requestID, to the library's decision. A

@@ -345,10 +345,12 @@ request ID, so the two records join on it. The verifier keeps an
 `[A-Za-z0-9-_.:+/=#]`; an ID outside that shape reaches it as none, and joins
 nothing.
 
-The HTTP status still decides. A body that is empty, not a decision, malformed
-anywhere, or larger than `WithO3coMaxResponseBodySize` reports nothing and
-leaves the verdict to the status. The body can refuse but never grant: a `2xx`
-whose decision is anything but `allow` fails closed.
+The HTTP status still decides. A body that is empty, not a decision, missing a
+key the verifier's contract requires, null or mistyped anywhere it types a
+value, or larger than `WithO3coMaxResponseBodySize` reports nothing and leaves
+the verdict to the status. The body can refuse but never grant: a `2xx` whose
+`decision` is anything but `allow` fails closed, however malformed the rest of
+it is, and a whole deny sent that way is still reported to the observer.
 
 ### Requiring a confirmed revision
 

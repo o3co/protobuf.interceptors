@@ -37,7 +37,8 @@ func (e *UnauthenticatedError) Error() string { return e.Reason }
 // Decision.RevisionConfirmed). Only an endpoint configured to require them
 // returns it. It is not a denial — the backend allowed, and the service could
 // not establish what the allow rests on — so the framework interceptors map
-// it to Internal, and its message says nothing of the decision.
+// it to Internal. Its message reaches the RPC caller, so it says nothing of
+// the decision, nor that a revision was required.
 type UnconfirmedRevisionError struct {
 	// Decision is the allow that was not accepted, nil when the backend
 	// reported none at all.
@@ -45,7 +46,7 @@ type UnconfirmedRevisionError struct {
 }
 
 func (e *UnconfirmedRevisionError) Error() string {
-	return "authorization decision carries no confirmed policy revision"
+	return "authorization decision could not be accepted"
 }
 
 // ResourceValueError reports a request field value that must not be

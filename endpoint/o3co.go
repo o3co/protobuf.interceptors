@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -256,11 +257,12 @@ func (e *o3coEndpoint) Verify(ctx context.Context, resource, action string) erro
 // VerifyDecision is Verify, and also returns the decision the verifier sent.
 //
 // The HTTP status decides; the body only adds to it. A 2xx is an allow and a
-// 403 a deny whatever the body holds, except that a 2xx whose body is a
-// decision other than allow fails closed. A body that is empty, not a
-// decision, malformed anywhere or past the size bound reports nothing: the
-// decision is nil and the verdict is the status's alone. On a deny the
-// decision is also on the *interceptors.DeniedError.
+// 403 a deny whatever the body holds, except that a 2xx whose decision member
+// is anything but allow fails closed — returning the decision when the body
+// is a whole one. A body that is empty, not a whole envelope as the wire
+// contract defines it, or past the size bound reports nothing: the decision
+// is nil and the verdict is the status's alone. On a deny the decision is also
+// on the *interceptors.DeniedError.
 func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action string) (*interceptors.Decision, error) {
 	// --- Retrieve bearer token from context -----------------------------------
 	token, err := getBearerToken(ctx)
@@ -314,24 +316,37 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	// Read response body up to maxResponseBodySize bytes (memory protection).
 	// One byte more tells a body at the bound from one past it, which is not
 	// read as a decision: a truncated decision would be part of one.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize+1))
+	limit := e.maxResponseBodySize
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		e.logger.Error("failed to read response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}
-	var wire *wireDecision
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
+	var (
+		obj  map[string]any
+		wire *wireDecision
+	)
 	if int64(len(respBody)) > e.maxResponseBodySize {
 		respBody = respBody[:e.maxResponseBodySize]
 		e.logger.Debug("response body exceeds the size bound; not read as a decision", "status", resp.StatusCode, "x-request-id", requestID)
-	} else {
-		wire = parseDecision(respBody)
+	} else if o, ok := decodeObject(respBody); ok {
+		obj = o
+		kind := errorEnvelope
+		if success || resp.StatusCode == http.StatusForbidden {
+			kind = decisionEnvelope
+		}
+		wire = parseEnvelope(respBody, obj, kind)
 	}
 
 	e.logger.Debug("response received", "status", resp.StatusCode, "x-request-id", requestID)
 
 	// --- Evaluate based on status code ----------------------------------------
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return e.acceptAllow(wire, resp.StatusCode, requestID)
+	if success {
+		return e.acceptAllow(obj, wire, resp.StatusCode, requestID)
 	}
 
 	// The body — reason, evaluations, policy ids — stays off the default
@@ -365,13 +380,17 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	return nil, fmt.Errorf("authorization service error: %d", resp.StatusCode)
 }
 
-// acceptAllow decides what a 2xx answer, carrying wire, amounts to.
-func (e *o3coEndpoint) acceptAllow(wire *wireDecision, status int, requestID string) (*interceptors.Decision, error) {
-	if wire != nil && wire.Decision != "allow" {
-		e.logger.Error("authorization server answered a success status with a decision other than allow", "status", status, "decision", wire.Decision, "x-request-id", requestID)
-		return nil, fmt.Errorf("authorization service error: %d with a decision other than allow", status)
-	}
+// acceptAllow decides what a 2xx answer amounts to. obj is its body decoded,
+// nil when the body is not a JSON object within the size bound, and wire the
+// envelope read from it, nil when it is not a whole one.
+func (e *o3coEndpoint) acceptAllow(obj map[string]any, wire *wireDecision, status int, requestID string) (*interceptors.Decision, error) {
 	decision := wire.toDecision(requestID)
+	// Read from obj rather than wire: a body too malformed to be an envelope
+	// still refuses when its verdict is anything but allow.
+	if verdict, claimed := obj["decision"]; claimed && verdict != "allow" {
+		e.logger.Error("authorization server answered a success status with a decision other than allow", "status", status, "x-request-id", requestID)
+		return decision, fmt.Errorf("authorization service error: %d with a decision other than allow", status)
+	}
 	if e.requireConfirmedRevision && !decision.RevisionConfirmed() {
 		if !carriesEvaluation(decision) {
 			e.noEvaluationHint.Do(func() {

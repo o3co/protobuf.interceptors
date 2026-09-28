@@ -157,7 +157,9 @@ func TestDecisionErrors_DoNotCarryTheDecisionInTheirMessage(t *testing.T) {
 	}
 	for _, err := range errs {
 		msg := err.Error()
-		for _, leak := range []string{"cedar_deny", "Denied by Cedar policy", "req-1", "sha256", "9f2c"} {
+		// Nor that the service requires a revision: the caller learns only
+		// that the check failed.
+		for _, leak := range []string{"cedar_deny", "Denied by Cedar policy", "req-1", "sha256", "9f2c", "revision"} {
 			if strings.Contains(msg, leak) {
 				t.Errorf("%T.Error() = %q, which carries %q from the decision", err, msg, leak)
 			}
