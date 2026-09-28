@@ -24,6 +24,7 @@ const (
 	ctxKeyBearerToken     ctxKey = "o3:bearer_token"
 	ctxKeyRequestID       ctxKey = "o3:request_id"
 	ctxKeyExtractedFields ctxKey = "o3:extracted_fields"
+	ctxKeyDecision        ctxKey = "o3:decision"
 )
 
 // PolicyData holds the resolved authorization policy for an RPC method.

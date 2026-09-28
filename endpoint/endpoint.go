@@ -14,9 +14,35 @@
 
 package endpoint
 
-import "context"
+import (
+	"context"
+
+	interceptors "github.com/o3co/protobuf.interceptors"
+)
 
 // VerifierEndpoint is the interface for policy verification endpoints.
 type VerifierEndpoint interface {
 	Verify(ctx context.Context, resource, action string) error
+}
+
+// DecisionVerifier is a VerifierEndpoint that can also report the decision
+// behind its verdict. The verification interceptors use VerifyDecision when an
+// endpoint implements it, and hand the decision to the service; an endpoint
+// that implements only VerifierEndpoint keeps working and reports nothing.
+type DecisionVerifier interface {
+	VerifierEndpoint
+	// VerifyDecision is Verify, and also returns what the backend reported
+	// behind the verdict. The error is exactly what Verify returns. The
+	// decision may be nil with either outcome: nil means the backend reported
+	// nothing, which is unknown.
+	VerifyDecision(ctx context.Context, resource, action string) (*interceptors.Decision, error)
+}
+
+// VerifyWithDecision calls v.VerifyDecision when v is a DecisionVerifier, and
+// v.Verify with a nil decision otherwise.
+func VerifyWithDecision(ctx context.Context, v VerifierEndpoint, resource, action string) (*interceptors.Decision, error) {
+	if dv, ok := v.(DecisionVerifier); ok {
+		return dv.VerifyDecision(ctx, resource, action)
+	}
+	return nil, v.Verify(ctx, resource, action)
 }
