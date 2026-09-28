@@ -1,0 +1,37 @@
+name: govulncheck
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  schedule:
+    # Weekly, so an advisory published against an unchanged tree still surfaces.
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck (${{ matrix.module.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: core, dir: . }
+          - { name: grpc, dir: grpc }
+          - { name: connectrpc, dir: connectrpc }
+    defaults:
+      run:
+        working-directory: ${{ matrix.module.dir }}
+    steps:
+      - uses: actions/checkout@v7
+      # The latest stable toolchain, so the scan reports this module's own
+      # dependency graph. Standard library findings belong to whichever
+      # toolchain a consumer builds with, which this repository does not choose.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

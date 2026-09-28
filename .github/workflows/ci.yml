@@ -6,60 +6,54 @@ on:
   pull_request:
     branches: [develop, main]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  contents: read
 
 jobs:
-  core:
+  test:
+    name: test (${{ matrix.module.name }}, ${{ matrix.go }})
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: go vet ./...
-      - run: go test ./... -count=1
-
-  grpc:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - { name: core, dir: . }
+          - { name: grpc, dir: grpc }
+          - { name: connectrpc, dir: connectrpc }
+        # "minimum" is the module's go directive, the oldest toolchain a
+        # consumer may build with; oldstable and stable are the two releases
+        # the Go team still supports.
+        go: [minimum, oldstable, stable]
     defaults:
       run:
-        working-directory: grpc
+        working-directory: ${{ matrix.module.dir }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: grpc/go.mod
-      - run: go vet ./...
-      - run: go test ./... -count=1
-
-  connectrpc:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: connectrpc
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: connectrpc/go.mod
+          go-version: ${{ matrix.go != 'minimum' && matrix.go || '' }}
+          go-version-file: ${{ matrix.go == 'minimum' && format('{0}/go.mod', matrix.module.dir) || '' }}
+      - run: go version
       - run: go vet ./...
       - run: go test ./... -count=1
 
   proto-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "34.0"
-          # Resolves the protoc release through the GitHub API; without a
-          # token that call is rate-limited per runner IP and fails at random.
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        # From the release asset rather than a setup action: there is no API
+        # lookup to be rate-limited, and no action runtime to fall out of support.
+        env:
+          PROTOC_VERSION: "34.0"
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/protoc.zip" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
       - name: Install protoc-gen-go
         run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10
       - name: Generate
