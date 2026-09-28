@@ -6,7 +6,7 @@ replace github.com/o3co/protobuf.interceptors => ../
 
 require (
 	github.com/o3co/protobuf.interceptors v0.3.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
 
