@@ -1,0 +1,49 @@
+name: wire contract
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  schedule:
+    # Weekly, also against the verifier's develop, so a contract change
+    # surfaces before the pin moves to the release that carries it.
+    - cron: "41 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  # The auth.policy-verifier release the o3co endpoint is held to. Move it in
+  # the same change that follows a new contract.
+  VERIFIER_RELEASE: v0.15.0
+
+jobs:
+  wire-contract:
+    name: wire contract (auth.policy-verifier ${{ matrix.verifier-ref }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        verifier-ref: ${{ github.event_name == 'schedule' && fromJSON('["release", "develop"]') || fromJSON('["release"]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: o3co/auth.policy-verifier
+          ref: ${{ matrix.verifier-ref == 'release' && env.VERIFIER_RELEASE || 'develop' }}
+          path: .verifier
+          sparse-checkout: tests/integration/src/conformance/fixtures/wireContract
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test against the wire contract
+        env:
+          O3CO_VERIFIER_WIRE_CONTRACT: ${{ github.workspace }}/.verifier/tests/integration/src/conformance/fixtures/wireContract
+        run: |
+          go test ./... -run WireContract -count=1 -v | tee "$RUNNER_TEMP/wire-contract.txt"
+          # A skipped contract test is one that never read the contract.
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/wire-contract.txt"; then
+            echo "::error::a wire contract test was skipped"
+            exit 1
+          fi

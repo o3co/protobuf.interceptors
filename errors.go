@@ -16,7 +16,11 @@ package interceptors
 
 // DeniedError indicates that the authorization check denied the request.
 type DeniedError struct {
+	// Reason is what the RPC caller is told. It never carries the decision.
 	Reason string
+	// Decision is what the backend reported behind the denial, nil when it
+	// reported nothing. It is for the service and never reaches the caller.
+	Decision *Decision
 }
 
 func (e *DeniedError) Error() string { return e.Reason }
@@ -27,6 +31,23 @@ type UnauthenticatedError struct {
 }
 
 func (e *UnauthenticatedError) Error() string { return e.Reason }
+
+// UnconfirmedRevisionError reports an allow that was not accepted because it
+// is not established against confirmed policy revisions (see
+// Decision.RevisionConfirmed). Only an endpoint configured to require them
+// returns it. It is not a denial — the backend allowed, and the service could
+// not establish what the allow rests on — so the framework interceptors map
+// it to Internal. Its message reaches the RPC caller, so it says nothing of
+// the decision, nor that a revision was required.
+type UnconfirmedRevisionError struct {
+	// Decision is the allow that was not accepted, nil when the backend
+	// reported none at all.
+	Decision *Decision
+}
+
+func (e *UnconfirmedRevisionError) Error() string {
+	return "authorization decision could not be accepted"
+}
 
 // ResourceValueError reports a request field value that must not be
 // substituted into a resource template.

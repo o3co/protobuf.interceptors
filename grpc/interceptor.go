@@ -37,6 +37,7 @@ type Option func(*config)
 
 type config struct {
 	logLevel slog.Level
+	observer interceptors.DecisionObserver
 }
 
 // WithLogLevel sets the log level for the interceptor's internal logger.
@@ -44,6 +45,33 @@ func WithLogLevel(level slog.Level) Option {
 	return func(c *config) {
 		c.logLevel = level
 	}
+}
+
+// WithDecisionObserver has a verification interceptor hand every
+// authorization check it makes to fn, allowed or not (see
+// interceptors.DecisionObserver). The policy option interceptors ignore it.
+func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
+	return func(c *config) {
+		c.observer = fn
+	}
+}
+
+// verify runs one authorization check and hands it to the observer, if any.
+func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string) (*interceptors.Decision, error) {
+	decision, err := endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+	if c.observer != nil {
+		c.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
+	}
+	return decision, err
+}
+
+// withDecision puts an allowing decision on the handler's context. An
+// endpoint that reported nothing leaves nothing there.
+func withDecision(ctx context.Context, d *interceptors.Decision) context.Context {
+	if d == nil {
+		return ctx
+	}
+	return interceptors.WithDecision(ctx, d)
 }
 
 func newConfig(opts []Option) *config {
@@ -147,12 +175,18 @@ func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 
 // VerificationInterceptor returns a gRPC UnaryServerInterceptor that reads
 // Policy from context and calls the verifier endpoint.
+//
+// When the endpoint is an endpoint.DecisionVerifier, the decision that allowed
+// the RPC is on the handler's context (interceptors.DecisionFromContext), and
+// WithDecisionObserver receives every check, denied ones included. Nothing of
+// a decision reaches the RPC caller's error.
+//
 // Panics if verifier is nil.
 func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option) grpc.UnaryServerInterceptor {
 	if verifier == nil {
 		panic("VerificationInterceptor: verifier must not be nil")
 	}
-	_ = newConfig(opts) // reserve for future logging use
+	cfg := newConfig(opts)
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		// Extract and store bearer token from incoming metadata.
@@ -176,10 +210,11 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 		}
 
 		// Call the verifier endpoint.
-		if err := verifier.Verify(ctx, policyData.Resource, policyData.Action); err != nil {
+		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
+		if err != nil {
 			return nil, toGRPCError(err)
 		}
 
-		return handler(ctx, req)
+		return handler(withDecision(ctx, decision), req)
 	}
 }

@@ -231,6 +231,7 @@ The `endpoint` package provides four backends:
 | `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. |
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
+| `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
 optional `http.callerAuth` gate turned on. That gate expects a shared credential
@@ -254,6 +255,13 @@ returns an error rather than letting a static header quietly replace the subject
 token. (Disabling request-ID forwarding releases that one, since the endpoint
 then no longer sets it.)
 
+The verifier answers `401` both for a bad subject token and for a refused caller
+credential. The endpoint tells them apart by the response's `code`: a
+`caller_unauthenticated` refusal returns `endpoint.ErrCallerUnauthenticated`,
+which the interceptors map to `Internal` — a missing or rotated caller token is
+this service's fault, and the RPC caller must not be told its own token is
+invalid. Every other `401` is still an `UnauthenticatedError`.
+
 All backends implement the `endpoint.VerifierEndpoint` interface:
 
 ```go
@@ -270,6 +278,98 @@ it forwards the extracted `field_mappings` values as the `context` object of
 `POST /verify`, when a framework put them there. OPA, Cedar and the static
 endpoint decide on resource and action alone — see
 [Extracted field forwarding](#extracted-field-forwarding).
+
+## Recording the decision
+
+A service that must record *why* an operation was allowed or denied — which
+rule decided, and which policy revision — gets the verifier's decision without
+parsing HTTP. Only the o3co endpoint reports one (it implements
+`endpoint.DecisionVerifier`); OPA, Cedar, the static endpoint and any
+`VerifierEndpoint` of your own report nothing, which reads as unknown.
+
+**In the handler.** When an RPC is allowed, the decision is on the handler's
+context. For a stream it is the decision that opened the stream:
+
+```go
+if d, ok := interceptors.DecisionFromContext(ctx); ok {
+    record(d.RequestID, d.Groups) // alongside the operation it authorized
+}
+```
+
+**For every check, denials included.** A denied RPC's handler never runs, so
+the verification interceptors also take an observer. It sees every check — on
+gRPC streams, the opening check and each `RecvMsg` re-check — with the
+endpoint's error before it is mapped for the caller:
+
+```go
+observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
+    // ev.Resource, ev.Action; ev.Decision (nil when nothing was reported);
+    // ev.Err (nil when allowed; errors.As finds *interceptors.DeniedError)
+}
+policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(observe))
+policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
+```
+
+On a denial the decision is also on `DeniedError.Decision`, with the verifier's
+deny `code` in `Decision.Code`.
+
+**Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
+when a policy set changed and whether a denial was the engine failing. The
+caller still gets `PermissionDenied: access denied`, and no error this library
+returns carries a decision in its message. The endpoint no longer logs response
+bodies at its default level either — the error line names the status and the
+code, and the body is at `Debug`.
+
+**What each rule reported.** A policy-backed rule's outcome carries an
+`Evaluation`, but only when the verifier sets
+`verify.evaluationInResponse = "include"`:
+
+| Verifier sent | `RuleOutcome.Evaluation` | `ConfirmedRevision()` |
+|---|---|---|
+| `{ "status": "completed", "revision": "sha256:…" }` | `Status: EvaluationCompleted`, `Revision` set | the revision, `true` |
+| `{ "status": "completed", "revision": null, "loadedRevision": "…" }` | `Status: EvaluationCompleted`, `Revision: ""`, `LoadedRevision` set | `false` — what ran is not established |
+| `{ "status": "failed", … }` | `Status: EvaluationFailed` | `false` — the rule failed closed |
+| `{ "status": "not_invoked" }` | `Status: EvaluationNotInvoked` | `false` — nothing was evaluated |
+| no `evaluation` | `nil` | `false` — unknown |
+
+The last row is what an older verifier, one that has not opted in, and a rule
+with no policy source all send: absence means unknown, and all three look the
+same. A completed evaluation may also name `DeterminingPolicies` — the permits
+that applied to an allow, the forbids that applied to a deny.
+
+The verifier's own advice on what to store applies here: for each operation, the
+verdict, the deny code, the reason with each evaluation, and the request ID
+that was sent (`Decision.RequestID`). Its `decision` log event carries the same
+request ID, so the two records join on it. The verifier keeps an
+`x-request-id` only if it is at most 128 characters of
+`[A-Za-z0-9-_.:+/=#]`; an ID outside that shape reaches it as none, and joins
+nothing.
+
+The HTTP status still decides. A body that is empty, not a decision, missing a
+key the verifier's contract requires, null or mistyped anywhere it types a
+value, or larger than `WithO3coMaxResponseBodySize` reports nothing and leaves
+the verdict to the status. The body can refuse but never grant: a `2xx` whose
+`decision` is anything but `allow` fails closed, however malformed the rest of
+it is, and a whole deny sent that way is still reported to the observer.
+
+### Requiring a confirmed revision
+
+`WithO3coRequireConfirmedRevision()` refuses an allow unless it is established
+against confirmed revisions (`Decision.RevisionConfirmed()`). That means every
+group passed, and the rule that satisfied each group — its `satisfiedBy` —
+reports a completed evaluation with a well-formed revision. Alternatives tried
+before the satisfying rule are not consulted. A refused allow returns
+`*interceptors.UnconfirmedRevisionError`, which the interceptors map to
+`Internal`: the verifier allowed, and the service could not establish what that
+rests on. Denials are unaffected.
+
+Against a verifier that has not set `evaluationInResponse = "include"`, this
+refuses **every** allow. It also refuses any allow that a rule without a policy
+source satisfied, so it suits deployments whose every rule group is
+policy-backed. The verifier cannot say which it is before a decision is
+requested, so this is not checked at construction. Instead, the first refused
+allow whose response carried no evaluation at all logs one error naming the
+setting.
 
 ## Streaming
 
@@ -329,6 +429,26 @@ custom := endpointtest.Func(func(ctx context.Context, resource, action string) e
     // custom logic
     return nil
 })
+
+// A DecisionVerifier, for testing what your handler or observer does with a decision.
+deciding := endpointtest.Decide(func(ctx context.Context, resource, action string) (*interceptors.Decision, error) {
+    return &interceptors.Decision{RequestID: "req-1"}, nil
+})
+```
+
+### Wire contract tests
+
+The o3co endpoint is tested against auth.policy-verifier's wire contract as the
+verifier publishes it, in
+[`tests/integration/src/conformance/fixtures/wireContract`](https://github.com/o3co/auth.policy-verifier/tree/develop/tests/integration/src/conformance/fixtures/wireContract),
+rather than against a copy of it. CI checks the verifier out at the release
+pinned in `.github/workflows/wire-contract.yml`. To run the tests locally, point
+`O3CO_VERIFIER_WIRE_CONTRACT` at that directory in a checkout; without it they
+are skipped:
+
+```sh
+O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/conformance/fixtures/wireContract \
+  go test ./... -run WireContract
 ```
 
 ## License
