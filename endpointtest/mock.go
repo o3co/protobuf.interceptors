@@ -47,3 +47,25 @@ func Deny() endpoint.VerifierEndpoint {
 func Func(fn func(ctx context.Context, resource, action string) error) endpoint.VerifierEndpoint {
 	return &mockVerifier{fn: fn}
 }
+
+type mockDecisionVerifier struct {
+	fn func(ctx context.Context, resource, action string) (*interceptors.Decision, error)
+}
+
+func (m *mockDecisionVerifier) Verify(ctx context.Context, resource, action string) error {
+	_, err := m.fn(ctx, resource, action)
+	return err
+}
+
+func (m *mockDecisionVerifier) VerifyDecision(ctx context.Context, resource, action string) (*interceptors.Decision, error) {
+	return m.fn(ctx, resource, action)
+}
+
+// Decide returns a DecisionVerifier that calls fn on each check, for testing
+// what a service does with the decision: the handler reads it with
+// interceptors.DecisionFromContext, and a DecisionObserver receives it. A
+// denial should be returned as a *interceptors.DeniedError carrying the same
+// decision, as the o3co endpoint returns it.
+func Decide(fn func(ctx context.Context, resource, action string) (*interceptors.Decision, error)) endpoint.DecisionVerifier {
+	return &mockDecisionVerifier{fn: fn}
+}

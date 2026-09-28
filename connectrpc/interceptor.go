@@ -157,19 +157,57 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 	}
 }
 
+// Option configures VerificationInterceptor.
+type Option func(*verificationInterceptor)
+
+// WithDecisionObserver has VerificationInterceptor hand every authorization
+// check it makes to fn, allowed or not (see interceptors.DecisionObserver).
+func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
+	return func(v *verificationInterceptor) {
+		v.observer = fn
+	}
+}
+
 // verificationInterceptor implements connect.Interceptor for VerificationInterceptor.
 type verificationInterceptor struct {
 	verifier endpoint.VerifierEndpoint
+	observer interceptors.DecisionObserver
 }
 
 // VerificationInterceptor returns a ConnectRPC Interceptor that reads Policy
 // from context and calls the verifier endpoint.
+//
+// When the endpoint is an endpoint.DecisionVerifier, the decision that allowed
+// the RPC is on the handler's context (interceptors.DecisionFromContext), and
+// WithDecisionObserver receives every check, denied ones included. Nothing of
+// a decision reaches the RPC caller's error.
+//
 // Panics if verifier is nil.
-func VerificationInterceptor(verifier endpoint.VerifierEndpoint) connect.Interceptor {
+func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option) connect.Interceptor {
 	if verifier == nil {
 		panic("VerificationInterceptor: verifier must not be nil")
 	}
-	return &verificationInterceptor{verifier: verifier}
+	v := &verificationInterceptor{verifier: verifier}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
+}
+
+// verify runs one authorization check, hands it to the observer, if any, and
+// returns the context the handler runs with.
+func (v *verificationInterceptor) verify(ctx context.Context, resource, action string) (context.Context, error) {
+	decision, err := endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+	if v.observer != nil {
+		v.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
+	}
+	if err != nil {
+		return ctx, err
+	}
+	if decision != nil {
+		ctx = interceptors.WithDecision(ctx, decision)
+	}
+	return ctx, nil
 }
 
 func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
@@ -195,7 +233,8 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			return next(ctx, req)
 		}
 
-		if err := v.verifier.Verify(ctx, policyData.Resource, policyData.Action); err != nil {
+		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action)
+		if err != nil {
 			return nil, toConnectError(err)
 		}
 
@@ -231,7 +270,8 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return next(ctx, conn)
 		}
 
-		if err := v.verifier.Verify(ctx, policyData.Resource, policyData.Action); err != nil {
+		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action)
+		if err != nil {
 			return toConnectError(err)
 		}
 

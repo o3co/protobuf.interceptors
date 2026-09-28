@@ -51,13 +51,14 @@ type authServerStream struct {
 	resource string
 	action   string
 	verifier endpoint.VerifierEndpoint
+	cfg      *config
 	log      *slog.Logger
 }
 
 func (s *authServerStream) Context() context.Context { return s.ctx }
 
 func (s *authServerStream) RecvMsg(m interface{}) error {
-	if err := s.verifier.Verify(s.ctx, s.resource, s.action); err != nil {
+	if _, err := s.cfg.verify(s.ctx, s.verifier, s.resource, s.action); err != nil {
 		s.log.Error("authorization re-check failed on RecvMsg",
 			"resource", s.resource,
 			"action", s.action,
@@ -117,6 +118,10 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 // reads Policy from the stream context and authorizes the stream before the
 // handler is invoked, then re-checks on each RecvMsg.
 //
+// As with VerificationInterceptor, the decision that opened the stream is on
+// the handler's context, and WithDecisionObserver receives the opening check
+// and every re-check.
+//
 // Panics if verifier is nil.
 func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option) grpc.StreamServerInterceptor {
 	if verifier == nil {
@@ -154,7 +159,8 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		// client-streaming handler that sends before it receives running
 		// entirely unauthorized, and a handler that never receives — a
 		// server-streaming one — checked by nothing at all.
-		if err := verifier.Verify(ctx, policyData.Resource, policyData.Action); err != nil {
+		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
+		if err != nil {
 			log.Error("authorization check failed before stream handler",
 				"resource", policyData.Resource,
 				"action", policyData.Action,
@@ -165,10 +171,11 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 
 		wrapped := &authServerStream{
 			ServerStream: ss,
-			ctx:          ctx,
+			ctx:          withDecision(ctx, decision),
 			resource:     policyData.Resource,
 			action:       policyData.Action,
 			verifier:     verifier,
+			cfg:          cfg,
 			log:          log,
 		}
 		return handler(srv, wrapped)
