@@ -81,9 +81,8 @@ type policyOptionInterceptor struct{}
 // attaches the extracted values with interceptors.WithExtractedFields, so a
 // field mapping whose placeholder is absent from the resource template still
 // reaches an endpoint that reads them (in package endpoint, only the o3co
-// endpoint does). The gRPC
-// unary interceptor discards the fields. Streaming handlers refuse
-// field_mappings outright, as gRPC's do.
+// endpoint does). The gRPC unary interceptor discards the fields. Streaming
+// handlers refuse field_mappings outright, as gRPC's do.
 func PolicyOptionInterceptor() connect.Interceptor {
 	return &policyOptionInterceptor{}
 }

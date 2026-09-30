@@ -85,8 +85,8 @@ ConnectRPC interceptors map to `PermissionDenied` — the request is denied, the
 handler never runs, and the verifier is never asked.
 
 **If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
-dotted version, a non-Latin id — the request will now be denied where it used to
-be resolved. Three remedies work on every framework and every backend:
+dotted version, a non-Latin id — the request is denied. Three remedies work on
+every framework and every backend:
 
 - **Percent-encode the value before it reaches the mapped request field.**
   Percent-encoding round-trips through the grammar (`1%2Emember` stays one
@@ -130,10 +130,12 @@ policy carrying `field_mappings` before resolving anything (see
 reads the context back out, sending it as the `context` object of `POST /verify`
 — OPA, Cedar and the static endpoint never look at it.
 
-**So on gRPC, moving a placeholder out of the resource template does not make its
-value available to the decision — it removes it**: the RPC stops being denied,
-but the verifier is asked a question with less information than before, which is
-worse than a denial. Use one of the three portable remedies above.
+**So on gRPC unary, moving a placeholder out of the resource template does not
+make its value available to the decision — it removes it**: the RPC stops being
+denied, but the verifier is asked a question with less information than before,
+which is worse than a denial. (A gRPC stream whose policy keeps the mapping still
+fails with `Internal`; see [Streaming](#streaming).) Use one of the three
+portable remedies above.
 
 The gRPC unary path does not forward the values as ConnectRPC does. The stream
 interceptors' refusal of `field_mappings` is a separate limitation, on either
@@ -375,7 +377,7 @@ setting.
 
 A stream is authorized **before its handler is invoked**, on both frameworks —
 a bidirectional or client-streaming handler that sends before it receives, or a
-handler that never calls `RecvMsg`, is checked like any other.
+handler that never receives, is checked like any other.
 
 On gRPC the check is then repeated on each `RecvMsg`. The resource and action
 are fixed for the life of a stream, so that re-check is not a second opinion on

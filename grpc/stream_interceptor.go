@@ -97,7 +97,9 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 			return handler(srv, wrapped)
 		}
 
-		// field_mappings are not supported for streaming (no single request message).
+		// field_mappings are not supported for streaming: this interceptor runs
+		// before any request message is read, and a client or bidirectional
+		// stream has no single one.
 		if len(policy.FieldMappings) > 0 {
 			return status.Errorf(codes.Internal, "field_mappings are not supported for streaming RPCs")
 		}

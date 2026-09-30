@@ -19,7 +19,8 @@ type DeniedError struct {
 	// Reason is what the RPC caller is told. It never carries the decision.
 	Reason string
 	// Decision is what the backend reported behind the denial, nil when it
-	// reported nothing. It is for the service and never reaches the caller.
+	// reported nothing or when no backend was asked (see ResourceValueError).
+	// It is for the service and never reaches the caller.
 	Decision *Decision
 }
 

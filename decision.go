@@ -31,8 +31,8 @@ import (
 //
 // Only an endpoint that implements endpoint.DecisionVerifier reports one (in
 // package endpoint, only the o3co endpoint). A nil *Decision means the backend
-// reported nothing, or no backend was asked (a refused placeholder value): it
-// is unknown, not "no policy decided".
+// reported nothing, or no backend was asked (a refused placeholder value, or a
+// method with no policy): it is unknown, not "no policy decided".
 type Decision struct {
 	// Code and Message are the backend's deny code and message. Both are
 	// empty on an allow.

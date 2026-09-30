@@ -187,8 +187,9 @@ func TestVerificationStreamInterceptor_Allowed_StreamStillWorks(t *testing.T) {
 
 // TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization pins the
 // per-message check made after the up-front one: the resource and action are
-// fixed for the life of a stream, so the re-check exists to stop delivery on a
-// long-lived stream whose authorization has since been withdrawn.
+// fixed for the life of a stream, so the re-check exists to refuse the next
+// message to a stream that keeps receiving once its authorization is
+// withdrawn; sends are not re-checked.
 func TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization(t *testing.T) {
 	calls := 0
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(

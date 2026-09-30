@@ -137,11 +137,12 @@ func substituteResource(template string, values map[string]string) (string, erro
 // type and its id). A value carrying either can make the string name another
 // resource type rather than another instance of the guarded one ("1.member:2"
 // under "posts:<id>"), so the rule that should have gated the RPC never runs,
-// or name one the verifier's parser refuses. Characters outside the token are refused because that
-// parser refuses them too and never repairs its input: no policy could match
-// the result. An empty value is refused because it deletes a component of the
-// template instead of filling it. See README, "Placeholder values", for an
-// example and the remedies, percent-encoding the value among them.
+// or make it one the verifier's parser refuses ("1:2" under "posts:<id>").
+// Characters outside the token are refused because that parser refuses them
+// too and never repairs its input: no policy could match the result. An empty
+// value is refused because it deletes a component of the template instead of
+// filling it. See README, "Placeholder values", for an example and the
+// remedies, percent-encoding the value among them.
 //
 // The rule lives here rather than in one endpoint because every backend
 // consumes the same resolved string, and resolution fails before any of them
