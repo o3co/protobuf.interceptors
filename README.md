@@ -255,7 +255,7 @@ The headers the endpoint sets itself cannot be overridden here — `Content-Type
 `Accept`, `Authorization` and the configured request-ID header. `NewO3coEndpoint`
 returns an error rather than letting a static header quietly replace the subject
 token. (Disabling request-ID forwarding releases that one, since the endpoint
-then no longer sets it.)
+then does not set it.)
 
 The verifier answers `401` both for a bad subject token and for a refused caller
 credential. The endpoint tells them apart by the response's `code`: a
@@ -318,7 +318,7 @@ deny `code` in `Decision.Code`.
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The
 caller still gets `PermissionDenied: access denied`, and no error this library
-returns carries a decision in its message. The endpoint no longer logs response
+returns carries a decision in its message. The endpoint does not log response
 bodies at its default level either — the error line names the status and the
 code, and the body is at `Debug`.
 
