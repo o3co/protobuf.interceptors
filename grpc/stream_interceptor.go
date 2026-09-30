@@ -44,8 +44,8 @@ func (s *contextServerStream) Context() context.Context { return s.ctx }
 // receives: the resource and action are fixed, so re-asking the verifier on
 // each RecvMsg is what stops a stream that keeps receiving once a grant is
 // revoked or a token expires. Sends are not re-checked, so a server-streaming
-// RPC, whose generated handler receives only its one request, is not checked
-// again after it opens.
+// RPC is checked before the handler runs and again when its generated handler
+// reads the one request, and never after that.
 type authServerStream struct {
 	grpc.ServerStream
 	ctx      context.Context

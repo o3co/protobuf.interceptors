@@ -250,9 +250,10 @@ func TestVerificationStreamInterceptor_WithoutPolicyOptionInterceptor_IsInternal
 }
 
 // TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal pins the stream
-// interceptor's outright refusal of a policy carrying field_mappings: there is
-// no single request message on a stream to resolve a mapping from, so it fails
-// closed rather than guess. The mapping's presence is what is refused, so
+// interceptor's outright refusal of a policy carrying field_mappings: the
+// interceptor runs before any request message is read, and a client or
+// bidirectional stream has no single one, so it fails closed rather than
+// guess. The mapping's presence is what is refused, so
 // moving its placeholder out of the resource template does not make a
 // streaming method reachable (README, "Streaming").
 func TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal(t *testing.T) {

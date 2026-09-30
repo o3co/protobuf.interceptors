@@ -134,9 +134,10 @@ func substituteResource(template string, values map[string]string) (string, erro
 // (packages/builtins/src/resource/DotNotationResourceParser.mts): RFC 6749
 // NQCHAR — printable ASCII minus space, '"' and '\' — less the structural
 // characters '.' (between the segments of a resource type) and ':' (between a
-// type and its id). A value carrying either names another resource type rather
-// than another instance of the guarded one, so the rule that should have gated
-// the RPC never runs. Characters outside the token are refused because that
+// type and its id). A value carrying either can make the string name another
+// resource type rather than another instance of the guarded one ("1.member:2"
+// under "posts:<id>"), so the rule that should have gated the RPC never runs,
+// or name one the verifier's parser refuses. Characters outside the token are refused because that
 // parser refuses them too and never repairs its input: no policy could match
 // the result. An empty value is refused because it deletes a component of the
 // template instead of filling it. See README, "Placeholder values", for an

@@ -53,9 +53,9 @@ func (e *UnconfirmedRevisionError) Error() string {
 // substituted into a resource template.
 //
 // Resolution refuses a value that is empty or carries a character outside the
-// verifier's segment token — notably '.' or ':', which would make the string
-// name a different resource type rather than a different instance of the
-// guarded one. The refusal is an authorization outcome, not a malformed-input
+// verifier's segment token — notably '.' or ':', which can make the string name
+// a different resource type rather than a different instance of the guarded
+// one. The refusal is an authorization outcome, not a malformed-input
 // report. See README, "Placeholder values", for the accepted set.
 type ResourceValueError struct {
 	// Placeholder is the placeholder whose value was refused, without the
