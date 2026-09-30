@@ -91,7 +91,12 @@ func newLogger(level slog.Level) *slog.Logger {
 // Nothing in it is random: two requests that read the same clock value get the
 // same ID, and the wall clock may tick more coarsely than a nanosecond.
 func generateRequestID() string {
-	now := time.Now().UTC()
+	return requestIDAt(time.Now())
+}
+
+// requestIDAt is generateRequestID at the clock value now.
+func requestIDAt(now time.Time) string {
+	now = now.UTC()
 	nano := now.UnixNano()
 	return fmt.Sprintf("%s_%016x", now.Format("20060102150405"), nano)
 }
