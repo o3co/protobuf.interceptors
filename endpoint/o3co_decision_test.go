@@ -141,7 +141,8 @@ func TestO3coVerifyDecision_Deny_CarriesTheCodeBesideTheDeniedError(t *testing.T
 	if !errors.As(err, &denied) {
 		t.Fatalf("expected *DeniedError, got %T: %v", err, err)
 	}
-	// What the RPC caller is told is unchanged.
+	// The RPC caller is told only "access denied"; the deny code travels on
+	// the Decision.
 	if denied.Reason != "access denied" {
 		t.Errorf("Reason = %q, want %q", denied.Reason, "access denied")
 	}
@@ -218,8 +219,9 @@ func TestO3coVerifyDecision_IgnoresUnknownKeys(t *testing.T) {
 	}
 }
 
-// Without evaluation — an older verifier, or one that has not opted in —
-// Verify behaves exactly as it always has.
+// Without evaluation — a verifier that does not report one, or has not opted
+// in — an allow is still an allow, and the satisfying rule's Evaluation is nil
+// (unknown).
 func TestO3coVerify_ResponseWithoutEvaluation_BehavesAsBefore(t *testing.T) {
 	allow := newTestEndpoint(t, serve(t, http.StatusOK, allowWithoutEvaluation).URL)
 	if err := allow.Verify(ctxWithToken("tok"), "r", "a"); err != nil {

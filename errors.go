@@ -19,7 +19,8 @@ type DeniedError struct {
 	// Reason is what the RPC caller is told. It never carries the decision.
 	Reason string
 	// Decision is what the backend reported behind the denial, nil when it
-	// reported nothing. It is for the service and never reaches the caller.
+	// reported nothing or when no backend was asked (see ResourceValueError).
+	// It is for the service and never reaches the caller.
 	Decision *Decision
 }
 
@@ -52,13 +53,11 @@ func (e *UnconfirmedRevisionError) Error() string {
 // ResourceValueError reports a request field value that must not be
 // substituted into a resource template.
 //
-// The resolved resource string is parsed by the authorization backend, so a
-// value carrying a character that is structural in that grammar does not
-// identify a different instance of the guarded resource type — it names a
-// different resource type. Resolution refuses such a value instead of building
-// the string, which is why this is an authorization outcome and not a
-// malformed-input report. See resourceValueRune in resolve.go for the accepted
-// character set and the grammar it is anchored to.
+// Resolution refuses a value that is empty or carries a character outside the
+// verifier's segment token — notably '.' or ':', which can make the string name
+// a different resource type rather than a different instance of the guarded
+// one. The refusal is an authorization outcome, not a malformed-input
+// report. See README, "Placeholder values", for the accepted set.
 type ResourceValueError struct {
 	// Placeholder is the placeholder whose value was refused, without the
 	// surrounding angle brackets.

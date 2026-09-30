@@ -40,11 +40,12 @@ func (s *contextServerStream) Context() context.Context { return s.ctx }
 // RecvMsg before delegating to the underlying stream.
 //
 // The stream is already authorized before the handler is invoked (see
-// VerificationStreamInterceptor), so this is not the first check and no longer
-// the one that decides whether the handler runs. It is kept because a stream is
-// long-lived while a decision is not: the resource and action are fixed for the
-// life of the stream, so re-asking the verifier is what stops delivery once a
-// grant is revoked or a token expires mid-stream.
+// VerificationStreamInterceptor). The re-check covers what the handler
+// receives: the resource and action are fixed, so re-asking the verifier on
+// each RecvMsg is what stops a stream that keeps receiving once a grant is
+// revoked or a token expires. Sends are not re-checked, so a server-streaming
+// RPC is checked before the handler runs and again when its generated handler
+// reads the one request, and never after that.
 type authServerStream struct {
 	grpc.ServerStream
 	ctx      context.Context
@@ -96,7 +97,9 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 			return handler(srv, wrapped)
 		}
 
-		// field_mappings are not supported for streaming (no single request message).
+		// field_mappings are not supported for streaming: this interceptor runs
+		// before any request message is read, and a client or bidirectional
+		// stream has no single one.
 		if len(policy.FieldMappings) > 0 {
 			return status.Errorf(codes.Internal, "field_mappings are not supported for streaming RPCs")
 		}
@@ -154,11 +157,11 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			return handler(srv, wrapped)
 		}
 
-		// Authorize before the handler runs, the way the ConnectRPC streaming
-		// interceptor does. Checking only inside RecvMsg left a bidirectional or
-		// client-streaming handler that sends before it receives running
-		// entirely unauthorized, and a handler that never receives — a
-		// server-streaming one — checked by nothing at all.
+		// Authorize before the handler runs, as the ConnectRPC streaming
+		// interceptor does: a bidirectional or client-streaming handler may send
+		// before it receives, and a handler that never calls RecvMsg would never
+		// be checked, so a check only inside RecvMsg would leave either
+		// unauthorized.
 		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
 		if err != nil {
 			log.Error("authorization check failed before stream handler",

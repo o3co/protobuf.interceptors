@@ -85,18 +85,22 @@ ConnectRPC interceptors map to `PermissionDenied` — the request is denied, the
 handler never runs, and the verifier is never asked.
 
 **If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
-dotted version, a non-Latin id — the request will now be denied where it used to
-be resolved. Three remedies work on every framework and every backend:
+dotted version, a non-Latin id — the request is denied. Three remedies work on
+every framework; which one fits depends on the backend:
 
 - **Percent-encode the value before it reaches the mapped request field.**
   Percent-encoding round-trips through the grammar (`1%2Emember` stays one
-  segment) and `%` is itself accepted, so the verifier can decode it back.
+  segment) and `%` is itself accepted, so the verifier can decode it back; on
+  another backend, the policies are written for the encoded form.
 - **Configure a `ResourceParser` on the verifier** written for your id syntax,
-  and encode to that syntax at the call site.
+  and encode to that syntax at the call site. This one needs auth.policy-verifier
+  (the o3co endpoint).
 - **Restructure the policy so the offending value is never substituted into the
   resource.** Guard the type the RPC actually owns (`resource: "subscriptions"`,
   `action: "read"`) and let the backend decide against the identity it already
   holds from the bearer token, instead of naming a DID in the resource string.
+  The verifier, OPA and Cedar see the token; the static endpoint matches
+  resource and action only, so it cannot make that decision.
 
 A fourth path — keeping the field mapping but dropping its placeholder from the
 resource template, so the value travels as request context instead — is **not
@@ -130,15 +134,18 @@ policy carrying `field_mappings` before resolving anything (see
 reads the context back out, sending it as the `context` object of `POST /verify`
 — OPA, Cedar and the static endpoint never look at it.
 
-**So on gRPC, moving a placeholder out of the resource template does not make its
-value available to the decision — it removes it**: the RPC stops being denied,
-but the verifier is asked a question with less information than before, which is
-worse than a denial. Use one of the three portable remedies above.
+**So on gRPC unary, moving a placeholder out of the resource template does not
+make its value available to the decision — it removes it**: resolution no
+longer refuses the value, but the verifier decides without it, a question with
+less information than before, which is worse than a refusal. (A gRPC stream
+whose policy keeps the mapping still fails with `Internal`; see
+[Streaming](#streaming).) Use one of the remedies above that your backend
+supports.
 
-Giving the gRPC unary path the same forwarding ConnectRPC has is a follow-up, not
-something this release does. The stream interceptors' refusal of `field_mappings`
-is a separate, longer-standing limitation: there is no single request message to
-resolve a mapping from, on either framework.
+The gRPC unary path does not forward the values as ConnectRPC does. The stream
+interceptors' refusal of `field_mappings` is a separate limitation, on either
+framework: the policy interceptor runs before the handler reads any request
+message, and a client or bidirectional stream has no single one.
 
 [auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
 
@@ -253,7 +260,7 @@ The headers the endpoint sets itself cannot be overridden here — `Content-Type
 `Accept`, `Authorization` and the configured request-ID header. `NewO3coEndpoint`
 returns an error rather than letting a static header quietly replace the subject
 token. (Disabling request-ID forwarding releases that one, since the endpoint
-then no longer sets it.)
+then does not set it.)
 
 The verifier answers `401` both for a bad subject token and for a refused caller
 credential. The endpoint tells them apart by the response's `code`: a
@@ -316,7 +323,7 @@ deny `code` in `Decision.Code`.
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The
 caller still gets `PermissionDenied: access denied`, and no error this library
-returns carries a decision in its message. The endpoint no longer logs response
+returns carries a decision in its message. The endpoint does not log response
 bodies at its default level either — the error line names the status and the
 code, and the body is at `Debug`.
 
@@ -375,18 +382,21 @@ setting.
 
 A stream is authorized **before its handler is invoked**, on both frameworks —
 a bidirectional or client-streaming handler that sends before it receives, or a
-server-streaming handler that never receives at all, is checked like any other.
+handler that never receives, is checked like any other.
 
 On gRPC the check is then repeated on each `RecvMsg`. The resource and action
 are fixed for the life of a stream, so that re-check is not a second opinion on
-the same question: it is what stops delivery on a long-lived stream whose grant
-has been revoked, or whose token expired, since the stream opened.
+the same question: it is what stops a stream that keeps receiving once its grant
+has been revoked, or its token expired, since the stream opened. Sends are not
+re-checked, so a server-streaming RPC is checked before its handler runs and
+again when the generated handler reads its one request, and never after that.
 
-`field_mappings` are not supported for streaming RPCs — there is no single
-request message to resolve them from — and a streaming method that declares one
+`field_mappings` are not supported for streaming RPCs — the policy interceptor
+runs before the handler reads any request message, and a client or
+bidirectional stream has no single one — and a streaming method that declares one
 fails with `Internal`, on both frameworks, before any resolution is attempted.
-This is a standing limitation, not a consequence of the placeholder-value rule:
-it predates it and applies whether or not the values would have been accepted.
+This is a standing limitation, independent of the placeholder-value rule: it
+applies whether or not the values would have been accepted.
 A streaming RPC that needs a per-message identity has to carry it in the message
 and check it in the handler.
 

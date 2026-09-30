@@ -86,10 +86,9 @@ func TestVerificationStreamInterceptor_NotNil(t *testing.T) {
 	}
 }
 
-// TestVerificationStreamInterceptor_SendBeforeRecv_IsDenied is the regression:
-// a bidirectional or client-streaming handler may send before it ever receives,
-// so an authorization check that lived only in RecvMsg let the whole handler
-// run unauthorized.
+// TestVerificationStreamInterceptor_SendBeforeRecv_IsDenied: a bidirectional or
+// client-streaming handler may send before it ever receives, so a denied stream
+// is refused before the handler runs, not at its first RecvMsg.
 func TestVerificationStreamInterceptor_SendBeforeRecv_IsDenied(t *testing.T) {
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Deny())
 	stream := &fakeServerStream{ctx: policyStreamCtx()}
@@ -114,9 +113,9 @@ func TestVerificationStreamInterceptor_SendBeforeRecv_IsDenied(t *testing.T) {
 	}
 }
 
-// TestVerificationStreamInterceptor_NeverReceives_IsStillChecked covers the
-// server-streaming handler that only ever sends: it used to be authorized by
-// nothing at all, because no RecvMsg was ever called.
+// TestVerificationStreamInterceptor_NeverReceives_IsStillChecked covers a
+// handler that only ever sends and never calls RecvMsg, so only the check
+// before the handler authorizes it.
 func TestVerificationStreamInterceptor_NeverReceives_IsStillChecked(t *testing.T) {
 	verifyCalls := 0
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
@@ -187,9 +186,10 @@ func TestVerificationStreamInterceptor_Allowed_StreamStillWorks(t *testing.T) {
 }
 
 // TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization pins the
-// per-message check that survives the up-front one: the resource and action are
-// fixed for the life of a stream, so the re-check exists to stop delivery on a
-// long-lived stream whose authorization has since been withdrawn.
+// per-message check made after the up-front one: the resource and action are
+// fixed for the life of a stream, so the re-check exists to refuse the next
+// message to a stream that keeps receiving once its authorization is
+// withdrawn; sends are not re-checked.
 func TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization(t *testing.T) {
 	calls := 0
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
@@ -251,16 +251,12 @@ func TestVerificationStreamInterceptor_WithoutPolicyOptionInterceptor_IsInternal
 }
 
 // TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal pins the stream
-// interceptor's outright refusal of a policy carrying field_mappings, which had
-// no test before.
-//
-// This is a standing limitation, older than and independent of the
-// placeholder-value rule: there is no single request message on a stream to
-// resolve a mapping from, so the interceptor fails closed rather than guess.
-// The consequence for a user is that the "move the placeholder out of the
-// resource template" workaround is not merely useless on a stream (as it is on
-// gRPC unary) — it makes the method unreachable, since the mere presence of
-// field_mappings is what is refused. The README's "Streaming" section says so.
+// interceptor's outright refusal of a policy carrying field_mappings: the
+// interceptor runs before any request message is read, and a client or
+// bidirectional stream has no single one, so it fails closed rather than
+// guess. The mapping's presence is what is refused, so
+// moving its placeholder out of the resource template does not make a
+// streaming method reachable (README, "Streaming").
 func TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal(t *testing.T) {
 	interceptor := policygrpc.PolicyOptionStreamInterceptor()
 	stream := &fakeServerStream{ctx: context.Background()}

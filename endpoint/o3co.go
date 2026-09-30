@@ -84,19 +84,17 @@ func WithO3coRequestIDHeaderKey(key string) O3coOption {
 // WithO3coHeaders adds static headers to every outgoing verify request. Later
 // calls merge into earlier ones, and win for a header both set.
 //
-// This exists for auth.policy-verifier's optional http.callerAuth gate, which
-// expects a shared credential in a header of its own (x-caller-token by
-// default). That credential answers "may you ask for a decision?", which is a
-// different question from the subject bearer token in Authorization — so
-// turning the gate on requires a header this endpoint would otherwise have no
-// way to send.
+// Use it to send the shared credential that auth.policy-verifier's optional
+// http.callerAuth gate expects (x-caller-token by default). That credential
+// answers "may this service ask for a decision?", not who the subject is,
+// which Authorization carries.
 //
 // The headers the endpoint controls itself may not be set here: Content-Type,
 // Accept, Authorization and the request-ID header (see
 // WithO3coRequestIDHeaderKey). NewO3coEndpoint returns an error rather than
-// letting a static header quietly replace the subject token or the content type
-// the verifier is answering. Disabling request-ID forwarding releases that
-// header, since the endpoint then no longer sets it.
+// letting a static header replace the subject token or the content type.
+// Disabling request-ID forwarding releases that header, which the endpoint then
+// does not set.
 func WithO3coHeaders(headers map[string]string) O3coOption {
 	return func(c *o3coBuildConfig) {
 		if c.headers == nil {
@@ -109,19 +107,17 @@ func WithO3coHeaders(headers map[string]string) O3coOption {
 }
 
 // WithO3coRequireConfirmedRevision refuses an allow that is not established
-// against confirmed policy revisions (see interceptors.Decision.
-// RevisionConfirmed): the rule that satisfied every group must report a
-// completed evaluation naming a well-formed revision. Such an allow returns
+// against confirmed policy revisions (see
+// [interceptors.Decision.RevisionConfirmed]) with
 // *interceptors.UnconfirmedRevisionError, which the framework interceptors map
 // to Internal. A deny is unaffected.
 //
 // The verifier reports evaluations only under verify.evaluationInResponse =
 // "include", and only for rules backed by a policy evaluator. Against a
-// verifier that has not opted in — or whose groups include a rule with no
-// policy source — every allow is refused. The verifier has no way to say which
-// it is before a decision is asked for, so this cannot be checked at
-// construction: the first refused allow whose response carried no evaluation
-// at all is logged once, at the error level, naming the setting.
+// verifier that has not opted in, every allow is refused, and so is an allow
+// in which a rule with no policy source satisfied a group. That cannot be
+// checked at construction, so the first refused allow whose response carried
+// no evaluation at all is logged once, at the error level, naming the setting.
 func WithO3coRequireConfirmedRevision() O3coOption {
 	return func(c *o3coBuildConfig) {
 		c.requireConfirmedRevision = true
