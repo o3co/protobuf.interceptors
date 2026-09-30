@@ -417,8 +417,8 @@ func TestResolveResource_SubstitutionIsSinglePass(t *testing.T) {
 	}
 }
 
-// TestResolveResource_UnknownPlaceholderIsLeftIntact keeps the pre-existing
-// behaviour: a template placeholder with no mapping stays literal.
+// TestResolveResource_UnknownPlaceholderIsLeftIntact pins that a template
+// placeholder with no mapping stays literal.
 func TestResolveResource_UnknownPlaceholderIsLeftIntact(t *testing.T) {
 	policy := &pb.Policy{
 		Resource: "items/<id>/<unmapped>",

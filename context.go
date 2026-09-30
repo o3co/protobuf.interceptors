@@ -83,13 +83,11 @@ func RequestIDFromContext(ctx context.Context) string {
 // WithExtractedFields stores the field_mappings values resolved for an RPC, so
 // an endpoint can send them alongside the resource and action.
 //
-// Not every path sets this. Only connectrpc.PolicyOptionInterceptor does: the
-// gRPC unary interceptor resolves with ResolveResource and discards the fields,
-// and both stream interceptors refuse a policy carrying field_mappings. Nor
-// does every endpoint read it — only the o3co endpoint does, as the "context"
-// object of POST /verify. A value that must be part of the decision on gRPC, or
-// under OPA/Cedar/static rules, has to be in the resource string (and therefore
-// inside the segment grammar ResolveResourceWithFields enforces), not here.
+// Only connectrpc.PolicyOptionInterceptor sets it, and only the o3co endpoint
+// reads it, as the "context" object of POST /verify. A value that must be part
+// of the decision on gRPC, or under OPA/Cedar/static rules, has to be in the
+// resource string, inside the segment grammar ResolveResourceWithFields
+// enforces. See README, "Extracted field forwarding".
 func WithExtractedFields(ctx context.Context, fields map[string]string) context.Context {
 	return context.WithValue(ctx, ctxKeyExtractedFields, fields)
 }

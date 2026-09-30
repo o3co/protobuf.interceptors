@@ -249,21 +249,13 @@ func TestChain_PlaceholderValueWithinGrammar_IsResolved(t *testing.T) {
 	}
 }
 
-// TestChain_FieldMappings_ExtractedFieldsAreNotInContext is the gRPC half of a
-// cross-framework contract, and it exists to keep the README honest.
-//
-// connectrpc.PolicyOptionInterceptor resolves with ResolveResourceWithFields and
-// attaches the values with WithExtractedFields — pinned on the other side by
-// TestConnectChain_FieldMappings_StoresExtractedFieldsInContext. The gRPC unary
-// interceptor resolves with ResolveResource, which drops them, so the verifier
-// sees resource and action and nothing else.
-//
-// The difference is the whole reason the README cannot tell a gRPC deployment
-// that an id carrying '.' or ':' keeps working if its placeholder is taken out
-// of the resource template: on this path the value does not travel as request
-// context, it simply stops existing. If this test starts failing because the
-// fields are now present, the README's "Extracted field forwarding" table is
-// what has gone stale.
+// TestChain_FieldMappings_ExtractedFieldsAreNotInContext is the gRPC half of the
+// contract the README's "Extracted field forwarding" table states: the gRPC
+// unary interceptor resolves with ResolveResource, which drops the extracted
+// values, so the verifier sees resource and action and nothing else.
+// TestConnectChain_FieldMappings_StoresExtractedFieldsInContext pins the
+// ConnectRPC half. If this fails because the fields are present, that table is
+// stale.
 func TestChain_FieldMappings_ExtractedFieldsAreNotInContext(t *testing.T) {
 	var fieldsPresent bool
 	var capturedResource string

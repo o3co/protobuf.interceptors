@@ -141,7 +141,8 @@ func TestO3coVerifyDecision_Deny_CarriesTheCodeBesideTheDeniedError(t *testing.T
 	if !errors.As(err, &denied) {
 		t.Fatalf("expected *DeniedError, got %T: %v", err, err)
 	}
-	// What the RPC caller is told is unchanged.
+	// The RPC caller is told only "access denied"; the deny code travels on
+	// the Decision.
 	if denied.Reason != "access denied" {
 		t.Errorf("Reason = %q, want %q", denied.Reason, "access denied")
 	}

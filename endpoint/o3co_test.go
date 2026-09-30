@@ -294,7 +294,7 @@ func TestNewO3coEndpoint_StaticHeaderCollidesWithCustomRequestIDKey(t *testing.T
 }
 
 // TestNewO3coEndpoint_RequestIDHeaderAllowedWhenForwardingDisabled: with
-// forwarding switched off the endpoint no longer sets that header, so a static
+// forwarding switched off the endpoint does not set that header, so a static
 // one is not an override.
 func TestNewO3coEndpoint_RequestIDHeaderAllowedWhenForwardingDisabled(t *testing.T) {
 	_, err := NewO3coEndpoint("http://localhost:3000",

@@ -26,18 +26,14 @@ import (
 )
 
 // ResolveResourceWithFields resolves the resource string from a Policy and an
-// optional request message, and also returns a map of all extracted field values
-// keyed by placeholder name. ALL field_mappings are extracted regardless of
-// whether their placeholder appears in the resource template, so that a caller
-// can forward the values via WithExtractedFields (e.g. subscriber_did for
-// downstream authz).
+// optional request message, and also returns every field_mappings value keyed
+// by placeholder name, including those whose placeholder the resource template
+// does not use, so a caller can forward them with WithExtractedFields.
 //
-// Returning the map is all this function does with it: whether the values ever
-// reach a decision is the caller's business, and today only
-// connectrpc.PolicyOptionInterceptor calls this. The gRPC unary interceptor
-// calls ResolveResource, which discards them, and neither stream interceptor
-// resolves a policy carrying field_mappings at all. See the README's "Extracted
-// field forwarding" section, which is the contract users are pointed at.
+// Of the interceptors, only connectrpc.PolicyOptionInterceptor forwards the
+// values. The gRPC unary interceptor calls ResolveResource, which discards
+// them, and neither stream interceptor resolves a policy carrying
+// field_mappings. See README, "Extracted field forwarding".
 func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, action string, fields map[string]string, err error) {
 	if policy.Resource == "" {
 		return "", "", nil, fmt.Errorf("policy resource must not be empty")
@@ -66,10 +62,10 @@ func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, 
 		fields[field.Placeholder] = value
 	}
 
-	// Substitute in one pass over the template, after every value is known.
-	// Replacing mapping by mapping let a value that itself spelled
-	// "<other-placeholder>" be rewritten by a later mapping, which put a
-	// request field in control of a part of the resource no policy declared.
+	// Substitute in one pass over the template, after every value is known, so
+	// a value that spells "<other-placeholder>" is never rewritten by a later
+	// mapping: a request field must not control a part of the resource no
+	// policy declared.
 	resource, err = substituteResource(resource, fields)
 	if err != nil {
 		return "", "", nil, err
@@ -82,12 +78,10 @@ func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, 
 // single left-to-right pass: substituted text is never rescanned, so a value is
 // only ever data. A "<name>" with no mapping is left as written.
 //
-// Every substituted value is validated first — see validateResourceValue.
-// Values not reached by the template are not validated: they never enter the
-// resource string, so the verifier's resource grammar does not apply to them (a
-// DID, for instance, is all colons). They are returned to the caller, which is
-// not the same as reaching the authorization decision — see
-// ResolveResourceWithFields for which callers forward them and which drop them.
+// Every substituted value is validated first (see validateResourceValue).
+// Values the template does not use never enter the resource string, so they are
+// not validated: the resource grammar does not apply to them (a DID is all
+// colons).
 func substituteResource(template string, values map[string]string) (string, error) {
 	var b strings.Builder
 	b.Grow(len(template))
@@ -108,7 +102,7 @@ func substituteResource(template string, values map[string]string) (string, erro
 		end += open + 1
 
 		// A '<' between this one and the '>' opens a nearer placeholder:
-		// "<a<b>" names "b", as the previous replace-based implementation read it.
+		// "<a<b>" names "b".
 		if j := strings.LastIndexByte(template[open+1:end], '<'); j >= 0 {
 			open = open + 1 + j
 		}
@@ -137,26 +131,19 @@ func substituteResource(template string, values map[string]string) (string, erro
 // The accepted set is exactly one segment token of the grammar
 // auth.policy-verifier's DotNotationResourceParser applies
 // (packages/builtins/src/resource/DotNotationResourceParser.mts): RFC 6749
-// NQCHAR — printable ASCII minus space, '"' and '\' — less the two structural
-// characters '.' and ':'. In that grammar '.' separates the segments a resource
-// type is built from and ':' separates a type from its id, so a value carrying
-// either does not name another instance of the guarded type, it names another
-// type: a policy declaring "posts:<id>" resolved with the value "1.member:2"
-// produces "posts:1.member:2", read as the type "posts.member", and the rule
-// that should have gated the RPC never runs.
+// NQCHAR — printable ASCII minus space, '"' and '\' — less the structural
+// characters '.' (between the segments of a resource type) and ':' (between a
+// type and its id). A value carrying either names another resource type rather
+// than another instance of the guarded one, so the rule that should have gated
+// the RPC never runs. Characters outside the token are refused because that
+// parser refuses them too and never repairs its input: no policy could match
+// the result. An empty value is refused because it deletes a component of the
+// template instead of filling it. See README, "Placeholder values", for an
+// example and the remedies, percent-encoding the value among them.
 //
-// The rule lives here rather than in one endpoint because every backend — o3co,
-// OPA, Cedar and the static rules — consumes the same resolved string, and
-// because refusing at resolution is the only place that fails before any of
-// them is asked.
-//
-// The set is the verifier's whole token, not just its two structural
-// characters. That parser refuses the rest of them too (it never repairs its
-// input), so anything outside the token is a resource string no policy can
-// match; an id that needs those characters is percent-encoded by the caller,
-// which round-trips through this grammar, or handled by a ResourceParser
-// written for its syntax. An empty value is refused on the same footing: it
-// deletes a component of the template instead of filling it.
+// The rule lives here rather than in one endpoint because every backend
+// consumes the same resolved string, and resolution fails before any of them
+// is asked.
 func validateResourceValue(placeholder, value string) error {
 	if value == "" {
 		return &ResourceValueError{

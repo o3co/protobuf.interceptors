@@ -74,16 +74,15 @@ func extractRequestIDFromHeader(header interface{ Get(string) string }) string {
 type policyOptionInterceptor struct{}
 
 // PolicyOptionInterceptor returns a ConnectRPC Interceptor that reads the proto
-// method option and injects the resolved Policy into context.
-//
-// This interceptor must be placed before VerificationInterceptor in the chain.
+// method option and injects the resolved Policy into context. It must be placed
+// before VerificationInterceptor in the chain.
 //
 // For unary RPCs it resolves with interceptors.ResolveResourceWithFields and
 // attaches the extracted values with interceptors.WithExtractedFields, so a
 // field mapping whose placeholder is absent from the resource template still
-// reaches an endpoint that reads them (today, only the o3co endpoint). This is
-// a ConnectRPC-only capability: the gRPC unary interceptor discards the fields.
-// Streaming handlers refuse field_mappings outright, as gRPC's do.
+// reaches an endpoint that reads them (only the o3co endpoint does). The gRPC
+// unary interceptor discards the fields. Streaming handlers refuse
+// field_mappings outright, as gRPC's do.
 func PolicyOptionInterceptor() connect.Interceptor {
 	return &policyOptionInterceptor{}
 }

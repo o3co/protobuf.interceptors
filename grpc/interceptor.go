@@ -86,10 +86,11 @@ func newLogger(level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// generateRequestID returns a request ID formatted as YYYYMMDDHHmmss_<8-hex-random>.
+// generateRequestID returns a request ID formatted as YYYYMMDDHHmmss_<16 hex
+// digits>, the hex digits being the wall-clock time in Unix nanoseconds. Nothing
+// in it is random: two requests in the same nanosecond get the same ID.
 func generateRequestID() string {
 	now := time.Now().UTC()
-	// Use timestamp + a simple random-ish component based on monotonic nanoseconds.
 	nano := now.UnixNano()
 	return fmt.Sprintf("%s_%016x", now.Format("20060102150405"), nano)
 }
@@ -125,12 +126,10 @@ func extractOrGenerateRequestID(ctx context.Context) string {
 // proto method options and injects the resolved Policy into context.
 //
 // It resolves with interceptors.ResolveResource, so extracted field_mappings
-// values are used to fill the resource template and then discarded — unlike
-// connectrpc.PolicyOptionInterceptor, which forwards them with
-// WithExtractedFields. A field mapping whose placeholder does not appear in the
-// resource template therefore has no effect at all on this path: it is not
-// substituted, and it does not reach the verifier. Pinned by
-// TestChain_FieldMappings_ExtractedFieldsAreNotInContext.
+// values fill the resource template and are then discarded, unlike
+// connectrpc.PolicyOptionInterceptor, which forwards them. A field mapping
+// whose placeholder the template does not use therefore never reaches the
+// verifier. See README, "Extracted field forwarding".
 func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 	_ = newConfig(opts) // reserve for future logging use
 	var cache sync.Map
