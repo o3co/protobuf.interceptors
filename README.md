@@ -375,18 +375,20 @@ setting.
 
 A stream is authorized **before its handler is invoked**, on both frameworks —
 a bidirectional or client-streaming handler that sends before it receives, or a
-server-streaming handler that never receives at all, is checked like any other.
+handler that never calls `RecvMsg`, is checked like any other.
 
 On gRPC the check is then repeated on each `RecvMsg`. The resource and action
 are fixed for the life of a stream, so that re-check is not a second opinion on
-the same question: it is what stops delivery on a long-lived stream whose grant
-has been revoked, or whose token expired, since the stream opened.
+the same question: it is what stops a stream that keeps receiving once its grant
+has been revoked, or its token expired, since the stream opened. Sends are not
+re-checked, so a server-streaming RPC — whose generated handler receives only
+its one request — is not checked again after it opens.
 
 `field_mappings` are not supported for streaming RPCs — there is no single
 request message to resolve them from — and a streaming method that declares one
 fails with `Internal`, on both frameworks, before any resolution is attempted.
-This is a standing limitation, not a consequence of the placeholder-value rule:
-it predates it and applies whether or not the values would have been accepted.
+This is a standing limitation, independent of the placeholder-value rule: it
+applies whether or not the values would have been accepted.
 A streaming RPC that needs a per-message identity has to carry it in the message
 and check it in the handler.
 

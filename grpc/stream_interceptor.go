@@ -40,9 +40,12 @@ func (s *contextServerStream) Context() context.Context { return s.ctx }
 // RecvMsg before delegating to the underlying stream.
 //
 // The stream is already authorized before the handler is invoked (see
-// VerificationStreamInterceptor). The re-check is for a long-lived stream: its
-// resource and action are fixed, so re-asking the verifier is what stops
-// delivery once a grant is revoked or a token expires mid-stream.
+// VerificationStreamInterceptor). The re-check covers what the handler
+// receives: the resource and action are fixed, so re-asking the verifier on
+// each RecvMsg is what stops a stream that keeps receiving once a grant is
+// revoked or a token expires. Sends are not re-checked, so a server-streaming
+// RPC, whose generated handler receives only its one request, is not checked
+// again after it opens.
 type authServerStream struct {
 	grpc.ServerStream
 	ctx      context.Context
@@ -154,8 +157,9 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 
 		// Authorize before the handler runs, as the ConnectRPC streaming
 		// interceptor does: a bidirectional or client-streaming handler may send
-		// before it receives, and a server-streaming one never receives, so a
-		// check only inside RecvMsg would leave either unauthorized.
+		// before it receives, and a handler that never calls RecvMsg would never
+		// be checked, so a check only inside RecvMsg would leave either
+		// unauthorized.
 		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
 		if err != nil {
 			log.Error("authorization check failed before stream handler",

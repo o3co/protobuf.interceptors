@@ -113,9 +113,9 @@ func TestVerificationStreamInterceptor_SendBeforeRecv_IsDenied(t *testing.T) {
 	}
 }
 
-// TestVerificationStreamInterceptor_NeverReceives_IsStillChecked covers the
-// server-streaming handler that only ever sends: it never calls RecvMsg, so
-// only the check before the handler authorizes it.
+// TestVerificationStreamInterceptor_NeverReceives_IsStillChecked covers a
+// handler that only ever sends and never calls RecvMsg, so only the check
+// before the handler authorizes it.
 func TestVerificationStreamInterceptor_NeverReceives_IsStillChecked(t *testing.T) {
 	verifyCalls := 0
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
@@ -252,9 +252,9 @@ func TestVerificationStreamInterceptor_WithoutPolicyOptionInterceptor_IsInternal
 // TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal pins the stream
 // interceptor's outright refusal of a policy carrying field_mappings: there is
 // no single request message on a stream to resolve a mapping from, so it fails
-// closed rather than guess. Moving a placeholder out of the resource template
-// while keeping its mapping, useless on gRPC unary, therefore makes a streaming
-// method unreachable (README, "Streaming").
+// closed rather than guess. The mapping's presence is what is refused, so
+// moving its placeholder out of the resource template does not make a
+// streaming method reachable (README, "Streaming").
 func TestPolicyOptionStreamInterceptor_FieldMappings_IsInternal(t *testing.T) {
 	interceptor := policygrpc.PolicyOptionStreamInterceptor()
 	stream := &fakeServerStream{ctx: context.Background()}

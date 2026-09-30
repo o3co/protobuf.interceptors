@@ -87,8 +87,9 @@ func newLogger(level slog.Level) *slog.Logger {
 }
 
 // generateRequestID returns a request ID formatted as YYYYMMDDHHmmss_<16 hex
-// digits>, the hex digits being the wall-clock time in Unix nanoseconds. Nothing
-// in it is random: two requests in the same nanosecond get the same ID.
+// digits>, the hex digits being the wall-clock time in Unix nanoseconds.
+// Nothing in it is random: two requests that read the same clock value get the
+// same ID, and the wall clock may tick more coarsely than a nanosecond.
 func generateRequestID() string {
 	now := time.Now().UTC()
 	nano := now.UnixNano()

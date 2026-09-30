@@ -31,9 +31,10 @@ import (
 // does not use, so a caller can forward them with WithExtractedFields.
 //
 // Of the interceptors, only connectrpc.PolicyOptionInterceptor forwards the
-// values. The gRPC unary interceptor calls ResolveResource, which discards
-// them, and neither stream interceptor resolves a policy carrying
-// field_mappings. See README, "Extracted field forwarding".
+// values, and only on unary RPCs. The gRPC unary interceptor calls
+// ResolveResource, which discards them, and on both frameworks a streaming RPC
+// whose policy carries field_mappings is refused before resolution. See
+// README, "Extracted field forwarding".
 func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, action string, fields map[string]string, err error) {
 	if policy.Resource == "" {
 		return "", "", nil, fmt.Errorf("policy resource must not be empty")
@@ -63,9 +64,9 @@ func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, 
 	}
 
 	// Substitute in one pass over the template, after every value is known, so
-	// a value that spells "<other-placeholder>" is never rewritten by a later
-	// mapping: a request field must not control a part of the resource no
-	// policy declared.
+	// a value that spells "<other-placeholder>" is left as data, never rewritten
+	// by another mapping: a request field must not control a part of the
+	// resource no policy declared.
 	resource, err = substituteResource(resource, fields)
 	if err != nil {
 		return "", "", nil, err
@@ -102,7 +103,7 @@ func substituteResource(template string, values map[string]string) (string, erro
 		end += open + 1
 
 		// A '<' between this one and the '>' opens a nearer placeholder:
-		// "<a<b>" names "b".
+		// "<a<b>" names "b", so a placeholder name never contains '<'.
 		if j := strings.LastIndexByte(template[open+1:end], '<'); j >= 0 {
 			open = open + 1 + j
 		}

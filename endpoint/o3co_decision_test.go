@@ -219,8 +219,9 @@ func TestO3coVerifyDecision_IgnoresUnknownKeys(t *testing.T) {
 	}
 }
 
-// Without evaluation — an older verifier, or one that has not opted in —
-// Verify behaves exactly as it always has.
+// Without evaluation — a verifier that does not report one, or has not opted
+// in — an allow is still an allow, and the decision carries a nil Evaluation
+// (unknown).
 func TestO3coVerify_ResponseWithoutEvaluation_BehavesAsBefore(t *testing.T) {
 	allow := newTestEndpoint(t, serve(t, http.StatusOK, allowWithoutEvaluation).URL)
 	if err := allow.Verify(ctxWithToken("tok"), "r", "a"); err != nil {

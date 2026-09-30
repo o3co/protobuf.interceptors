@@ -52,11 +52,11 @@ func (e *UnconfirmedRevisionError) Error() string {
 // ResourceValueError reports a request field value that must not be
 // substituted into a resource template.
 //
-// A character structural in the backend's resource grammar would make the
-// string name a different resource type, not a different instance of the
-// guarded one, so resolution refuses the value: this is an authorization
-// outcome, not a malformed-input report. validateResourceValue in resolve.go
-// states the accepted character set and the grammar it mirrors.
+// Resolution refuses a value that is empty or carries a character outside the
+// verifier's segment token — notably '.' or ':', which would make the string
+// name a different resource type rather than a different instance of the
+// guarded one. The refusal is an authorization outcome, not a malformed-input
+// report. See README, "Placeholder values", for the accepted set.
 type ResourceValueError struct {
 	// Placeholder is the placeholder whose value was refused, without the
 	// surrounding angle brackets.

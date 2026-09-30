@@ -84,9 +84,10 @@ func WithO3coRequestIDHeaderKey(key string) O3coOption {
 // WithO3coHeaders adds static headers to every outgoing verify request. Later
 // calls merge into earlier ones, and win for a header both set.
 //
-// It is how the endpoint sends the shared credential auth.policy-verifier's
-// optional http.callerAuth gate expects (x-caller-token by default), which
-// answers "may this service ask for a decision?" rather than who the subject is.
+// Use it to send the shared credential that auth.policy-verifier's optional
+// http.callerAuth gate expects (x-caller-token by default). That credential
+// answers "may this service ask for a decision?", not who the subject is,
+// which Authorization carries.
 //
 // The headers the endpoint controls itself may not be set here: Content-Type,
 // Accept, Authorization and the request-ID header (see
@@ -106,16 +107,17 @@ func WithO3coHeaders(headers map[string]string) O3coOption {
 }
 
 // WithO3coRequireConfirmedRevision refuses an allow that is not established
-// against confirmed policy revisions (see interceptors.Decision.
-// RevisionConfirmed) with *interceptors.UnconfirmedRevisionError, which the
-// framework interceptors map to Internal. A deny is unaffected.
+// against confirmed policy revisions (see
+// [interceptors.Decision.RevisionConfirmed]) with
+// *interceptors.UnconfirmedRevisionError, which the framework interceptors map
+// to Internal. A deny is unaffected.
 //
 // The verifier reports evaluations only under verify.evaluationInResponse =
 // "include", and only for rules backed by a policy evaluator. Against a
-// verifier that has not opted in, every allow is refused, and so is an allow in
-// which a rule with no policy source satisfied a group. That cannot be checked at
-// construction, so the first refused allow whose response carried no
-// evaluation at all is logged once, at the error level, naming the setting.
+// verifier that has not opted in, every allow is refused, and so is an allow
+// in which a rule with no policy source satisfied a group. That cannot be
+// checked at construction, so the first refused allow whose response carried
+// no evaluation at all is logged once, at the error level, naming the setting.
 func WithO3coRequireConfirmedRevision() O3coOption {
 	return func(c *o3coBuildConfig) {
 		c.requireConfirmedRevision = true

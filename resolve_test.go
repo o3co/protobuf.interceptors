@@ -222,8 +222,9 @@ func TestResolveResourceWithFields_NilMessage_WithFieldMappings_ReturnsError(t *
 	}
 }
 
-// TestResolveResource_DelegatestoWithFields verifies that ResolveResource still
-// works correctly after being refactored to delegate to ResolveResourceWithFields.
+// TestResolveResource_DelegatesToWithFields pins that ResolveResource
+// substitutes a field mapping from the request message and returns the
+// policy's action.
 func TestResolveResource_DelegatesToWithFields(t *testing.T) {
 	policy := &pb.Policy{
 		Resource: "items/<name>",

@@ -28,7 +28,7 @@ type VerifierEndpoint interface {
 // DecisionVerifier is a VerifierEndpoint that can also report the decision
 // behind its verdict. The verification interceptors use VerifyDecision when an
 // endpoint implements it, and hand the decision to the service; an endpoint
-// that implements only VerifierEndpoint keeps working and reports nothing.
+// that implements only VerifierEndpoint works, and reports nothing.
 type DecisionVerifier interface {
 	VerifierEndpoint
 	// VerifyDecision is Verify, and also returns what the backend reported
