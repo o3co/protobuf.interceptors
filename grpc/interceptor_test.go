@@ -252,7 +252,8 @@ func TestChain_PlaceholderValueWithinGrammar_IsResolved(t *testing.T) {
 // TestChain_FieldMappings_ExtractedFieldsAreNotInContext is the gRPC half of the
 // contract the README's "Extracted field forwarding" table states: the gRPC
 // unary interceptor resolves with ResolveResource, which drops the extracted
-// values, so the verifier sees resource and action and nothing else.
+// values: they are absent from the context the verifier is called with, while
+// the substituted resource carries the mapped value.
 // TestConnectChain_FieldMappings_StoresExtractedFieldsInContext pins the
 // ConnectRPC half. If this fails because the fields are present, that table is
 // stale.

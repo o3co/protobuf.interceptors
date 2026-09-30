@@ -86,17 +86,21 @@ handler never runs, and the verifier is never asked.
 
 **If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
 dotted version, a non-Latin id — the request is denied. Three remedies work on
-every framework and every backend:
+every framework; which one fits depends on the backend:
 
 - **Percent-encode the value before it reaches the mapped request field.**
   Percent-encoding round-trips through the grammar (`1%2Emember` stays one
-  segment) and `%` is itself accepted, so the verifier can decode it back.
+  segment) and `%` is itself accepted, so the verifier can decode it back; on
+  another backend, the policies are written for the encoded form.
 - **Configure a `ResourceParser` on the verifier** written for your id syntax,
-  and encode to that syntax at the call site.
+  and encode to that syntax at the call site. This one needs auth.policy-verifier
+  (the o3co endpoint).
 - **Restructure the policy so the offending value is never substituted into the
   resource.** Guard the type the RPC actually owns (`resource: "subscriptions"`,
   `action: "read"`) and let the backend decide against the identity it already
   holds from the bearer token, instead of naming a DID in the resource string.
+  The verifier, OPA and Cedar see the token; the static endpoint matches
+  resource and action only, so it cannot make that decision.
 
 A fourth path — keeping the field mapping but dropping its placeholder from the
 resource template, so the value travels as request context instead — is **not
@@ -131,11 +135,12 @@ reads the context back out, sending it as the `context` object of `POST /verify`
 — OPA, Cedar and the static endpoint never look at it.
 
 **So on gRPC unary, moving a placeholder out of the resource template does not
-make its value available to the decision — it removes it**: the RPC stops being
-denied, but the verifier is asked a question with less information than before,
-which is worse than a denial. (A gRPC stream whose policy keeps the mapping still
-fails with `Internal`; see [Streaming](#streaming).) Use one of the three
-portable remedies above.
+make its value available to the decision — it removes it**: resolution no
+longer refuses the value, but the verifier decides without it, a question with
+less information than before, which is worse than a refusal. (A gRPC stream
+whose policy keeps the mapping still fails with `Internal`; see
+[Streaming](#streaming).) Use one of the remedies above that your backend
+supports.
 
 The gRPC unary path does not forward the values as ConnectRPC does. The stream
 interceptors' refusal of `field_mappings` is a separate limitation, on either
