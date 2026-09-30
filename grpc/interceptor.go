@@ -89,25 +89,20 @@ func newLogger(level slog.Level) *slog.Logger {
 }
 
 // generateRequestID returns a request ID formatted as YYYYMMDDHHmmss_<16 hex
-// digits>: the UTC second, so IDs sort by arrival in a log search, then 8
-// bytes from crypto/rand, so two requests that read the same clock value
-// still get distinct IDs.
+// digits>: the UTC second, so IDs sort by arrival to the second, then 8 bytes
+// from crypto/rand, so two requests that read the same clock value still get
+// distinct IDs. Within one second the order is arbitrary.
 func generateRequestID() string {
 	return requestIDAt(time.Now())
 }
 
 // requestIDAt is generateRequestID at the clock value now.
 func requestIDAt(now time.Time) string {
-	return now.UTC().Format("20060102150405") + "_" + hex.EncodeToString(randomBytes(8))
-}
-
-// randomBytes returns n bytes from crypto/rand. crypto/rand.Read never
-// returns an error on the platforms Go supports, and aborts the process if
-// the system's source fails.
-func randomBytes(n int) []byte {
-	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return b
+	var suffix [8]byte
+	// crypto/rand.Read never returns an error: it fills the buffer entirely,
+	// or crashes the program if Reader fails.
+	_, _ = rand.Read(suffix[:])
+	return now.UTC().Format("20060102150405") + "_" + hex.EncodeToString(suffix[:])
 }
 
 // extractBearerToken extracts the Bearer token from gRPC incoming metadata.

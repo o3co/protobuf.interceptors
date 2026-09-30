@@ -30,7 +30,7 @@ func TestRequestIDAt_ShapeAndPrefix(t *testing.T) {
 	if !requestIDShape.MatchString(id) {
 		t.Fatalf("request ID %q is not YYYYMMDDHHmmss_<16 hex digits>", id)
 	}
-	// The prefix is the UTC second, so IDs sort by arrival in a log search.
+	// The prefix is the UTC second, so IDs sort by arrival to the second.
 	if got, want := id[:14], "20260930044507"; got != want {
 		t.Fatalf("prefix = %q, want the UTC second %q", got, want)
 	}
