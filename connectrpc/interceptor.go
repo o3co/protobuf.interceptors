@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -305,10 +306,21 @@ func (c *authStreamingHandlerConn) Receive(msg any) error {
 		return err
 	}
 	if _, err := c.v.verify(c.ctx, c.resource, c.action, nil); err != nil {
-		if m, ok := msg.(proto.Message); ok {
-			proto.Reset(m)
-		}
+		clearMessage(msg)
 		return toConnectError(c.ctx, err)
 	}
 	return nil
+}
+
+// clearMessage zeroes a received message that must not be handed over: a
+// proto message is reset, and any other pointer, as a non-proto codec decodes
+// into, has its target set to the zero value.
+func clearMessage(m any) {
+	if msg, ok := m.(proto.Message); ok {
+		proto.Reset(msg)
+		return
+	}
+	if rv := reflect.ValueOf(m); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		rv.Elem().SetZero()
+	}
 }
