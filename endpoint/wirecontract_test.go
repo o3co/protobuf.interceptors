@@ -321,3 +321,28 @@ func TestWireContract_AnEnvelopeMissingARequiredKeyIsNotADecision(t *testing.T) 
 		}
 	}
 }
+
+// An allow never carries the keys the contract keeps for a deny, not even as
+// null: an allow that does is not a whole one, and a 200 carrying it does not
+// allow.
+func TestWireContract_AnAllowCarryingADenyKeyIsNotADecision(t *testing.T) {
+	c := wirecontract.Load(t)
+	if len(c.Decision.AllowNeverCarries) == 0 {
+		t.Fatal("the wire contract lists nothing an allow never carries")
+	}
+	for _, key := range c.Decision.AllowNeverCarries {
+		for name, value := range map[string]any{"a string": "x", "null": nil} {
+			t.Run(key+"/"+name, func(t *testing.T) {
+				allow := fill(t, "an allow", c.Decision.Required, map[string]any{
+					"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{}},
+				})
+				allow[key] = value
+				e := newTestEndpoint(t, serve(t, c.Status["allow"], mustJSON(t, allow)).URL)
+				d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+				if err == nil || d != nil {
+					t.Errorf("VerifyDecision = (%+v, %v), want (nil, an error)", d, err)
+				}
+			})
+		}
+	}
+}

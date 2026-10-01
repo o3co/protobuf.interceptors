@@ -478,6 +478,10 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		"a determiningPolicies that is not strings":   `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": [7]}}}]}}`,
 		"a resource of the wrong type":                `{"resource": 1, "action": "a", "decision": "allow", "reason": {"groups": []}}`,
 		"an allow whose code is of the wrong type":    `{"resource": "r", "action": "a", "decision": "allow", "code": 1, "reason": {"groups": []}}`,
+		"an allow with a code":                        `{"resource": "r", "action": "a", "decision": "allow", "code": "c", "reason": {"groups": []}}`,
+		"an allow with a message":                     `{"resource": "r", "action": "a", "decision": "allow", "message": "m", "reason": {"groups": []}}`,
+		"an allow with a null code":                   `{"resource": "r", "action": "a", "decision": "allow", "code": null, "reason": {"groups": []}}`,
+		"an allow with a null message":                `{"resource": "r", "action": "a", "decision": "allow", "message": null, "reason": {"groups": []}}`,
 		"a JSON array":                                `[` + group + `]`,
 		"JSON null":                                   `null`,
 	}
