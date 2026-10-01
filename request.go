@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -56,4 +57,25 @@ func requestIDAt(now time.Time) string {
 	// or crashes the program if Reader fails.
 	_, _ = rand.Read(suffix[:])
 	return now.UTC().Format("20060102150405") + "_" + hex.EncodeToString(suffix[:])
+}
+
+// InboundBearerToken returns the bearer token of a request whose
+// Authorization header or metadata carried values. A request that carried
+// none has no token and no error: whether that may proceed is the verifier's
+// decision. Otherwise the request must carry exactly one value, of the form
+// "Bearer <token>" with the scheme compared case-insensitively (RFC 9110
+// §11.1) and a non-empty token without whitespace (RFC 6750 §2.1); anything
+// else is an *UnauthenticatedError rather than an anonymous request.
+func InboundBearerToken(values []string) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) == 1 {
+		scheme, token, ok := strings.Cut(values[0], " ")
+		token = strings.TrimLeft(token, " ")
+		if ok && strings.EqualFold(scheme, "Bearer") && token != "" && !strings.ContainsAny(token, " \t") {
+			return token, nil
+		}
+	}
+	return "", &UnauthenticatedError{Reason: "authorization is not exactly one bearer credential"}
 }
