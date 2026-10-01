@@ -16,14 +16,10 @@ package grpc
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
-	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
@@ -59,8 +55,14 @@ func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 }
 
 // verify runs one authorization check and hands it to the observer, if any.
-func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string) (*interceptors.Decision, error) {
-	decision, err := endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+// A credential the interceptor could not read (credErr) refuses the check
+// without asking the verifier.
+func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string, credErr error) (*interceptors.Decision, error) {
+	var decision *interceptors.Decision
+	err := credErr
+	if err == nil {
+		decision, err = endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+	}
 	if c.observer != nil {
 		c.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
 	}
@@ -88,48 +90,16 @@ func newLogger(level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// generateRequestID returns a request ID formatted as YYYYMMDDHHmmss_<16 hex
-// digits>: the UTC second, so IDs sort by arrival to the second, then 8 bytes
-// from crypto/rand, so two requests that read the same clock value still get
-// distinct IDs. Within one second the order is arbitrary.
-func generateRequestID() string {
-	return requestIDAt(time.Now())
-}
-
-// requestIDAt is generateRequestID at the clock value now.
-func requestIDAt(now time.Time) string {
-	var suffix [8]byte
-	// crypto/rand.Read never returns an error: it fills the buffer entirely,
-	// or crashes the program if Reader fails.
-	_, _ = rand.Read(suffix[:])
-	return now.UTC().Format("20060102150405") + "_" + hex.EncodeToString(suffix[:])
-}
-
-// extractBearerToken extracts the Bearer token from gRPC incoming metadata.
-// Returns empty string if not present.
-func extractBearerToken(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ""
+// withInbound puts the request's bearer token and request ID on ctx. The
+// error is a credential that could not be read; it refuses only a method that
+// has a policy, since a method without one is not checked.
+func withInbound(ctx context.Context) (context.Context, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	token, err := interceptors.InboundBearerToken(md.Get("authorization"))
+	if token != "" {
+		ctx = interceptors.WithBearerToken(ctx, token)
 	}
-	vals := md.Get("authorization")
-	for _, v := range vals {
-		if strings.HasPrefix(v, "Bearer ") {
-			return strings.TrimPrefix(v, "Bearer ")
-		}
-	}
-	return ""
-}
-
-// extractOrGenerateRequestID extracts x-request-id from gRPC metadata, or generates one.
-func extractOrGenerateRequestID(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if ok {
-		if vals := md.Get("x-request-id"); len(vals) > 0 && vals[0] != "" {
-			return vals[0]
-		}
-	}
-	return generateRequestID()
+	return interceptors.WithRequestID(ctx, interceptors.InboundRequestID(md.Get("x-request-id"))), err
 }
 
 // PolicyOptionInterceptor returns a gRPC UnaryServerInterceptor that reads
@@ -198,14 +168,7 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 	cfg := newConfig(opts)
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		// Extract and store bearer token from incoming metadata.
-		if token := extractBearerToken(ctx); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
-		}
-
-		// Extract or generate request ID.
-		requestID := extractOrGenerateRequestID(ctx)
-		ctx = interceptors.WithRequestID(ctx, requestID)
+		ctx, credErr := withInbound(ctx)
 
 		// Guard: PolicyOptionInterceptor must have run before this interceptor.
 		if !interceptors.InterceptorRanFromContext(ctx) {
@@ -219,7 +182,7 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 		}
 
 		// Call the verifier endpoint.
-		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
+		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return nil, toGRPCError(err)
 		}

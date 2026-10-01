@@ -59,7 +59,7 @@ type authServerStream struct {
 func (s *authServerStream) Context() context.Context { return s.ctx }
 
 func (s *authServerStream) RecvMsg(m interface{}) error {
-	if _, err := s.cfg.verify(s.ctx, s.verifier, s.resource, s.action); err != nil {
+	if _, err := s.cfg.verify(s.ctx, s.verifier, s.resource, s.action, nil); err != nil {
 		s.log.Error("authorization re-check failed on RecvMsg",
 			"resource", s.resource,
 			"action", s.action,
@@ -134,16 +134,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 	log := newLogger(cfg.logLevel)
 
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		ctx := ss.Context()
-
-		// Extract and store bearer token from incoming metadata.
-		if token := extractBearerToken(ctx); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
-		}
-
-		// Extract or generate request ID.
-		requestID := extractOrGenerateRequestID(ctx)
-		ctx = interceptors.WithRequestID(ctx, requestID)
+		ctx, credErr := withInbound(ss.Context())
 
 		// Guard: PolicyOptionStreamInterceptor must have run before this interceptor.
 		if !interceptors.InterceptorRanFromContext(ctx) {
@@ -162,7 +153,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		// before it receives, and a handler that never calls RecvMsg would never
 		// be checked, so a check only inside RecvMsg would leave either
 		// unauthorized.
-		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
+		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			log.Error("authorization check failed before stream handler",
 				"resource", policyData.Resource,
