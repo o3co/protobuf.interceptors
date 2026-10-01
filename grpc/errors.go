@@ -26,9 +26,12 @@ import (
 // toGRPCError converts a framework-neutral error to a gRPC status error. The
 // caller is told only the code and a fixed message for it: an endpoint's
 // error can name the backend, the URL it called, or why a token was refused.
+// Canceled and DeadlineExceeded say that the RPC's own context, ctx, ended; an
+// endpoint that timed out or was canceled while the RPC was live failed, and
+// that is Internal.
 // The returned error unwraps to err, so an interceptor placed outside these
 // can still record it.
-func toGRPCError(err error) error {
+func toGRPCError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -41,9 +44,9 @@ func toGRPCError(err error) error {
 		return &statusError{status.New(codes.PermissionDenied, "access denied"), err}
 	case errors.As(err, &unauth):
 		return &statusError{status.New(codes.Unauthenticated, "unauthenticated"), err}
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled):
 		return &statusError{status.New(codes.Canceled, "request canceled"), err}
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return &statusError{status.New(codes.DeadlineExceeded, "deadline exceeded"), err}
 	default:
 		return &statusError{status.New(codes.Internal, "authorization check failed"), err}

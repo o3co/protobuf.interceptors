@@ -105,7 +105,7 @@ func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 
 		policy, err := getMethodPolicy(&cache, info.FullMethod)
 		if err != nil {
-			return nil, toGRPCError(fmt.Errorf("failed to look up method policy: %w", err))
+			return nil, toGRPCError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
 		}
 
 		if policy == nil {
@@ -129,7 +129,7 @@ func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 		// a denial rather than a server fault. Anything else still maps to
 		// Internal — an unmapped error must never let the handler run.
 		if err != nil {
-			return nil, toGRPCError(fmt.Errorf("failed to resolve resource: %w", err))
+			return nil, toGRPCError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -169,7 +169,7 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 		// Call the verifier endpoint.
 		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return nil, toGRPCError(err)
+			return nil, toGRPCError(ctx, err)
 		}
 
 		return handler(withDecision(ctx, decision), req)

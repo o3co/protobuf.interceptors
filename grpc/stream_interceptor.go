@@ -67,7 +67,7 @@ func (s *authServerStream) RecvMsg(m any) error {
 		if msg, ok := m.(proto.Message); ok {
 			proto.Reset(msg)
 		}
-		return toGRPCError(err)
+		return toGRPCError(s.ctx, err)
 	}
 	return nil
 }
@@ -89,7 +89,7 @@ func PolicyOptionStreamInterceptor() grpc.StreamServerInterceptor {
 
 		policy, err := getMethodPolicy(&cache, info.FullMethod)
 		if err != nil {
-			return toGRPCError(fmt.Errorf("failed to look up method policy: %w", err))
+			return toGRPCError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
 		}
 
 		if policy == nil {
@@ -109,7 +109,7 @@ func PolicyOptionStreamInterceptor() grpc.StreamServerInterceptor {
 		if err != nil {
 			// See PolicyOptionInterceptor: a refused placeholder value is a
 			// denial, everything else is Internal.
-			return toGRPCError(fmt.Errorf("failed to resolve resource: %w", err))
+			return toGRPCError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -155,7 +155,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		// unauthorized.
 		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return toGRPCError(err)
+			return toGRPCError(ctx, err)
 		}
 
 		wrapped := &authServerStream{
