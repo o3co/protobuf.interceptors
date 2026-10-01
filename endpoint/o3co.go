@@ -330,7 +330,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 		if success || resp.StatusCode == http.StatusForbidden {
 			kind = decisionEnvelope
 		}
-		wire = parseEnvelope(respBody, obj, kind)
+		wire = parseEnvelope(obj, kind)
 	}
 
 	e.logger.Debug("response received", "status", resp.StatusCode, "x-request-id", requestID)

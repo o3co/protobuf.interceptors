@@ -473,6 +473,11 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		"a null restricts":                            `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": null, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a restricts of the wrong type":               `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": "true", "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a restricts spelled in another case":         `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "Restricts": true, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a fractional determiningPoliciesOmitted":     `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": ["p"], "determiningPoliciesOmitted": 1.5}}}]}}`,
+		"an out-of-range determiningPoliciesOmitted":  `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": ["p"], "determiningPoliciesOmitted": 1e19}}}]}}`,
+		"a determiningPolicies that is not strings":   `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": [7]}}}]}}`,
+		"a resource of the wrong type":                `{"resource": 1, "action": "a", "decision": "allow", "reason": {"groups": []}}`,
+		"an allow whose code is of the wrong type":    `{"resource": "r", "action": "a", "decision": "allow", "code": 1, "reason": {"groups": []}}`,
 		"a JSON array":                                `[` + group + `]`,
 		"JSON null":                                   `null`,
 	}

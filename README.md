@@ -414,7 +414,9 @@ reading is not a decision and reports nothing. On a `200` that makes the answer
 an error, not an allow, and so does any other `2xx` and a `200` carrying a
 whole deny (which is still reported to the observer). The interceptors map that
 error to `Internal`. A `403` is a deny whatever its body holds; the body only
-reports why.
+reports why. Keys are matched as the contract spells them: one in another
+case (`Passed`, `Decision`) is a key the contract does not define, and is
+ignored like any other, so it cannot stand in for the key it resembles.
 
 ### Requiring a confirmed revision
 
