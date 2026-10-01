@@ -18,11 +18,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -35,6 +34,8 @@ type opaBuildConfig struct {
 	maxResponseBodySize int64
 	logger              *slog.Logger
 	requestIDHeaderKey  string
+	allowInsecure       bool
+	transport           http.RoundTripper
 }
 
 // OPAOption configures the OPA REST endpoint.
@@ -70,9 +71,37 @@ func WithOPALogLevel(level slog.Level) OPAOption {
 
 // WithOPARequestIDHeaderKey sets the HTTP header key for forwarding the request ID to OPA.
 // Default is "x-request-id". Set to empty string to disable forwarding.
+// Panics if key is not an RFC 7230 token, or is Authorization, Content-Type
+// or Accept.
 func WithOPARequestIDHeaderKey(key string) OPAOption {
+	mustBeRequestIDHeaderKey(key)
 	return func(c *opaBuildConfig) {
 		c.requestIDHeaderKey = key
+	}
+}
+
+// WithOPATransport sets the transport requests to OPA are sent over:
+// an *http.Transport whose TLSClientConfig holds a client certificate or a
+// private CA, for one. The endpoint's timeout and its refusal to follow
+// redirects hold over a transport that honours the request's context and does
+// not follow redirects itself, as *http.Transport does. Default is
+// http.DefaultTransport. Panics if rt is nil.
+func WithOPATransport(rt http.RoundTripper) OPAOption {
+	if rt == nil {
+		panic("transport must not be nil")
+	}
+	return func(c *opaBuildConfig) {
+		c.transport = rt
+	}
+}
+
+// WithOPAAllowInsecure permits a plaintext http base URL to a host other than
+// loopback. Every request to OPA carries the subject's bearer token, and over
+// plaintext anyone on the path can read and replay it, so NewOPAEndpoint
+// refuses such a URL without this option.
+func WithOPAAllowInsecure() OPAOption {
+	return func(c *opaBuildConfig) {
+		c.allowInsecure = true
 	}
 }
 
@@ -97,38 +126,16 @@ type opaInput struct {
 	Token    string `json:"token"`
 }
 
-// opaResponse is the JSON body returned by OPA's data API.
-// Result is a pointer so we can distinguish false from absent (undefined).
-type opaResponse struct {
-	Result *bool `json:"result,omitempty"`
-}
-
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
 // The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
-// Returns an error if baseURL or policyPath is empty, or if the URL is invalid.
+// It returns an error if policyPath is empty or baseURL does not name http or
+// https and a host, and refuses http to a host other than loopback without
+// WithOPAAllowInsecure.
 func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndpoint, error) {
-	rawBase := strings.TrimSpace(baseURL)
-	if rawBase == "" {
-		return nil, fmt.Errorf("baseURL must not be empty")
-	}
-
 	rawPath := strings.TrimSpace(policyPath)
 	if rawPath == "" {
 		return nil, fmt.Errorf("policyPath must not be empty")
 	}
-
-	if !strings.HasPrefix(rawBase, "http://") && !strings.HasPrefix(rawBase, "https://") {
-		rawBase = "http://" + rawBase
-	}
-
-	base, err := url.Parse(rawBase)
-	if err != nil {
-		return nil, fmt.Errorf("invalid OPA base URL: %w", err)
-	}
-
-	// Normalize: strip trailing slash from base path, strip leading slash from policyPath.
-	rawPath = strings.TrimPrefix(rawPath, "/")
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/data/" + rawPath
 
 	cfg := &opaBuildConfig{
 		timeout:             defaultTimeout,
@@ -140,8 +147,17 @@ func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndp
 		opt(cfg)
 	}
 
+	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithOPAAllowInsecure")
+	if err != nil {
+		return nil, err
+	}
+
+	// Normalize: strip trailing slash from base path, strip leading slash from policyPath.
+	rawPath = strings.TrimPrefix(rawPath, "/")
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/data/" + rawPath
+
 	return &opaEndpoint{
-		httpClient:          &http.Client{Timeout: cfg.timeout},
+		httpClient:          newHTTPClient(cfg.timeout, cfg.transport),
 		evaluateURL:         base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,
@@ -192,13 +208,15 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 	// Send the request.
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("OPA request failed: %w", err)
+		return requestError(ctx, "OPA request failed", err)
 	}
 	defer resp.Body.Close()
 
-	// Read the response body up to maxResponseBodySize bytes.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize))
+	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
 	if err != nil {
+		if ctx.Err() != nil {
+			return requestError(ctx, "reading the OPA response failed", err)
+		}
 		e.logger.Error("failed to read OPA response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}
@@ -207,25 +225,31 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 
 	// Non-2xx responses are treated as internal errors.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		const maxLoggedBodySize = 1024
-		logBody := respBody
-		if len(logBody) > maxLoggedBodySize {
-			logBody = logBody[:maxLoggedBodySize]
-		}
-		e.logger.Error("error response from OPA", "status", resp.StatusCode, "body", string(logBody), "x-request-id", requestID)
+		e.logger.Error("error response from OPA", "status", resp.StatusCode, "x-request-id", requestID)
+		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
 		return fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode)
 	}
 
-	// Parse the OPA decision.
-	var opaResp opaResponse
-	if err := json.Unmarshal(respBody, &opaResp); err != nil {
-		return fmt.Errorf("failed to parse OPA response: %w", err)
+	if oversized {
+		e.logger.Error("OPA response body exceeds the size bound", "status", resp.StatusCode, "x-request-id", requestID)
+		return errors.New("OPA response body exceeds the size bound")
 	}
 
-	// result absent (undefined) or false → deny.
-	if opaResp.Result == nil || !*opaResp.Result {
-		return &interceptors.DeniedError{Reason: "access denied by policy"}
+	// Only the exact key result, holding JSON true, allows: OPA's keys are
+	// case-sensitive, and a key in another case is not the decision.
+	obj, ok := decodeObject(respBody)
+	if !ok {
+		return errors.New("failed to parse OPA response: not a JSON object")
 	}
-
-	return nil
+	switch result := obj["result"].(type) {
+	case nil:
+		// result absent is OPA's undefined: deny.
+	case bool:
+		if result {
+			return nil
+		}
+	default:
+		return errors.New("failed to parse OPA response: result is not a boolean")
+	}
+	return &interceptors.DeniedError{Reason: "access denied by policy"}
 }

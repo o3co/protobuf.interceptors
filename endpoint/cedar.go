@@ -18,11 +18,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -38,7 +37,9 @@ type cedarBuildConfig struct {
 	principalPrefix     string
 	actionPrefix        string
 	resourcePrefix      string
-	principalResolver   func(ctx context.Context, token string) string
+	principalResolver   func(ctx context.Context, token string) (string, error)
+	allowInsecure       bool
+	transport           http.RoundTripper
 }
 
 // CedarOption configures the Cedar agent REST endpoint.
@@ -74,7 +75,10 @@ func WithCedarLogLevel(level slog.Level) CedarOption {
 
 // WithCedarRequestIDHeaderKey sets the HTTP header key for forwarding the request ID
 // to the Cedar agent. Default is "x-request-id". Set to empty string to disable forwarding.
+// Panics if key is not an RFC 7230 token, or is Authorization, Content-Type
+// or Accept.
 func WithCedarRequestIDHeaderKey(key string) CedarOption {
+	mustBeRequestIDHeaderKey(key)
 	return func(c *cedarBuildConfig) {
 		c.requestIDHeaderKey = key
 	}
@@ -104,14 +108,45 @@ func WithCedarResourcePrefix(prefix string) CedarOption {
 	}
 }
 
-// WithCedarPrincipalResolver sets a custom function to resolve the principal ID from the
-// raw bearer token. The default resolver returns the token value as-is.
-func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) string) CedarOption {
+// WithCedarPrincipalResolver sets the function that authenticates the bearer
+// token and returns the id of the principal it stands for. NewCedarEndpoint
+// requires it: the Cedar agent decides for whatever principal it is given and
+// authenticates nothing, so the resolver is where the token is checked, and
+// must verify it — a JWT's signature, expiry, issuer and audience — rather
+// than only read it. An error or an empty id refuses the request as
+// *interceptors.UnauthenticatedError before the agent is asked; the error
+// does not reach the RPC caller. Panics if fn is nil.
+func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) (string, error)) CedarOption {
 	if fn == nil {
 		panic("principalResolver must not be nil")
 	}
 	return func(c *cedarBuildConfig) {
 		c.principalResolver = fn
+	}
+}
+
+// WithCedarTransport sets the transport requests to the Cedar agent are sent over:
+// an *http.Transport whose TLSClientConfig holds a client certificate or a
+// private CA, for one. The endpoint's timeout and its refusal to follow
+// redirects hold over a transport that honours the request's context and does
+// not follow redirects itself, as *http.Transport does. Default is
+// http.DefaultTransport. Panics if rt is nil.
+func WithCedarTransport(rt http.RoundTripper) CedarOption {
+	if rt == nil {
+		panic("transport must not be nil")
+	}
+	return func(c *cedarBuildConfig) {
+		c.transport = rt
+	}
+}
+
+// WithCedarAllowInsecure permits a plaintext http base URL to a host other
+// than loopback. Over plaintext anyone on the path can read and alter what is
+// asked and what is answered, so NewCedarEndpoint refuses such a URL without
+// this option.
+func WithCedarAllowInsecure() CedarOption {
+	return func(c *cedarBuildConfig) {
+		c.allowInsecure = true
 	}
 }
 
@@ -125,7 +160,7 @@ type cedarEndpoint struct {
 	principalPrefix     string
 	actionPrefix        string
 	resourcePrefix      string
-	principalResolver   func(ctx context.Context, token string) string
+	principalResolver   func(ctx context.Context, token string) (string, error)
 }
 
 // cedarRequest is the JSON body sent to the Cedar agent's is_authorized API.
@@ -136,36 +171,38 @@ type cedarRequest struct {
 	Context   map[string]any `json:"context"`
 }
 
-// cedarResponse is the JSON body returned by the Cedar agent's is_authorized API.
-type cedarResponse struct {
-	Decision string `json:"decision"`
-}
-
-// formatEntityUID formats a Cedar entity UID as {entityType}::"{id}".
+// formatEntityUID formats a Cedar entity UID, {entityType}::"{id}", with id
+// escaped as a Cedar string literal. Unescaped, a quote or backslash in id
+// would end the literal or escape what follows it, and the UID would name
+// another entity or none. Control characters are escaped as \u{...} too.
 func formatEntityUID(entityType, id string) string {
-	return fmt.Sprintf(`%s::"%s"`, entityType, id)
+	var b strings.Builder
+	b.WriteString(entityType)
+	b.WriteString(`::"`)
+	for _, r := range id {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\u{%x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // NewCedarEndpoint constructs a VerifierEndpoint that calls the Cedar agent REST API.
 // The authorize URL is constructed as: {baseURL}/v1/is_authorized.
-// Returns an error if baseURL is empty or invalid.
+// It returns an error without WithCedarPrincipalResolver, or unless baseURL
+// names http or https and a host, and refuses http to a host other than
+// loopback without WithCedarAllowInsecure.
+//
+// The endpoint does no authentication of its own: the principal it asks
+// about is the one the resolver returns.
 func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, error) {
-	rawBase := strings.TrimSpace(baseURL)
-	if rawBase == "" {
-		return nil, fmt.Errorf("baseURL must not be empty")
-	}
-
-	if !strings.HasPrefix(rawBase, "http://") && !strings.HasPrefix(rawBase, "https://") {
-		rawBase = "http://" + rawBase
-	}
-
-	base, err := url.Parse(rawBase)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Cedar agent base URL: %w", err)
-	}
-
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/is_authorized"
-
 	cfg := &cedarBuildConfig{
 		timeout:             defaultTimeout,
 		maxResponseBodySize: defaultMaxResponseBodySize,
@@ -174,14 +211,23 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 		principalPrefix:     "User",
 		actionPrefix:        "Action",
 		resourcePrefix:      "Resource",
-		principalResolver:   func(_ context.Context, token string) string { return token },
 	}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
+	if cfg.principalResolver == nil {
+		return nil, errors.New("a principal resolver is required: WithCedarPrincipalResolver authenticates the bearer token and names the principal")
+	}
+
+	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithCedarAllowInsecure")
+	if err != nil {
+		return nil, err
+	}
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/is_authorized"
+
 	return &cedarEndpoint{
-		httpClient:          &http.Client{Timeout: cfg.timeout},
+		httpClient:          newHTTPClient(cfg.timeout, cfg.transport),
 		authorizeURL:        base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,
@@ -203,8 +249,11 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 		return err
 	}
 
-	// Resolve the principal ID from the token.
-	principalID := e.principalResolver(ctx, token)
+	principalID, err := e.principalResolver(ctx, token)
+	if err != nil || principalID == "" {
+		e.logger.Debug("principal resolver refused the bearer token", "error", err, "x-request-id", getRequestID(ctx))
+		return &interceptors.UnauthenticatedError{Reason: "invalid or expired token"}
+	}
 
 	// Build the Cedar agent request body using entity UID format.
 	reqBody := cedarRequest{
@@ -238,13 +287,15 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	// Send the request.
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("Cedar agent request failed: %w", err)
+		return requestError(ctx, "request to the Cedar agent failed", err)
 	}
 	defer resp.Body.Close()
 
-	// Read the response body up to maxResponseBodySize bytes.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize))
+	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
 	if err != nil {
+		if ctx.Err() != nil {
+			return requestError(ctx, "reading the Cedar agent response failed", err)
+		}
 		e.logger.Error("failed to read Cedar agent response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}
@@ -253,24 +304,24 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 
 	// Non-2xx responses are treated as internal errors.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		const maxLoggedBodySize = 1024
-		logBody := respBody
-		if len(logBody) > maxLoggedBodySize {
-			logBody = logBody[:maxLoggedBodySize]
-		}
-		e.logger.Error("error response from Cedar agent", "status", resp.StatusCode, "body", string(logBody), "x-request-id", requestID)
-		return fmt.Errorf("Cedar agent returned non-2xx status: %d", resp.StatusCode)
+		e.logger.Error("error response from Cedar agent", "status", resp.StatusCode, "x-request-id", requestID)
+		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
+		return fmt.Errorf("the Cedar agent returned non-2xx status: %d", resp.StatusCode)
 	}
 
-	// Parse the Cedar agent decision.
-	var cedarResp cedarResponse
-	if err := json.Unmarshal(respBody, &cedarResp); err != nil {
-		return fmt.Errorf("failed to parse Cedar agent response: %w", err)
+	if oversized {
+		e.logger.Error("Cedar agent response body exceeds the size bound", "status", resp.StatusCode, "x-request-id", requestID)
+		return errors.New("the Cedar agent response body exceeds the size bound")
 	}
 
-	if cedarResp.Decision == "Allow" {
+	// Only the exact key decision, holding "Allow", allows: the agent's keys
+	// are case-sensitive, and a key in another case is not the decision.
+	obj, ok := decodeObject(respBody)
+	if !ok {
+		return errors.New("failed to parse Cedar agent response: not a JSON object")
+	}
+	if obj["decision"] == "Allow" {
 		return nil
 	}
-
 	return &interceptors.DeniedError{Reason: "access denied by policy"}
 }

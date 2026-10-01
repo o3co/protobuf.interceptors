@@ -205,7 +205,17 @@ import (
     "github.com/o3co/protobuf.interceptors/endpoint"
 )
 
-verifier, _ := endpoint.NewCedarEndpoint("http://localhost:8180")
+// The Cedar agent authenticates nothing: the resolver verifies the bearer
+// token and names the principal it stands for.
+verifier, _ := endpoint.NewCedarEndpoint("http://localhost:8180",
+    endpoint.WithCedarPrincipalResolver(func(ctx context.Context, token string) (string, error) {
+        claims, err := verifyJWT(ctx, token) // signature, expiry, issuer, audience
+        if err != nil {
+            return "", err
+        }
+        return claims.Subject, nil
+    }),
+)
 
 mux := http.NewServeMux()
 path, handler := foopbconnect.NewFooServiceHandler(
@@ -225,9 +235,58 @@ The `endpoint` package provides four backends:
 | Backend | Constructor | Protocol |
 |---|---|---|
 | OPA | `endpoint.NewOPAEndpoint(baseURL, policyPath)` | `POST /v1/data/{path}` |
-| Cedar Agent | `endpoint.NewCedarEndpoint(baseURL)` | `POST /v1/is_authorized` |
+| Cedar Agent | `endpoint.NewCedarEndpoint(baseURL, endpoint.WithCedarPrincipalResolver(fn))` | `POST /v1/is_authorized` |
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | Local evaluation |
+
+**The Cedar endpoint does no authentication.** The Cedar agent decides for
+whatever principal it is asked about, and is never shown the bearer token, so
+`NewCedarEndpoint` requires `WithCedarPrincipalResolver`: a function that
+verifies the token — for a JWT its signature, expiry, issuer and audience — and
+returns the principal's id. A resolver that only decodes the token lets any
+caller name any principal. An error or an empty id is an
+`UnauthenticatedError`, and the agent is not asked. The id is escaped as a
+Cedar string literal, so a quote or backslash in it cannot change the entity
+it names.
+
+A base URL names its scheme, `http` or `https`, and a host; one without either
+is refused at construction rather than guessed at. An o3co or OPA request
+carries the subject's bearer token, and a Cedar request the principal resolved
+from it, so `http://` is accepted only to loopback — `localhost`, `127.0.0.0/8`, `::1` — unless the
+endpoint is given `WithO3coAllowInsecure()`, `WithOPAAllowInsecure()` or
+`WithCedarAllowInsecure()`. Anywhere else, use `https://`. `localhost` is
+accepted by name, in any case, and resolves through `/etc/hosts` and DNS like
+any other host; a literal address is accepted only as written in 127.0.0.0/8
+or as `::1` (an IPv4-mapped `::ffff:127.x.y.z` included), so `localhost.`,
+`foo.localhost`, `127.1`, `2130706433`, `0.0.0.0` and a zoned `::1%lo0` are
+not loopback.
+
+No HTTP backend follows a redirect: a `3xx` is an error, so the request and
+the bearer token on it reach only the backend that was configured.
+
+When the caller's context is cancelled or its deadline passes, an HTTP
+endpoint's error wraps `ctx.Err()`, so `errors.Is` finds `context.Canceled` or
+`context.DeadlineExceeded`. The endpoint's own timeout is the backend failing
+to answer, and wraps neither.
+
+For mutual TLS or a private CA, give the endpoint the transport to send over —
+`WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,
+for example an `*http.Transport` with its `TLSClientConfig` set. The endpoint's
+timeout and its refusal to follow redirects still apply to a transport that
+honours the request's context and does not follow redirects itself, as
+`*http.Transport` does.
+
+```go
+transport := http.DefaultTransport.(*http.Transport).Clone()
+transport.TLSClientConfig = &tls.Config{
+    RootCAs:      privateCAs,
+    Certificates: []tls.Certificate{clientCert},
+}
+verifier, err := endpoint.NewO3coEndpoint(
+    "https://verifier.internal:3000",
+    endpoint.WithO3coTransport(transport),
+)
+```
 
 ### o3co endpoint options
 
@@ -236,9 +295,11 @@ The `endpoint` package provides four backends:
 | `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. |
 | `WithO3coMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. |
 | `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
-| `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. |
+| `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`; a key a `WithO3coHeaders` header also names makes `NewO3coEndpoint` return an error. The OPA and Cedar options check the same. |
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
+| `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
 optional `http.callerAuth` gate turned on. That gate expects a shared credential
@@ -328,9 +389,9 @@ deny `code` in `Decision.Code`.
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The
 caller still gets `PermissionDenied: access denied`, and no error this library
-returns carries a decision in its message. The endpoint does not log response
-bodies at its default level either — the error line names the status and the
-code, and the body is at `Debug`.
+returns carries a decision in its message. No endpoint logs response
+bodies at its default level either — the error line names the status, the
+request ID and (o3co) the code, and the body is at `Debug`.
 
 **What each rule reported.** A policy-backed rule's outcome carries an
 `Evaluation`, but only when the verifier sets
@@ -357,12 +418,22 @@ request ID, so the two records join on it. The verifier keeps an
 `[A-Za-z0-9-_.:+/=#]`; an ID outside that shape reaches it as none, and joins
 nothing.
 
-The HTTP status still decides. A body that is empty, not a decision, missing a
-key the verifier's contract requires, null or mistyped anywhere it types a
-value, or larger than `WithO3coMaxResponseBodySize` reports nothing and leaves
-the verdict to the status. The body can refuse but never grant: a `2xx` whose
-`decision` is anything but `allow` fails closed, however malformed the rest of
-it is, and a whole deny sent that way is still reported to the observer.
+An allow takes both the status and the body: a `200` whose body is a whole
+decision envelope with `decision: "allow"`. A body that is empty, not JSON,
+missing a key the verifier's contract requires, null or mistyped anywhere it
+types a value, an allow carrying a deny's `code` or `message` (even as null),
+larger than `WithO3coMaxResponseBodySize`, or cut off while
+reading is not a decision and reports nothing. On a `200` that makes the answer
+an error, not an allow, and so does any other `2xx` and a `200` carrying a
+whole deny (which is still reported to the observer). The interceptors map that
+error to `Internal`. A `403` is a deny whatever its body holds; the body only
+reports why. Keys are matched as the contract spells them: one in another
+case (`Passed`, `Decision`) is a key the contract does not define, and is
+ignored like any other, so it cannot stand in for the key it resembles. The
+exception is `restricts` in another case, which is refused rather than
+ignored: the envelope is then not whole, and a `200` carrying it fails closed.
+OPA's `result` and the Cedar agent's `decision` are likewise read only by
+their exact key.
 
 ### Requiring a confirmed revision
 

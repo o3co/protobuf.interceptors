@@ -19,11 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"math"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +38,8 @@ type o3coBuildConfig struct {
 	requestIDHeaderKey       string
 	headers                  http.Header
 	requireConfirmedRevision bool
+	allowInsecure            bool
+	transport                http.RoundTripper
 }
 
 // O3coOption configures the o3co endpoint.
@@ -75,7 +74,10 @@ func WithO3coLogLevel(level slog.Level) O3coOption {
 
 // WithO3coRequestIDHeaderKey sets the HTTP header key for forwarding the request ID.
 // Default is "x-request-id". Set to empty string to disable forwarding.
+// Panics if key is not an RFC 7230 token, or is Authorization, Content-Type
+// or Accept.
 func WithO3coRequestIDHeaderKey(key string) O3coOption {
+	mustBeRequestIDHeaderKey(key)
 	return func(c *o3coBuildConfig) {
 		c.requestIDHeaderKey = key
 	}
@@ -126,10 +128,30 @@ func WithO3coRequireConfirmedRevision() O3coOption {
 	}
 }
 
-// endpointControlledHeaders are the headers Verify sets from its own state, and
-// which a static header therefore must not overwrite. The request-ID header is
-// added to this set at construction, since its name is configurable.
-var endpointControlledHeaders = []string{"Content-Type", "Accept", "Authorization"}
+// WithO3coTransport sets the transport requests to the verifier are sent over:
+// an *http.Transport whose TLSClientConfig holds a client certificate or a
+// private CA, for one. The endpoint's timeout and its refusal to follow
+// redirects hold over a transport that honours the request's context and does
+// not follow redirects itself, as *http.Transport does. Default is
+// http.DefaultTransport. Panics if rt is nil.
+func WithO3coTransport(rt http.RoundTripper) O3coOption {
+	if rt == nil {
+		panic("transport must not be nil")
+	}
+	return func(c *o3coBuildConfig) {
+		c.transport = rt
+	}
+}
+
+// WithO3coAllowInsecure permits a plaintext http base URL to a host other
+// than loopback. Every verify request carries the subject's bearer token, and
+// over plaintext anyone on the path can read and replay it, so
+// NewO3coEndpoint refuses such a URL without this option.
+func WithO3coAllowInsecure() O3coOption {
+	return func(c *o3coBuildConfig) {
+		c.allowInsecure = true
+	}
+}
 
 // validateStaticHeaders refuses a static header that would override one of the
 // endpoint's own, or that is not a well-formed header at all. Rejecting CR, LF
@@ -164,23 +186,6 @@ func validateStaticHeaders(headers http.Header, requestIDHeaderKey string) error
 	return nil
 }
 
-// validHeaderName reports whether name is a non-empty RFC 7230 field-name.
-func validHeaderName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // o3coEndpoint implements DecisionVerifier by calling the o3co auth.policy-verifier REST API.
 type o3coEndpoint struct {
 	httpClient          *http.Client
@@ -198,26 +203,11 @@ type o3coEndpoint struct {
 }
 
 // NewO3coEndpoint constructs an o3coEndpoint that calls POST {baseURL}/verify.
-// Returns an error if baseURL is empty or invalid.
+// It returns an error unless baseURL names http or https and a host, and
+// refuses http to a host other than loopback without WithO3coAllowInsecure.
 //
 // The endpoint it returns is also a DecisionVerifier.
 func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, error) {
-	rawBase := strings.TrimSpace(baseURL)
-	if rawBase == "" {
-		return nil, fmt.Errorf("baseURL must not be empty")
-	}
-
-	if !strings.HasPrefix(rawBase, "http://") && !strings.HasPrefix(rawBase, "https://") {
-		rawBase = "http://" + rawBase
-	}
-
-	base, err := url.Parse(rawBase)
-	if err != nil {
-		return nil, fmt.Errorf("invalid authorization base url: %w", err)
-	}
-
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/verify"
-
 	cfg := &o3coBuildConfig{
 		timeout:             defaultTimeout,
 		maxResponseBodySize: defaultMaxResponseBodySize,
@@ -228,6 +218,12 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 		opt(cfg)
 	}
 
+	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithO3coAllowInsecure")
+	if err != nil {
+		return nil, err
+	}
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/verify"
+
 	// After every option is applied: the request-ID header name a static header
 	// may collide with is only known once they all have been.
 	if err := validateStaticHeaders(cfg.headers, cfg.requestIDHeaderKey); err != nil {
@@ -235,7 +231,7 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 	}
 
 	return &o3coEndpoint{
-		httpClient:               &http.Client{Timeout: cfg.timeout},
+		httpClient:               newHTTPClient(cfg.timeout, cfg.transport),
 		verifyURL:                base.String(),
 		maxResponseBodySize:      cfg.maxResponseBodySize,
 		logger:                   cfg.logger,
@@ -254,13 +250,14 @@ func (e *o3coEndpoint) Verify(ctx context.Context, resource, action string) erro
 
 // VerifyDecision is Verify, and also returns the decision the verifier sent.
 //
-// The HTTP status decides; the body only adds to it. A 2xx is an allow and a
-// 403 a deny whatever the body holds, except that a 2xx whose decision member
-// is anything but allow fails closed — returning the decision when the body
-// is a whole one. A body that is empty, not a whole envelope as the wire
-// contract defines it, or past the size bound reports nothing: the decision
-// is nil and the verdict is the status's alone. On a deny the decision is also
-// on the *interceptors.DeniedError.
+// An allow takes both the status and the body: a 200 whose body is a whole
+// decision envelope, as the wire contract defines it, with decision "allow".
+// Any other 2xx, and a 200 whose body is empty, not a whole envelope, past the
+// size bound, cut off while reading or a whole deny, is an error, never an
+// allow. A 403 is a deny whatever its body holds. A body that is not a whole
+// envelope reports nothing, so the decision is then nil; a whole one is
+// returned with any verdict. On a deny the decision is also on the
+// *interceptors.DeniedError.
 func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action string) (*interceptors.Decision, error) {
 	// --- Retrieve bearer token from context -----------------------------------
 	token, err := getBearerToken(ctx)
@@ -307,44 +304,35 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	// --- Send request ---------------------------------------------------------
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, requestError(ctx, "request failed", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response body up to maxResponseBodySize bytes (memory protection).
-	// One byte more tells a body at the bound from one past it, which is not
-	// read as a decision: a truncated decision would be part of one.
-	limit := e.maxResponseBodySize
-	if limit < math.MaxInt64 {
-		limit++
-	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, requestError(ctx, "reading the response failed", err)
+		}
 		e.logger.Error("failed to read response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	var (
-		obj  map[string]any
-		wire *wireDecision
-	)
-	if int64(len(respBody)) > e.maxResponseBodySize {
-		respBody = respBody[:e.maxResponseBodySize]
+	var wire *wireDecision
+	if oversized {
 		e.logger.Debug("response body exceeds the size bound; not read as a decision", "status", resp.StatusCode, "x-request-id", requestID)
-	} else if o, ok := decodeObject(respBody); ok {
-		obj = o
+	} else if obj, ok := decodeObject(respBody); ok {
 		kind := errorEnvelope
 		if success || resp.StatusCode == http.StatusForbidden {
 			kind = decisionEnvelope
 		}
-		wire = parseEnvelope(respBody, obj, kind)
+		wire = parseEnvelope(obj, kind)
 	}
 
 	e.logger.Debug("response received", "status", resp.StatusCode, "x-request-id", requestID)
 
 	// --- Evaluate based on status code ----------------------------------------
 	if success {
-		return e.acceptAllow(obj, wire, resp.StatusCode, requestID)
+		return e.acceptAllow(wire, resp.StatusCode, requestID)
 	}
 
 	// The body — reason, evaluations, policy ids — stays off the default
@@ -354,12 +342,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 		code = wire.Code
 	}
 	e.logger.Error("error response from authorization server", "status", resp.StatusCode, "code", code, "x-request-id", requestID)
-	const maxLoggedBodySize = 1024
-	logBody := respBody
-	if len(logBody) > maxLoggedBodySize {
-		logBody = logBody[:maxLoggedBodySize]
-	}
-	e.logger.Debug("error response body", "body", string(logBody), "x-request-id", requestID)
+	e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
 
 	if resp.StatusCode == http.StatusForbidden {
 		decision := wire.toDecision(requestID)
@@ -378,16 +361,15 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	return nil, fmt.Errorf("authorization service error: %d", resp.StatusCode)
 }
 
-// acceptAllow decides what a 2xx answer amounts to. obj is its body decoded,
-// nil when the body is not a JSON object within the size bound, and wire the
-// envelope read from it, nil when it is not a whole one.
-func (e *o3coEndpoint) acceptAllow(obj map[string]any, wire *wireDecision, status int, requestID string) (*interceptors.Decision, error) {
+// acceptAllow decides what a 2xx answer amounts to. wire is the envelope read
+// from its body, nil when the body is not a whole one.
+func (e *o3coEndpoint) acceptAllow(wire *wireDecision, status int, requestID string) (*interceptors.Decision, error) {
 	decision := wire.toDecision(requestID)
-	// Read from obj rather than wire: a body too malformed to be an envelope
-	// still refuses when its verdict is anything but allow.
-	if verdict, claimed := obj["decision"]; claimed && verdict != "allow" {
-		e.logger.Error("authorization server answered a success status with a decision other than allow", "status", status, "x-request-id", requestID)
-		return decision, fmt.Errorf("authorization service error: %d with a decision other than allow", status)
+	// The body is not logged at the default level: it may carry the
+	// decision's reasons, evaluations and policy ids.
+	if status != http.StatusOK || wire == nil || wire.Decision != "allow" {
+		e.logger.Error("authorization server answered a success status without a whole allow", "status", status, "x-request-id", requestID)
+		return decision, fmt.Errorf("authorization service error: %d without a whole allow", status)
 	}
 	if e.requireConfirmedRevision && !decision.RevisionConfirmed() {
 		if !carriesEvaluation(decision) {

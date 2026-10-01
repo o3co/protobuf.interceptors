@@ -135,3 +135,18 @@ func TestOPAVerify_RequestBody_ContainsInputFields(t *testing.T) {
 	ep, _ := NewOPAEndpoint(srv.URL, "authz/allow")
 	_ = ep.Verify(ctxWithToken("my-tok"), "posts", "read")
 }
+
+// OPA's keys are case-sensitive: a key in another case is not result, and
+// cannot allow.
+func TestOPAVerify_ResultInAnotherCase_DoesNotAllow(t *testing.T) {
+	for _, body := range []string{`{"result": false, "Result": true}`, `{"RESULT": true}`, `{"Result": true}`} {
+		t.Run(body, func(t *testing.T) {
+			ep, _ := NewOPAEndpoint(serve(t, http.StatusOK, body).URL, "authz/allow")
+			err := ep.Verify(ctxWithToken("tok"), "resource", "read")
+			var denied *interceptors.DeniedError
+			if !errors.As(err, &denied) {
+				t.Fatalf("expected *DeniedError, got %T: %v", err, err)
+			}
+		})
+	}
+}
