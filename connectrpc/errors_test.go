@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -71,8 +72,10 @@ func TestConnectChain_CallerMessageIsFixed(t *testing.T) {
 		{"denied", &interceptors.DeniedError{Reason: "denied by http://opa.internal:8181"}, connect.CodePermissionDenied, "access denied"},
 		{"unauthenticated", &interceptors.UnauthenticatedError{Reason: "OPA says token expired"}, connect.CodeUnauthenticated, "unauthenticated"},
 		{"backend failure", backendFailure(errors.New("connection refused")), connect.CodeInternal, "authorization check failed"},
-		{"canceled", backendFailure(context.Canceled), connect.CodeCanceled, "request canceled"},
-		{"deadline exceeded", backendFailure(context.DeadlineExceeded), connect.CodeDeadlineExceeded, "deadline exceeded"},
+		// The endpoint's own timeout or cancellation, while the RPC is live, is
+		// the service's failure, not the caller's deadline.
+		{"endpoint canceled", backendFailure(context.Canceled), connect.CodeInternal, "authorization check failed"},
+		{"endpoint timed out", backendFailure(context.DeadlineExceeded), connect.CodeInternal, "authorization check failed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,4 +124,35 @@ func TestConnectVerification_ReturnedErrorUnwrapsToTheCause(t *testing.T) {
 		t.Errorf("error %v does not unwrap to the endpoint's error", err)
 	}
 	assertFixedMessage(t, err, connect.CodeInternal, "authorization check failed")
+}
+
+// When the RPC's own context has ended, the caller is told so.
+func TestConnectVerification_RPCContextEnded(t *testing.T) {
+	base := interceptors.WithPolicy(interceptors.MarkInterceptorRan(context.Background()), "resource", "read")
+	canceled, cancel := context.WithCancel(base)
+	cancel()
+	expired, cancelExpired := context.WithDeadline(base, time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	cases := []struct {
+		name    string
+		ctx     context.Context
+		code    connect.Code
+		message string
+	}{
+		{"canceled", canceled, connect.CodeCanceled, "request canceled"},
+		{"deadline exceeded", expired, connect.CodeDeadlineExceeded, "deadline exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := policyconnect.VerificationInterceptor(endpointtest.Func(
+				func(ctx context.Context, _, _ string) error { return backendFailure(ctx.Err()) },
+			)).WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+				t.Fatal("the handler must not run")
+				return nil
+			})
+			err := wrapped(tc.ctx, &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}})
+			assertFixedMessage(t, err, tc.code, tc.message)
+		})
+	}
 }
