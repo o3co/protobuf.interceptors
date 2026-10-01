@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpointtest"
@@ -71,8 +72,10 @@ func TestChain_CallerMessageIsFixed(t *testing.T) {
 		{"denied", &interceptors.DeniedError{Reason: "denied by http://opa.internal:8181"}, codes.PermissionDenied, "access denied"},
 		{"unauthenticated", &interceptors.UnauthenticatedError{Reason: "OPA says token expired"}, codes.Unauthenticated, "unauthenticated"},
 		{"backend failure", backendFailure(errors.New("connection refused")), codes.Internal, "authorization check failed"},
-		{"canceled", backendFailure(context.Canceled), codes.Canceled, "request canceled"},
-		{"deadline exceeded", backendFailure(context.DeadlineExceeded), codes.DeadlineExceeded, "deadline exceeded"},
+		// The endpoint's own timeout or cancellation, while the RPC is live, is
+		// the service's failure, not the caller's deadline.
+		{"endpoint canceled", backendFailure(context.Canceled), codes.Internal, "authorization check failed"},
+		{"endpoint timed out", backendFailure(context.DeadlineExceeded), codes.Internal, "authorization check failed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,4 +124,36 @@ func TestVerificationInterceptor_ReturnedErrorUnwrapsToTheCause(t *testing.T) {
 		t.Errorf("error %v does not unwrap to the endpoint's error", err)
 	}
 	assertFixedMessage(t, err, codes.Internal, "authorization check failed")
+}
+
+// When the RPC's own context has ended, the caller is told so.
+func TestVerificationInterceptor_RPCContextEnded(t *testing.T) {
+	base := interceptors.WithPolicy(interceptors.MarkInterceptorRan(context.Background()), "resource", "read")
+	canceled, cancel := context.WithCancel(base)
+	cancel()
+	expired, cancelExpired := context.WithDeadline(base, time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	cases := []struct {
+		name    string
+		ctx     context.Context
+		code    codes.Code
+		message string
+	}{
+		{"canceled", canceled, codes.Canceled, "request canceled"},
+		{"deadline exceeded", expired, codes.DeadlineExceeded, "deadline exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			interceptor := policygrpc.VerificationInterceptor(endpointtest.Func(
+				func(ctx context.Context, _, _ string) error { return backendFailure(ctx.Err()) },
+			))
+			_, err := interceptor(tc.ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.v1.TestService/GetResource"},
+				func(context.Context, any) (any, error) {
+					t.Fatal("the handler must not run")
+					return nil, nil
+				})
+			assertFixedMessage(t, err, tc.code, tc.message)
+		})
+	}
 }
