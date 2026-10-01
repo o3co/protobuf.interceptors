@@ -30,30 +30,27 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
-// getPolicyFromSpec extracts the Policy proto option from a connect.Spec's Schema.
-// Returns nil if no policy option is defined.
-func getPolicyFromSpec(spec connect.Spec) *pb.Policy {
+// getPolicyFromSpec returns the policy of the method spec describes, nil when
+// its descriptor carries no policy option. A spec whose Schema is not a method
+// descriptor — a handler built without connect.WithSchema — is an error, not
+// "no policy": its policy cannot be known.
+func getPolicyFromSpec(spec connect.Spec) (*pb.Policy, error) {
 	md, ok := spec.Schema.(protoreflect.MethodDescriptor)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("no method descriptor for %q: build the handler with connect.WithSchema", spec.Procedure)
 	}
-	opts := md.Options()
-	if opts == nil {
-		return nil
-	}
-	methodOptions, ok := opts.(*descriptorpb.MethodOptions)
+	methodOptions, ok := md.Options().(*descriptorpb.MethodOptions)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("unexpected method options type %T", md.Options())
 	}
 	if !proto.HasExtension(methodOptions, pb.E_Policy) {
-		return nil
+		return nil, nil
 	}
-	ext := proto.GetExtension(methodOptions, pb.E_Policy)
-	policy, ok := ext.(*pb.Policy)
+	policy, ok := proto.GetExtension(methodOptions, pb.E_Policy).(*pb.Policy)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("unexpected policy option type %T", proto.GetExtension(methodOptions, pb.E_Policy))
 	}
-	return policy
+	return policy, nil
 }
 
 // withInbound puts the request's bearer token and request ID on ctx. The
@@ -88,15 +85,16 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 		ctx = interceptors.MarkInterceptorRan(ctx)
 
-		policy := getPolicyFromSpec(req.Spec())
+		policy, err := getPolicyFromSpec(req.Spec())
+		if err != nil {
+			return nil, toConnectError(fmt.Errorf("failed to look up method policy: %w", err))
+		}
 		if policy == nil {
 			// No policy defined — pass through.
 			return next(ctx, req)
 		}
 
 		var resource, action string
-		var err error
-
 		if len(policy.FieldMappings) > 0 {
 			msg, ok := req.Any().(proto.Message)
 			if !ok {
@@ -132,7 +130,10 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
 		ctx = interceptors.MarkInterceptorRan(ctx)
 
-		policy := getPolicyFromSpec(conn.Spec())
+		policy, err := getPolicyFromSpec(conn.Spec())
+		if err != nil {
+			return toConnectError(fmt.Errorf("failed to look up method policy: %w", err))
+		}
 		if policy == nil {
 			return next(ctx, conn)
 		}
