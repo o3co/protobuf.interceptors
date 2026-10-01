@@ -228,3 +228,23 @@ func TestConnectVerification_Streaming_WithoutPolicyOptionInterceptor_IsInternal
 		t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodeInternal)
 	}
 }
+
+// A message decoded by a codec other than protobuf is cleared too.
+func TestConnectVerification_RefusedNonProtoMessage_IsCleared(t *testing.T) {
+	msg := new(string)
+	handler := policyconnect.VerificationInterceptor(revokedAfter(1)).
+		WrapStreamingHandler(func(_ context.Context, conn connect.StreamingHandlerConn) error {
+			return conn.Receive(msg)
+		})
+	conn := &fakeStreamingConn{header: http.Header{}, recv: func(m any) error {
+		*m.(*string) = "arrived after revocation"
+		return nil
+	}}
+	err := handler(policyStreamCtx(), conn)
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodePermissionDenied)
+	}
+	if *msg != "" {
+		t.Errorf("the refused message reached the handler: %q", *msg)
+	}
+}
