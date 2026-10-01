@@ -15,24 +15,45 @@
 package connectrpc
 
 import (
+	"context"
 	"errors"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
 )
 
-// toConnectError converts framework-neutral errors to ConnectRPC errors.
+// toConnectError converts a framework-neutral error to a ConnectRPC error. The
+// caller is told only the code and a fixed message for it: an endpoint's
+// error can name the backend, the URL it called, or why a token was refused.
+// The returned error unwraps to err, so an interceptor placed outside these
+// can still record it.
 func toConnectError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var denied *interceptors.DeniedError
-	if errors.As(err, &denied) {
-		return connect.NewError(connect.CodePermissionDenied, errors.New(denied.Reason))
+	var (
+		denied *interceptors.DeniedError
+		unauth *interceptors.UnauthenticatedError
+	)
+	switch {
+	case errors.As(err, &denied):
+		return connect.NewError(connect.CodePermissionDenied, &fixedMessage{"access denied", err})
+	case errors.As(err, &unauth):
+		return connect.NewError(connect.CodeUnauthenticated, &fixedMessage{"unauthenticated", err})
+	case errors.Is(err, context.Canceled):
+		return connect.NewError(connect.CodeCanceled, &fixedMessage{"request canceled", err})
+	case errors.Is(err, context.DeadlineExceeded):
+		return connect.NewError(connect.CodeDeadlineExceeded, &fixedMessage{"deadline exceeded", err})
+	default:
+		return connect.NewError(connect.CodeInternal, &fixedMessage{"authorization check failed", err})
 	}
-	var unauth *interceptors.UnauthenticatedError
-	if errors.As(err, &unauth) {
-		return connect.NewError(connect.CodeUnauthenticated, errors.New(unauth.Reason))
-	}
-	return connect.NewError(connect.CodeInternal, err)
 }
+
+// fixedMessage is what the caller is told, wrapping the error behind it.
+type fixedMessage struct {
+	message string
+	cause   error
+}
+
+func (e *fixedMessage) Error() string { return e.message }
+func (e *fixedMessage) Unwrap() error { return e.cause }
