@@ -36,14 +36,22 @@ func TestLookupMethodPolicy_WithoutPolicy(t *testing.T) {
 	}
 }
 
-func TestLookupMethodPolicy_UnknownService(t *testing.T) {
-	var cache sync.Map
-	policy, err := getMethodPolicy(&cache, "/unknown.v1.Unknown/Method")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if policy != nil {
-		t.Errorf("expected nil policy, got %+v", policy)
+// A method with no registered descriptor is an error, not "no policy", and
+// is not cached: the full method name is the caller's to choose.
+func TestLookupMethodPolicy_NoDescriptor_IsAnErrorAndNotCached(t *testing.T) {
+	for _, method := range []string{
+		"/unknown.v1.Unknown/Method",
+		"/test.v1.TestService/NoSuchMethod",
+		"/test.v1.GetResourceRequest/Method", // a message, not a service
+	} {
+		var cache sync.Map
+		if _, err := getMethodPolicy(&cache, method); err == nil {
+			t.Errorf("%s: expected an error", method)
+		}
+		cache.Range(func(k, _ any) bool {
+			t.Errorf("%s: cached %v", method, k)
+			return true
+		})
 	}
 }
 
