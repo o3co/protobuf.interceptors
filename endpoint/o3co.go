@@ -115,9 +115,11 @@ func WithO3coHeaders(headers map[string]string) O3coOption {
 // The verifier reports evaluations only under verify.evaluationInResponse =
 // "include", and only for rules backed by a policy evaluator. Against a
 // verifier that has not opted in, every allow is refused, and so is an allow
-// in which a rule with no policy source satisfied a group. That cannot be
-// checked at construction, so the first refused allow whose response carried
-// no evaluation at all is logged once, at the error level, naming the setting.
+// in which a rule with no policy source satisfied a granting group, or whose
+// every group restricts (see [interceptors.RuleGroup.Restricts]). That
+// cannot be checked at construction, so the first refused allow whose
+// response carried no evaluation at all is logged once, at the error level,
+// naming the setting.
 func WithO3coRequireConfirmedRevision() O3coOption {
 	return func(c *o3coBuildConfig) {
 		c.requireConfirmedRevision = true

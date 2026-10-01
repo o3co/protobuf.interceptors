@@ -53,6 +53,12 @@ type Decision struct {
 type RuleGroup struct {
 	RuleType string
 	Passed   bool
+	// Restricts marks a group of restricting rules — a delegated token's
+	// range, for one. Such a group narrows what the granting groups allow and
+	// is never a reason to allow on its own, so a group that passed and
+	// restricts granted nothing. False is a granting group, or a backend that
+	// does not mark groups.
+	Restricts bool
 	// Evaluated is every rule that actually ran, in order. A passing group
 	// stops at its first passing rule, so alternatives after it are absent.
 	Evaluated []RuleOutcome
@@ -133,25 +139,34 @@ func (e *Evaluation) ConfirmedRevision() (string, bool) {
 }
 
 // RevisionConfirmed reports whether d is an allow established against
-// confirmed policy revisions: at least one group, every group passed, and
-// the rule that satisfied each carries a ConfirmedRevision. Alternatives
-// tried before a satisfying rule decided nothing and are not consulted.
+// confirmed policy revisions: every group passed, at least one of them
+// grants, and the rule that satisfied each granting group carries a
+// ConfirmedRevision. Alternatives tried before a satisfying rule decided
+// nothing and are not consulted.
 //
-// A rule with no policy source never carries a revision, so a decision any
-// of whose groups such a rule satisfies is never confirmed.
+// A restricting group granted nothing, so what satisfied it is not
+// consulted, and an allow whose groups all restrict is never confirmed. A
+// granting rule with no policy source never carries a revision, so a
+// decision any of whose granting groups such a rule satisfies is never
+// confirmed.
 func (d *Decision) RevisionConfirmed() bool {
-	if d == nil || len(d.Groups) == 0 {
+	if d == nil {
 		return false
 	}
+	granted := false
 	for _, g := range d.Groups {
 		if !g.Passed || g.SatisfiedBy == nil {
 			return false
 		}
+		if g.Restricts {
+			continue
+		}
 		if _, ok := g.SatisfiedBy.Evaluation.ConfirmedRevision(); !ok {
 			return false
 		}
+		granted = true
 	}
-	return true
+	return granted
 }
 
 // WithDecision stores the decision that allowed an RPC, for its handler.

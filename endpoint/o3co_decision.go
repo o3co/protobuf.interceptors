@@ -17,6 +17,7 @@ package endpoint
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 )
@@ -49,6 +50,7 @@ type wireReason struct {
 type wireGroup struct {
 	RuleType    string        `json:"ruleType"`
 	Passed      bool          `json:"passed"`
+	Restricts   bool          `json:"restricts"`
 	Evaluated   []wireOutcome `json:"evaluated"`
 	SatisfiedBy *wireOutcome  `json:"satisfiedBy"`
 }
@@ -164,6 +166,15 @@ func validGroup(v any) bool {
 			return false
 		}
 	}
+	// restricts is optional and, when sent, true: a group of restricting
+	// rules. Any other value is not the contract's, and neither is the key in
+	// another case: encoding/json would decode it into Restricts, unchecked,
+	// and a group so marked is left out of what must be confirmed.
+	for k, v := range g {
+		if strings.EqualFold(k, "restricts") && (k != "restricts" || v != true) {
+			return false
+		}
+	}
 	// satisfiedBy marks a pass: a passing group names the rule that satisfied
 	// it, and a failing one, where every alternative refused, names none.
 	satisfiedBy, has := g["satisfiedBy"]
@@ -214,7 +225,7 @@ func (w *wireDecision) toDecision(requestID string) *interceptors.Decision {
 	if w.Reason != nil {
 		d.Groups = make([]interceptors.RuleGroup, 0, len(w.Reason.Groups))
 		for _, g := range w.Reason.Groups {
-			group := interceptors.RuleGroup{RuleType: g.RuleType, Passed: g.Passed}
+			group := interceptors.RuleGroup{RuleType: g.RuleType, Passed: g.Passed, Restricts: g.Restricts}
 			for _, o := range g.Evaluated {
 				group.Evaluated = append(group.Evaluated, o.toOutcome())
 			}

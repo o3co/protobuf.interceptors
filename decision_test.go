@@ -72,6 +72,13 @@ func outcome(passed bool, eval *interceptors.Evaluation) interceptors.RuleOutcom
 	return interceptors.RuleOutcome{Code: "rule", Message: "rule", Passed: passed, Evaluation: eval}
 }
 
+// restricting marks g as a group of restricting rules: it narrows what the
+// granting groups allow and grants nothing.
+func restricting(g interceptors.RuleGroup) interceptors.RuleGroup {
+	g.Restricts = true
+	return g
+}
+
 func TestDecision_RevisionConfirmed(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -115,6 +122,40 @@ func TestDecision_RevisionConfirmed(t *testing.T) {
 			name: "a passing group names nothing that satisfied it",
 			decision: &interceptors.Decision{Groups: []interceptors.RuleGroup{
 				{RuleType: "cedar", Passed: true, Evaluated: []interceptors.RuleOutcome{outcome(true, completed(digest))}},
+			}},
+			want: false,
+		},
+		{
+			// A restricting group grants nothing, so what satisfied it is not
+			// consulted: a delegation range has no policy source.
+			name: "a restricting group beside a confirmed grant",
+			decision: &interceptors.Decision{Groups: []interceptors.RuleGroup{
+				passingGroup("cedar", outcome(true, completed(digest))),
+				restricting(passingGroup("delegation_range", outcome(true, nil))),
+			}},
+			want: true,
+		},
+		{
+			name: "an unconfirmed grant beside a restricting group",
+			decision: &interceptors.Decision{Groups: []interceptors.RuleGroup{
+				passingGroup("rbac", outcome(true, nil)),
+				restricting(passingGroup("delegation_range", outcome(true, completed(digest)))),
+			}},
+			want: false,
+		},
+		{
+			// An allow every group of which restricts was granted by none of them.
+			name: "only restricting groups",
+			decision: &interceptors.Decision{Groups: []interceptors.RuleGroup{
+				restricting(passingGroup("delegation_range", outcome(true, completed(digest)))),
+			}},
+			want: false,
+		},
+		{
+			name: "a restricting group did not pass",
+			decision: &interceptors.Decision{Groups: []interceptors.RuleGroup{
+				passingGroup("cedar", outcome(true, completed(digest))),
+				restricting(interceptors.RuleGroup{RuleType: "delegation_range", Passed: false, Evaluated: []interceptors.RuleOutcome{outcome(false, nil)}}),
 			}},
 			want: false,
 		},

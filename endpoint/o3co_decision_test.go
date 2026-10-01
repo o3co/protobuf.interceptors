@@ -88,6 +88,72 @@ const denyWithEvaluation = `{
   } ] }
 }`
 
+// allowWithARestrictingGroup is an allow a policy granted and a delegation
+// range narrowed: the range's group restricts, and has no policy source.
+const allowWithARestrictingGroup = `{
+  "decision": "allow", "resource": "project:p1.report", "action": "run",
+  "reason": { "groups": [ {
+    "ruleType": "cedar", "passed": true,
+    "evaluated": [ { "code": "cedar_permit", "message": "Permitted", "passed": true,
+      "evaluation": { "status": "completed", "revision": "` + testDigest + `" } } ],
+    "satisfiedBy": { "code": "cedar_permit", "message": "Permitted", "passed": true,
+      "evaluation": { "status": "completed", "revision": "` + testDigest + `" } }
+  }, {
+    "ruleType": "delegation_range", "passed": true, "restricts": true,
+    "evaluated": [ { "code": "within_delegation_range", "message": "Within the delegation range", "passed": true } ],
+    "satisfiedBy": { "code": "within_delegation_range", "message": "Within the delegation range", "passed": true }
+  } ] }
+}`
+
+func TestO3coVerifyDecision_RestrictingGroup_IsMarked(t *testing.T) {
+	e := newTestEndpoint(t, serve(t, http.StatusOK, allowWithARestrictingGroup).URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "project:p1.report", "run")
+	if err != nil || d == nil || len(d.Groups) != 2 {
+		t.Fatalf("VerifyDecision = (%+v, %v)", d, err)
+	}
+	if d.Groups[0].Restricts {
+		t.Error("a group without restricts decoded as restricting")
+	}
+	if !d.Groups[1].Restricts {
+		t.Error("a group with restricts: true decoded as granting")
+	}
+}
+
+// A delegated token outside its range is denied by its restricting group,
+// which the denial reports as restricting.
+func TestO3coVerifyDecision_DenyWithAFailingRestrictingGroup_IsMarked(t *testing.T) {
+	const body = `{
+  "decision": "deny", "code": "outside_delegation_range", "message": "Outside the delegation range",
+  "resource": "project:p2.report", "action": "run",
+  "reason": { "groups": [ {
+    "ruleType": "cedar", "passed": true,
+    "evaluated": [ { "code": "cedar_permit", "message": "Permitted", "passed": true } ],
+    "satisfiedBy": { "code": "cedar_permit", "message": "Permitted", "passed": true }
+  }, {
+    "ruleType": "delegation_range", "passed": false, "restricts": true,
+    "evaluated": [ { "code": "outside_delegation_range", "message": "Outside the delegation range", "passed": false } ]
+  } ] }
+}`
+	e := newTestEndpoint(t, serve(t, http.StatusForbidden, body).URL)
+	_, err := e.VerifyDecision(ctxWithToken("tok"), "project:p2.report", "run")
+	var denied *interceptors.DeniedError
+	if !errors.As(err, &denied) || denied.Decision == nil || len(denied.Decision.Groups) != 2 {
+		t.Fatalf("VerifyDecision error = %T: %v", err, err)
+	}
+	if g := denied.Decision.Groups; g[0].Restricts || !g[1].Restricts || g[1].Passed {
+		t.Errorf("Groups = %+v, want a granting group and a failing restricting one", g)
+	}
+}
+
+// The delegation range's group has no policy source; the allow is confirmed by
+// the policy that granted it.
+func TestO3coRequireConfirmedRevision_AcceptsAnAllowARestrictingGroupNarrowed(t *testing.T) {
+	e := newTestEndpoint(t, serve(t, http.StatusOK, allowWithARestrictingGroup).URL, WithO3coRequireConfirmedRevision())
+	if err := e.Verify(ctxWithToken("tok"), "project:p1.report", "run"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestO3coEndpoint_IsADecisionVerifier(t *testing.T) {
 	ep, err := NewO3coEndpoint("http://localhost:3000")
 	if err != nil {
@@ -348,6 +414,10 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		"a completed evaluation with no revision key": `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed"}}], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed"}}}]}}`,
 		"null determiningPolicies":                    `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [{"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": null}}], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": null}}}]}}`,
 		"a passed of the wrong type":                  `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": "yes", "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a restricts of false":                        `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": false, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a null restricts":                            `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": null, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a restricts of the wrong type":               `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": "true", "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a restricts spelled in another case":         `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "Restricts": true, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a JSON array":                                `[` + group + `]`,
 		"JSON null":                                   `null`,
 	}

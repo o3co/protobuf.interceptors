@@ -20,6 +20,7 @@ import (
 	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -84,7 +85,7 @@ func TestWireContract_StatusesMeanWhatTheVerifierMeans(t *testing.T) {
 	check("callerUnauthenticated", c.Status["callerUnauthenticated"], errorEnvelope(c.Codes["callerUnauthenticated"]), func(err error) bool {
 		return errors.Is(err, ErrCallerUnauthenticated) && !isUnauth(err)
 	})
-	for _, key := range []string{"invalidRequest", "payloadTooLarge", "unsupportedMediaType", "internalError"} {
+	for _, key := range []string{"invalidRequest", "payloadTooLarge", "unsupportedMediaType", "internalError", "verificationUnavailable"} {
 		check(key, c.Status[key], errorEnvelope(c.Codes[key]), func(err error) bool {
 			return err != nil && !isDenied(err) && !isUnauth(err)
 		})
@@ -171,6 +172,32 @@ func TestWireContract_EvaluationShapesDecode(t *testing.T) {
 				t.Errorf("determining policies = (%v, %d)", got.DeterminingPolicies, got.DeterminingPoliciesOmitted)
 			}
 		})
+	}
+}
+
+// A group carrying every key the contract allows a passing group decodes, and
+// the optional ones mean what the verifier means by them.
+func TestWireContract_EveryRuleGroupKeyDecodes(t *testing.T) {
+	c := wirecontract.Load(t)
+	outcome := fill(t, "a rule outcome", c.RuleOutcome.Required, map[string]any{"code": "c", "message": "m", "passed": true})
+	keys := append(append(append([]string{}, c.RuleGroup.Required...), c.RuleGroup.Optional...), c.RuleGroup.OnlyOnAPassingGroup...)
+	group := fill(t, "a passing rule group", keys, map[string]any{
+		"ruleType": "delegation_range", "passed": true, "evaluated": []any{outcome}, "satisfiedBy": outcome, "restricts": true,
+	})
+	decision := fill(t, "an allow", c.Decision.Required, map[string]any{
+		"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{group}},
+	})
+
+	e := newTestEndpoint(t, serve(t, c.Status["allow"], mustJSON(t, decision)).URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err != nil || d == nil || len(d.Groups) != 1 {
+		t.Fatalf("VerifyDecision = (%+v, %v)", d, err)
+	}
+	if !slices.Contains(c.RuleGroup.Optional, "restricts") {
+		t.Fatalf("the wire contract no longer lists restricts on a rule group: %v", c.RuleGroup.Optional)
+	}
+	if !d.Groups[0].Restricts {
+		t.Error("restricts: true decoded as a granting group")
 	}
 }
 
