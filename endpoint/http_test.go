@@ -103,3 +103,105 @@ func TestHTTPEndpoints_DoNotFollowRedirects(t *testing.T) {
 		}
 	}
 }
+
+// constructors builds each HTTP endpoint from a base URL, permitting plaintext
+// to any host when allowInsecure is set.
+var constructors = []struct {
+	name  string
+	build func(baseURL string, allowInsecure bool) error
+}{
+	{"o3co", func(baseURL string, allowInsecure bool) error {
+		var opts []O3coOption
+		if allowInsecure {
+			opts = append(opts, WithO3coAllowInsecure())
+		}
+		_, err := NewO3coEndpoint(baseURL, opts...)
+		return err
+	}},
+	{"opa", func(baseURL string, allowInsecure bool) error {
+		var opts []OPAOption
+		if allowInsecure {
+			opts = append(opts, WithOPAAllowInsecure())
+		}
+		_, err := NewOPAEndpoint(baseURL, "authz/allow", opts...)
+		return err
+	}},
+	{"cedar", func(baseURL string, allowInsecure bool) error {
+		var opts []CedarOption
+		if allowInsecure {
+			opts = append(opts, WithCedarAllowInsecure())
+		}
+		_, err := NewCedarEndpoint(baseURL, opts...)
+		return err
+	}},
+}
+
+// A base URL names its scheme, which is http or https, and a host. Nothing is
+// guessed: a URL without a scheme is refused, not read as plaintext.
+func TestHTTPEndpoints_RefuseABaseURLWithoutASchemeOrHost(t *testing.T) {
+	for _, c := range constructors {
+		for _, baseURL := range []string{
+			"localhost:3000",
+			"verifier.internal",
+			"127.0.0.1:3000",
+			"//verifier.internal",
+			"ftp://localhost",
+			"file:///etc/passwd",
+			"unix:///var/run/verifier.sock",
+			"http://",
+			"https://",
+			"https:///verify",
+		} {
+			for _, allowInsecure := range []bool{false, true} {
+				t.Run(c.name+"/"+baseURL, func(t *testing.T) {
+					if err := c.build(baseURL, allowInsecure); err == nil {
+						t.Errorf("%q (allowInsecure=%v) was accepted", baseURL, allowInsecure)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestHTTPEndpoints_AcceptHTTPSAndLoopbackPlaintext(t *testing.T) {
+	for _, c := range constructors {
+		for _, baseURL := range []string{
+			"https://verifier.internal",
+			"HTTPS://verifier.internal:8443/base",
+			"http://localhost:3000",
+			"http://LocalHost",
+			"HTTP://127.0.0.1:8181",
+			"http://127.1.2.3",
+			"http://[::1]:3000",
+		} {
+			t.Run(c.name+"/"+baseURL, func(t *testing.T) {
+				if err := c.build(baseURL, false); err != nil {
+					t.Errorf("%q: unexpected error: %v", baseURL, err)
+				}
+			})
+		}
+	}
+}
+
+// Plaintext to a host other than this one carries the bearer token in the
+// clear, so it takes an explicit option.
+func TestHTTPEndpoints_RefusePlaintextToAnotherHostUnlessAllowed(t *testing.T) {
+	for _, c := range constructors {
+		for _, baseURL := range []string{
+			"http://verifier.internal:3000",
+			"http://10.0.0.1",
+			"http://0.0.0.0:3000",
+			"http://localhost.example.com",
+			"http://[::2]",
+		} {
+			t.Run(c.name+"/"+baseURL, func(t *testing.T) {
+				if err := c.build(baseURL, false); err == nil {
+					t.Errorf("%q was accepted without the option", baseURL)
+				}
+				if err := c.build(baseURL, true); err != nil {
+					t.Errorf("%q with the option: unexpected error: %v", baseURL, err)
+				}
+			})
+		}
+	}
+}
