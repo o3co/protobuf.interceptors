@@ -7,6 +7,9 @@ Report a vulnerability privately, through GitHub's security advisories:
 for `o3co/protobuf.interceptors`. Do not open a public issue or pull request
 for it.
 
+If that link is unavailable, open a minimal public issue that asks for a
+private contact, with no details of the vulnerability.
+
 Include what you can of:
 
 - the module and version affected (`github.com/o3co/protobuf.interceptors`,
