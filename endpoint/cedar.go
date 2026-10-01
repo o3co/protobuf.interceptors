@@ -291,7 +291,7 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	// Send the request.
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return requestError(ctx, "Cedar agent request failed", err)
+		return requestError(ctx, "request to the Cedar agent failed", err)
 	}
 	defer resp.Body.Close()
 
@@ -311,7 +311,7 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		e.logger.Error("error response from Cedar agent", "status", resp.StatusCode, "x-request-id", requestID)
 		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
-		return fmt.Errorf("Cedar agent returned non-2xx status: %d", resp.StatusCode)
+		return fmt.Errorf("the Cedar agent returned non-2xx status: %d", resp.StatusCode)
 	}
 
 	// Parse the Cedar agent decision.
