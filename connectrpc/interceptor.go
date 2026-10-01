@@ -83,6 +83,11 @@ func PolicyOptionInterceptor() connect.Interceptor {
 
 func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		// The interceptors guard handlers; a client's call is not theirs.
+		if req.Spec().IsClient {
+			return next(ctx, req)
+		}
+
 		ctx = interceptors.MarkInterceptorRan(ctx)
 
 		policy, err := getPolicyFromSpec(req.Spec())
@@ -122,7 +127,7 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 }
 
 func (p *policyOptionInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	// Pass-through for client-side streaming.
+	// The interceptors guard handlers; a client's stream is not theirs.
 	return next
 }
 
@@ -214,6 +219,11 @@ func (v *verificationInterceptor) verify(ctx context.Context, resource, action s
 
 func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		// The interceptors guard handlers; a client's call is not theirs.
+		if req.Spec().IsClient {
+			return next(ctx, req)
+		}
+
 		ctx, credErr := withInbound(ctx, req.Header())
 
 		// Guard: PolicyOptionInterceptor must have run.
@@ -237,7 +247,7 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 }
 
 func (v *verificationInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	// Pass-through for client-side streaming.
+	// The interceptors guard handlers; a client's stream is not theirs.
 	return next
 }
 
