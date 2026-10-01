@@ -1,0 +1,207 @@
+name: Release
+
+# Each module is released by a tag of its own: vX.Y.Z for the core module at
+# the root, grpc/vX.Y.Z and connectrpc/vX.Y.Z for the framework modules. See
+# AGENTS.md, "Release process".
+on:
+  push:
+    tags: ['v*', 'grpc/v*', 'connectrpc/v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that can refuse the tag, with read-only access.
+  validate:
+    name: Validate ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      path: ${{ steps.tag.outputs.path }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      latest: ${{ steps.previous.outputs.latest }}
+      previous: ${{ steps.previous.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Every branch and tag: the tagged commit is checked against
+          # origin/develop, and the module's tags against each other.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The one parse of the tag: the later steps read its outputs and never
+      # re-derive them from the ref.
+      - name: Classify the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$TAG" in
+            grpc/v*)       module=grpc;       dir=grpc;       prefix=grpc/ ;;
+            connectrpc/v*) module=connectrpc; dir=connectrpc; prefix=connectrpc/ ;;
+            v*)            module=core;       dir=.;          prefix= ;;
+            *)
+              echo "::error::$TAG names no module of this repository"
+              exit 1
+              ;;
+          esac
+          version="${TAG#"$prefix"}"
+
+          # A version is v + SemVer 2.0.0 without build metadata, with major 0
+          # or 1: the module paths carry no /vN suffix, which Go requires from
+          # v2 on.
+          ident='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${ident}(\.${ident})*)?$"
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error::$version is not v followed by a SemVer version without build metadata"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          if ! [[ "$major" =~ ^[01]$ ]]; then
+            echo "::error::$version needs a /v$major module path, which this repository does not have"
+            exit 1
+          fi
+
+          path="$(awk '$1 == "module" { print $2; exit }' "$dir/go.mod")"
+          if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+
+          {
+            echo "module=$module"
+            echo "dir=$dir"
+            echo "prefix=$prefix"
+            echo "version=$version"
+            echo "path=$path"
+            echo "prerelease=$prerelease"
+            echo "semver=$semver"
+          } >> "$GITHUB_OUTPUT"
+
+      # Releases are cut from develop. The checkout above fetched every branch,
+      # so origin/develop is the remote's develop at the time of this run.
+      - name: Check that the tagged commit is on develop
+        run: |
+          if ! git rev-parse --verify --quiet refs/remotes/origin/develop > /dev/null; then
+            echo "::error::origin/develop was not fetched"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/develop; then
+            echo "::error::$GITHUB_SHA is not on develop: tag a commit of develop"
+            exit 1
+          fi
+
+      # The release notes start at the previous full release of the same
+      # module: the first valid tag with no prerelease suffix that sorts below
+      # this one, which is among the tags fetched. Only the newest full core
+      # release is marked as the repository's latest, so neither a framework
+      # release nor a core patch to an older minor line takes that mark.
+      - name: Find the module's previous release
+        id: previous
+        env:
+          TAG: ${{ github.ref_name }}
+          MODULE: ${{ steps.tag.outputs.module }}
+          PREFIX: ${{ steps.tag.outputs.prefix }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          SEMVER: ${{ steps.tag.outputs.semver }}
+        run: |
+          valid() { [[ "$1" =~ $SEMVER ]] && [[ "${BASH_REMATCH[1]}" =~ ^[01]$ ]]; }
+          # 'v*' lists only the core's tags: a framework tag starts with its
+          # directory.
+          tags="$(git -c versionsort.suffix=- tag -l "${PREFIX}v*" --sort=-v:refname \
+            | while read -r t; do if valid "${t#"$PREFIX"}"; then echo "$t"; fi; done)"
+          previous="$(awk -v tag="$TAG" 'seen && $0 !~ /-/ { print; exit } $0 == tag { seen = 1 }' <<< "$tags")"
+          newest="$(grep -v -- '-' <<< "$tags" | head -n 1)"
+          if [ "$MODULE" = core ] && [ "$PRERELEASE" = false ] && [ "$newest" = "$TAG" ]; then
+            latest=true
+          else
+            latest=false
+          fi
+          echo "previous release: ${previous:-none}; latest: $latest"
+          {
+            echo "tag=$previous"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ steps.tag.outputs.dir }}/go.mod
+
+      - name: Vet and test
+        working-directory: ${{ steps.tag.outputs.dir }}
+        run: |
+          go vet ./...
+          go test ./... -race -count=1
+
+      # A framework module builds against the checkout's core (replace => ../),
+      # but a consumer gets the core version its go.mod requires. So the
+      # release requires the newest core release, and builds and passes its
+      # tests against that published version.
+      - name: Check the core version required
+        if: steps.tag.outputs.module != 'core'
+        working-directory: ${{ steps.tag.outputs.dir }}
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          SEMVER: ${{ steps.tag.outputs.semver }}
+        run: |
+          valid() { [[ "$1" =~ $SEMVER ]] && [[ "${BASH_REMATCH[1]}" =~ ^[01]$ ]]; }
+          required="$(go mod edit -json | jq -r '.Require[] | select(.Path == "github.com/o3co/protobuf.interceptors") | .Version')"
+          # A full release must require the newest full core release. A
+          # prerelease must require the newest core version, prereleases
+          # included. A tag that is not a valid core version is never a
+          # candidate.
+          newest="$(git -c versionsort.suffix=- tag -l 'v*' --sort=-v:refname \
+            | while read -r t; do if valid "$t"; then echo "$t"; fi; done \
+            | if [ "$PRERELEASE" = true ]; then cat; else grep -v -- '-'; fi \
+            | head -n 1)"
+          if [ -z "$required" ] || [ "$required" != "$newest" ]; then
+            echo "::error::go.mod requires core ${required:-nothing}, and the newest core release is ${newest:-none}: raise the require in a pull request, then tag again"
+            exit 1
+          fi
+          echo "requires core $required, the newest core release"
+
+      - name: Build and test against the published core
+        if: steps.tag.outputs.module != 'core'
+        working-directory: ${{ steps.tag.outputs.dir }}
+        run: |
+          go mod edit -dropreplace=github.com/o3co/protobuf.interceptors
+          go mod download github.com/o3co/protobuf.interceptors
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+  # Runs only once validate has passed: a refused tag gets no GitHub Release.
+  publish:
+    name: Publish ${{ github.ref_name }}
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # A tag with a SemVer prerelease suffix (vX.Y.Z-rc.1) is a prerelease,
+      # and only a full core release is marked as the latest.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PREVIOUS: ${{ needs.validate.outputs.previous }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          LATEST: ${{ needs.validate.outputs.latest }}
+        run: |
+          args=(--verify-tag --title "$TAG" --generate-notes "--latest=$LATEST")
+          if [ -n "$PREVIOUS" ]; then args+=(--notes-start-tag "$PREVIOUS"); fi
+          if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
+          gh release create "$TAG" "${args[@]}"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # Ask the module proxy for the version, so consumers and pkg.go.dev see
+      # it without waiting for the first `go get`.
+      - name: Warm the module proxy
+        working-directory: ${{ runner.temp }}
+        env:
+          GOPROXY: proxy.golang.org
+          MODULE: ${{ needs.validate.outputs.path }}@${{ needs.validate.outputs.version }}
+        run: go list -m "$MODULE"

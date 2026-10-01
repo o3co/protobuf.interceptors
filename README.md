@@ -1,12 +1,57 @@
 # protobuf.interceptors
 
+Last updated: 2026-10-01
+
+[日本語](README.ja.md)
+
 [![CI](https://github.com/o3co/protobuf.interceptors/actions/workflows/ci.yml/badge.svg)](https://github.com/o3co/protobuf.interceptors/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/o3co/protobuf.interceptors/graph/badge.svg)](https://codecov.io/gh/o3co/protobuf.interceptors)
 [![Go Reference](https://pkg.go.dev/badge/github.com/o3co/protobuf.interceptors.svg)](https://pkg.go.dev/github.com/o3co/protobuf.interceptors)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 > This repository handles **authorization enforcement** (gRPC / ConnectRPC) in the three-layer separation of concerns ([authentication & token issuance](https://github.com/o3co/auth.provider) / [authorization decision](https://github.com/o3co/auth.policy-verifier) / authorization enforcement) of the [auth](https://github.com/o3co/auth) stack — delegating the allow/deny decision to auth.policy-verifier, OPA, Cedar, or any other `VerifierEndpoint`.
 
 Framework-agnostic protobuf method option authorization interceptors for Go. Declares access policy (resource + action) in `.proto` method options and enforces it at runtime via pluggable verification backends. Supports both gRPC and ConnectRPC.
+
+## Responsibility
+
+**Role.** This library is the enforcement layer of the auth stack, inside a Go
+service, in front of its gRPC or ConnectRPC handlers. Authentication and token
+issuance belong to [auth.provider](https://github.com/o3co/auth.provider); the
+authorization decision belongs to a backend —
+[auth.policy-verifier](https://github.com/o3co/auth.policy-verifier), OPA, a
+Cedar agent, or any `VerifierEndpoint` of your own. This library asks the
+backend and carries out its answer.
+
+**It owns:**
+
+- reading the policy a method declares in its `.proto` options, and resolving
+  the resource and action from the request, refusing a request value that
+  would change which resource is named;
+- reading the bearer token and request ID from the request, refusing a
+  malformed credential, and passing both to the backend;
+- asking the backend before the handler runs — and on each message a stream
+  receives — and refusing the RPC unless it allows;
+- telling the caller the outcome as a status code with a fixed message, and
+  handing the service the full error and the decision behind it;
+- the HTTP clients for the built-in backends: plaintext only to loopback, no
+  redirects, bounded reads, and a strict reading of each backend's answer.
+
+**It does not:**
+
+- **authenticate.** It checks only the shape of the `authorization` value; it
+  never verifies a token's signature, expiry, issuer or audience. That is the
+  backend's job (the o3co and OPA endpoints send the token to the backend) or,
+  for Cedar, the principal resolver you supply.
+- **decide.** No policy is evaluated here. The static endpoint matches a fixed
+  list of resource and action patterns you supply, and nothing more.
+- **record.** The interceptors write no logs of their own; the decision goes
+  to your handler and observer (see [Recording the decision](#recording-the-decision)).
+- secure the server's own transport, or limit request rates.
+
+The framework interceptors are separate modules so that a gRPC service does not
+depend on ConnectRPC, and a ConnectRPC service not on grpc-go (see
+[Modules](#modules)).
 
 ## How it works
 
@@ -45,14 +90,15 @@ RPC request
 ┌──────────────────────────────────┐
 │  PolicyOptionInterceptor         │  reads (o3co.authz.v1.policy) from proto,
 │                                  │  resolves <placeholder> from request fields,
-│                                  │  stores Policy{Resource, Action} in ctx
+│                                  │  stores PolicyData{Resource, Action} in ctx
 └───────────────┬──────────────────┘
                 │
                 ▼
 ┌──────────────────────────────────┐
 │  VerificationInterceptor         │  reads policy from ctx,
 │                                  │  calls VerifierEndpoint.Verify(),
-│                                  │  returns PermissionDenied on failure
+│                                  │  refuses with PermissionDenied,
+│                                  │  Unauthenticated or Internal
 └───────────────┬──────────────────┘
                 │
                 ▼
@@ -142,6 +188,25 @@ misspelled placeholder, or a mapping removed while the template kept it — fail
 resolution with `Internal`, rather than reaching the backend as literal text
 naming a resource no policy meant.
 
+### Request fields a placeholder can read
+
+`request_field` names a **top-level** field of the request message by its
+`.proto` field name; a dotted path into a nested message is not read. The field
+must be a single value (not `repeated`, not a `map`) of one of these kinds:
+
+| Kind | Substituted as |
+|---|---|
+| `string` | the value as is |
+| `int32`, `sint32`, `sfixed32`, `int64`, `sint64`, `sfixed64` | decimal, with `-` when negative |
+| `uint32`, `uint64`, `fixed32`, `fixed64` | decimal |
+| `bool` | `true` or `false` |
+| `bytes` | lowercase hex |
+
+Any other kind — `enum`, `float`, `double`, a message — and a field the message
+does not have fail resolution with `Internal`. A field the request did not set
+resolves to its default value, in proto3 the zero value: `0` and `false` fill
+the placeholder, while an empty `string` or `bytes` is refused as empty.
+
 A `bytes` field is substituted as its lowercase hex encoding, always: the byte
 `0xff` resolves to `ff` and the two bytes `"ff"` to `6666`, so two different
 values never name the same resource.
@@ -187,15 +252,22 @@ message, and a client or bidirectional stream has no single one.
 
 ## Modules
 
-Three independent Go modules with a deliberate separation of concerns:
+Three Go modules, each versioned and released on its own (see
+[Versioning and releases](#versioning-and-releases)):
 
-| Module | Import Path | Dependencies |
+| Module | Import Path | What your build compiles |
 |---|---|---|
 | Core | `github.com/o3co/protobuf.interceptors` | `google.golang.org/protobuf` + stdlib |
 | gRPC | `github.com/o3co/protobuf.interceptors/grpc` | core + `google.golang.org/grpc` |
 | ConnectRPC | `github.com/o3co/protobuf.interceptors/connectrpc` | core + `connectrpc.com/connect` |
 
 The core module contains the proto schema, context helpers, error types, resource resolution, and all verification backends. The framework-specific modules provide only the interceptor implementations.
+
+The core's `go.mod` also requires `google.golang.org/grpc` and
+`connectrpc.com/connect`: the test service its own tests and both framework
+modules' tests share, under `testproto/`, is part of the core module. No other
+core package imports either, so they join your module graph but are compiled
+only if you import them.
 
 ## Installation
 
@@ -295,8 +367,10 @@ The verification interceptors read both from the request (gRPC metadata or
 HTTP headers) and put them on the context the endpoint is called with:
 
 - **Bearer token** — from `authorization`. A request that carries none has no
-  token, and whether it may proceed is the backend's decision. Otherwise it
-  must carry exactly one value of the form `Bearer <token>`: the scheme is
+  token and is not refused by the interceptor: whether it may proceed is the
+  endpoint's decision. Every endpoint in package `endpoint` refuses it as
+  `UnauthenticatedError` without asking its backend; a `VerifierEndpoint` of
+  your own may let it through. Otherwise it must carry exactly one value of the form `Bearer <token>`: the scheme is
   compared case-insensitively (RFC 9110 §11.1) and the token must be non-empty
   and free of Unicode whitespace (no RFC 6750 `b64token` contains any).
   Several values, another scheme, or an empty token are refused with
@@ -395,14 +469,14 @@ verifier, err := endpoint.NewO3coEndpoint(
 
 | Option | Effect |
 |---|---|
-| `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. |
-| `WithO3coMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. |
+| `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. Panics unless `d` is positive. |
+| `WithO3coMaxResponseBodySize(n)` | Accepts a response body of up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer. Default 1 MiB. Panics unless `n` is positive. |
 | `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`; a key a `WithO3coHeaders` header also names makes `NewO3coEndpoint` return an error. The OPA and Cedar options check the same. |
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 | `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
-| `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. |
+| `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
 optional `http.callerAuth` gate turned on. That gate expects a shared credential
@@ -433,23 +507,79 @@ which the interceptors map to `Internal` — a missing or rotated caller token i
 this service's fault, and the RPC caller must not be told its own token is
 invalid. Every other `401` is still an `UnauthenticatedError`.
 
-All backends implement the `endpoint.VerifierEndpoint` interface:
+### OPA endpoint
 
-```go
-type VerifierEndpoint interface {
-    Verify(ctx context.Context, resource, action string) error
-}
-```
+`NewOPAEndpoint(baseURL, policyPath)` asks `POST {baseURL}/v1/data/{policyPath}`
+with the input `{"resource", "action", "token"}` — the bearer token as sent, so
+the policy must verify it. It allows only when the response's `result` key, in
+exactly that case, holds JSON `true`. An absent `result` (OPA's undefined),
+`null` or `false` is a deny; a `result` that is not a boolean, a body that is not a JSON
+object, one larger than the size bound, and any non-`2xx` status are errors. An
+empty `policyPath` is refused at construction.
+
+| Option | Effect |
+|---|---|
+| `WithOPATimeout(d)` | HTTP client timeout. Default `10s`. Panics unless `d` is positive. |
+| `WithOPAMaxResponseBodySize(n)` | Accepts a response body of up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer. Default 1 MiB. Panics unless `n` is positive. |
+| `WithOPALogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
+| `WithOPARequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`. |
+| `WithOPAAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithOPATransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
+
+### Cedar endpoint
+
+`NewCedarEndpoint(baseURL, opts...)` asks `POST {baseURL}/v1/is_authorized`
+with the principal the resolver returned, the action and the resource, each as
+a Cedar entity UID (`User::"alice"`, `Action::"read"`, `Resource::"posts/1"`
+with the default prefixes), and an empty context. It allows only when the
+response's `decision` key, in exactly that case, is `"Allow"`; any other
+decision is a deny, and a body that is not a JSON object, one larger than the
+size bound, and any non-`2xx` status are errors. Without
+`WithCedarPrincipalResolver` the constructor returns an error.
+
+| Option | Effect |
+|---|---|
+| `WithCedarPrincipalResolver(fn)` | **Required.** Verifies the bearer token and returns the principal's id; see above. Panics if `fn` is nil. |
+| `WithCedarPrincipalPrefix(prefix)` | Entity type of the principal. Default `User`. |
+| `WithCedarActionPrefix(prefix)` | Entity type of the action. Default `Action`. |
+| `WithCedarResourcePrefix(prefix)` | Entity type of the resource. Default `Resource`. |
+| `WithCedarTimeout(d)` | HTTP client timeout. Default `10s`. Panics unless `d` is positive. |
+| `WithCedarMaxResponseBodySize(n)` | Accepts a response body of up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer. Default 1 MiB. Panics unless `n` is positive. |
+| `WithCedarLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
+| `WithCedarRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`. |
+| `WithCedarAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithCedarTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
+
+### Static endpoint
+
+`NewStaticEndpoint(rules)` decides locally, against a fixed list of
+`StaticRule{Resource, Action}`: the request is allowed when one rule matches
+both. A pattern is matched exactly, `*` matches anything, and a pattern ending
+in `*` matches by prefix (`posts/*` matches `posts/1`). It still requires a
+bearer token on the context, and checks nothing else about it.
+
+### The endpoint interface
+
+All backends implement [`endpoint.VerifierEndpoint`](endpoint/endpoint.go): a
+`Verify` given the context, the resolved resource and the action, whose error
+is the verdict — `nil` allows, `*interceptors.DeniedError` denies,
+`*interceptors.UnauthenticatedError` refuses the credential, and anything else
+is a failure to decide. An endpoint that can also report the decision behind
+its verdict implements `endpoint.DecisionVerifier`.
 
 Bearer token and request ID are passed via `context.Context`, set by the
 framework-specific `VerificationInterceptor` (see
 [Bearer token and request ID](#bearer-token-and-request-id)).
 
 The interface carries only the resolved resource and action, so anything else an
-endpoint wants must come off the context itself. Only the o3co endpoint does:
-it forwards the extracted `field_mappings` values as the `context` object of
-`POST /verify`, when a framework put them there. OPA, Cedar and the static
-endpoint decide on resource and action alone — see
+endpoint wants must come off the context itself. Each built-in endpoint reads
+the bearer token there, and uses it its own way: the o3co endpoint sends it to
+the verifier, the OPA endpoint sends it as `input.token`, the Cedar endpoint
+resolves a principal from it, and the static endpoint only requires one. Only
+the o3co endpoint reads the extracted `field_mappings` values, forwarding them
+as the `context` object of `POST /verify` when a framework put them there; OPA
+decides on resource, action and token, Cedar on principal, action and
+resource, and the static endpoint matches resource and action — see
 [Extracted field forwarding](#extracted-field-forwarding).
 
 ## Recording the decision
@@ -597,27 +727,11 @@ and check it in the handler.
 
 ## Proto Schema
 
-The policy extension uses field tag 50000 in the `google.protobuf.MethodOptions` extension range:
-
-```proto
-// schema/policy.proto
-package o3co.authz.v1;
-
-message FieldMapping {
-  string placeholder = 1;
-  string request_field = 2;
-}
-
-message Policy {
-  string resource = 1;
-  string action = 2;
-  repeated FieldMapping field_mappings = 3;
-}
-
-extend google.protobuf.MethodOptions {
-  Policy policy = 50000;
-}
-```
+The policy option is defined in [`schema/policy.proto`](schema/policy.proto):
+the `o3co.authz.v1.policy` extension of `google.protobuf.MethodOptions`, field
+50000, holding a `Policy` — `resource`, `action` and repeated `field_mappings`,
+each a `placeholder` and the `request_field` it is filled from. The generated
+Go code is the `schema` package (Go package name `policy`).
 
 To use in your service protos, import `policy.proto` and add the `schema/` directory to your `protoc` include path.
 
@@ -641,6 +755,23 @@ deciding := endpointtest.Decide(func(ctx context.Context, resource, action strin
 })
 ```
 
+## Development
+
+The repository holds three modules, so run each check in each of `.`, `grpc/`
+and `connectrpc/`. The framework modules build against the checkout's core
+(`replace => ../`), so a core change is tested with both of them:
+
+```sh
+for dir in . grpc connectrpc; do
+  (cd "$dir" && test -z "$(gofmt -l .)" && go vet ./... && go test ./... -race -count=1)
+done
+```
+
+CI also runs gofmt, staticcheck and `go mod tidy -diff` on the minimum
+toolchain (the `go` directive), and govulncheck on the latest stable one;
+[AGENTS.md](AGENTS.md) lists the commands, how to regenerate the protobuf code,
+and the rules a change follows.
+
 ### Wire contract tests
 
 The o3co endpoint is tested against auth.policy-verifier's wire contract as the
@@ -655,6 +786,32 @@ are skipped:
 O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/conformance/fixtures/wireContract \
   go test ./... -run WireContract
 ```
+
+## Versioning and releases
+
+Each module has its own version and its own tags:
+
+| Module | Tags | Install |
+|---|---|---|
+| Core | `vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors@vX.Y.Z` |
+| gRPC | `grpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/grpc@vX.Y.Z` |
+| ConnectRPC | `connectrpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/connectrpc@vX.Y.Z` |
+
+- **The version numbers are independent.** `grpc/v0.4.0` and `v0.4.0` are
+  different releases of different modules; a framework module's version says
+  nothing about the core's.
+- **A framework module requires the core release it was released against**, the
+  newest at that time. `go get` of the framework module brings that core
+  version in, or a newer one if your module requires it.
+- **While the major version is `0`, a minor release may break the API**; a
+  patch release does not. Read the release notes before raising a minor.
+- **Release notes** are the [GitHub Releases](https://github.com/o3co/protobuf.interceptors/releases),
+  one per tag; there is no CHANGELOG.
+- **Retracted versions** — `grpc/v0.1.0`, `connectrpc/v0.1.0` and
+  `connectrpc/v0.2.0` require a core version that does not exist, so they
+  cannot be built or required. `go get` stops selecting a retracted version,
+  and warns where one is required, once the module's next release (not a
+  prerelease), which carries the retraction, is published.
 
 ## License
 

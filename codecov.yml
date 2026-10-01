@@ -1,0 +1,46 @@
+# One flag per Go module. CI uploads each module's report from its own job,
+# so a flag a run did not upload is carried forward from the last run that did.
+coverage:
+  status:
+    project:
+      core:
+        flags: [core]
+        target: auto
+        threshold: 1%
+      grpc:
+        flags: [grpc]
+        target: auto
+        threshold: 1%
+      connectrpc:
+        flags: [connectrpc]
+        target: auto
+        threshold: 1%
+    patch:
+      default: false
+
+flags:
+  core:
+    paths:
+      - "!grpc/"
+      - "!connectrpc/"
+    carryforward: true
+  grpc:
+    paths:
+      - grpc/
+    carryforward: true
+  connectrpc:
+    paths:
+      - connectrpc/
+    carryforward: true
+
+comment:
+  layout: "header, diff, flags, files, footer"
+  behavior: default
+  require_changes: false
+
+ignore:
+  # Generated code.
+  - "**/*.pb.go"
+  - "testproto/**"
+  # Reads auth.policy-verifier's wire contract; only tests import it.
+  - "internal/wirecontract/**"

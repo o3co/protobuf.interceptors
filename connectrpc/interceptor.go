@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package connectrpc provides ConnectRPC interceptors that read proto method
-// options and verify authorization via a VerifierEndpoint.
 package connectrpc
 
 import (

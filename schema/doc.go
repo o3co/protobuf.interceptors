@@ -12,27 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-syntax = "proto3";
-
-package o3co.authz.v1;
-
-option go_package = "github.com/o3co/protobuf.interceptors/schema;policy";
-
-import "google/protobuf/descriptor.proto";
-
-message FieldMapping {
-  // placeholder is the name used inside the resource template, e.g. "id" for "<id>"
-  string placeholder = 1;
-  // request_field is the protobuf request field name to extract the value from
-  string request_field = 2;
-}
-
-message Policy {
-  string resource = 1;
-  string action = 2;
-  repeated FieldMapping field_mappings = 3;
-}
-
-extend google.protobuf.MethodOptions {
-  Policy policy = 50000;
-}
+// Package policy is the Go code generated from policy.proto: the
+// (o3co.authz.v1.policy) method option (E_Policy) and its Policy and
+// FieldMapping messages. A service imports policy.proto into its own .proto
+// files to declare each method's resource, action and field mappings.
+//
+// Regenerate it with "make -C schema generate"; CI fails when the committed
+// code differs from what that produces.
+package policy

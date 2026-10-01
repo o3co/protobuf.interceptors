@@ -24,8 +24,10 @@ import (
 // StaticRule defines an allowed resource/action combination.
 // Both Resource and Action support exact match, "*" (wildcard), or "prefix/*" (prefix match).
 type StaticRule struct {
+	// Resource is the pattern the resolved resource is matched against.
 	Resource string
-	Action   string
+	// Action is the pattern the action is matched against.
+	Action string
 }
 
 type staticEndpoint struct {

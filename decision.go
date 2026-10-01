@@ -51,8 +51,11 @@ type Decision struct {
 // RuleGroup is how one rule group came out. Groups are ANDed; the rules in a
 // group are alternatives, tried in order until one passes.
 type RuleGroup struct {
+	// RuleType names the group: the backend groups its rules by type, and a
+	// group is all the rules of one type.
 	RuleType string
-	Passed   bool
+	// Passed reports whether one of the group's rules passed.
+	Passed bool
 	// Restricts marks a group of restricting rules — a delegated token's
 	// range, for one. Such a group narrows what the granting groups allow and
 	// is never a reason to allow on its own, so a group that passed and
@@ -69,9 +72,12 @@ type RuleGroup struct {
 
 // RuleOutcome is how one rule came out.
 type RuleOutcome struct {
-	Code    string
+	// Code names the rule, as the backend declared it.
+	Code string
+	// Message is the rule's own account of its answer.
 	Message string
-	Passed  bool
+	// Passed reports whether the rule passed.
+	Passed bool
 	// Evaluation is nil when the rule reported none. That is every rule with
 	// no policy source, and also every rule of a backend that does not report
 	// evaluations or was not configured to: absence means unknown.
@@ -185,6 +191,7 @@ func DecisionFromContext(ctx context.Context) (*Decision, bool) {
 
 // DecisionEvent is one authorization check a verification interceptor made.
 type DecisionEvent struct {
+	// Resource and Action are what the backend was asked about.
 	Resource string
 	Action   string
 	// Decision is what the backend reported, nil when it reported nothing.

@@ -1,0 +1,15 @@
+# Go test and coverage output
+cover.out
+*.out
+*.test
+
+# Local checkout of auth.policy-verifier's wire contract, as CI makes one
+.verifier/
+
+# Local environment
+.env
+.env.*
+
+# Worktrees and editor/OS files
+.worktrees/
+.DS_Store

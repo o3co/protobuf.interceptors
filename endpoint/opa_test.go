@@ -101,6 +101,20 @@ func TestOPAVerify_ResultAbsent_ReturnsDeniedError(t *testing.T) {
 	}
 }
 
+func TestOPAVerify_ResultNull_ReturnsDeniedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"result": null}`)
+	}))
+	defer srv.Close()
+	ep, _ := NewOPAEndpoint(srv.URL, "authz/allow")
+	err := ep.Verify(ctxWithToken("tok"), "resource", "read")
+	var denied *interceptors.DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("expected *DeniedError, got %T: %v", err, err)
+	}
+}
+
 func TestOPAVerify_NoToken_ReturnsUnauthenticatedError(t *testing.T) {
 	ep, _ := NewOPAEndpoint("http://localhost:9999", "authz/allow")
 	err := ep.Verify(ctxWithToken(""), "resource", "read")
