@@ -59,6 +59,24 @@ RPC request
           handler (your code)
 ```
 
+### Which methods are checked
+
+The policy is read from the method's descriptor in the protobuf registry:
+
+- **Descriptor found, policy option set** — the RPC is checked.
+- **Descriptor found, no policy option** — the RPC is not checked and passes
+  through. The gRPC health and reflection services are such methods.
+- **No descriptor** — the RPC is **refused** with `Internal` before its handler
+  runs, since its policy cannot be known. On gRPC that is a method missing from
+  `protoregistry.GlobalFiles`: one served by `grpc.UnknownServiceHandler`, or
+  by a hand-written `ServiceDesc` whose `.proto` was never registered. On
+  ConnectRPC it is a handler built without `connect.WithSchema` (generated
+  handlers always set it).
+
+Server reflection publishes method options, so a client that can reach the
+reflection service can read every method's policy option: its resource
+template, action and field mappings.
+
 ### Placeholder values
 
 A `<placeholder>` is filled from a request field, which the caller controls, and
@@ -81,8 +99,10 @@ never guarding, and the rule that should have gated it never runs.
 The refusal happens during resolution, before any backend is called, because
 every backend (o3co, OPA, Cedar, static rules) consumes the same resolved
 string. It surfaces as `*interceptors.ResourceValueError`, which the gRPC and
-ConnectRPC interceptors map to `PermissionDenied` — the request is denied, the
-handler never runs, and the verifier is never asked.
+ConnectRPC interceptors map to `PermissionDenied` with the fixed message
+`access denied` — the request is denied, the handler never runs, and the
+verifier is never asked. Which placeholder and character were refused is not
+sent to the caller; see [Errors](#errors) for where it can be read.
 
 **If your ids legitimately carry `.`, `:` or non-ASCII** — a DID, an email, a
 dotted version, a non-Latin id — the request is denied. Three remedies work on
@@ -109,6 +129,15 @@ portable**: it works on ConnectRPC with the o3co endpoint and nowhere else. Read
 
 Substitution is a single pass over the template: a value that itself spells
 `<some-placeholder>` is left as data, never rewritten by another mapping.
+
+Every `<name>` in the template must have a field mapping. One that has none — a
+misspelled placeholder, or a mapping removed while the template kept it — fails
+resolution with `Internal`, rather than reaching the backend as literal text
+naming a resource no policy meant.
+
+A `bytes` field is substituted as its lowercase hex encoding, always: the byte
+`0xff` resolves to `ff` and the two bytes `"ff"` to `6666`, so two different
+values never name the same resource.
 
 ### Extracted field forwarding
 
@@ -218,6 +247,50 @@ path, handler := foopbconnect.NewFooServiceHandler(
 mux.Handle(path, handler)
 ```
 
+The interceptors guard handlers. Passed to a ConnectRPC client, both pass every
+call through untouched.
+
+### Bearer token and request ID
+
+The verification interceptors read both from the request (gRPC metadata or
+HTTP headers) and put them on the context the endpoint is called with:
+
+- **Bearer token** — from `authorization`. A request that carries none has no
+  token, and whether it may proceed is the backend's decision. Otherwise it
+  must carry exactly one value of the form `Bearer <token>`: the scheme is
+  compared case-insensitively (RFC 9110 §11.1) and the token must be non-empty
+  and free of whitespace. Several values, another scheme, or an empty token are
+  refused with `Unauthenticated` before any backend is asked, and the observer
+  sees the refusal. A method with no policy is not checked, so its credential
+  is not read.
+- **Request ID** — from `x-request-id`. The one value sent is kept when it is
+  1–128 characters of `A-Z a-z 0-9 - _ . : + / = #`, the shape
+  auth.policy-verifier accepts. Otherwise — none, several, or one outside that
+  shape — the interceptor generates one, `YYYYMMDDHHmmss_<16 hex digits>` (the
+  UTC second and 8 random bytes). Both frameworks do the same, through
+  `interceptors.InboundBearerToken` and `interceptors.InboundRequestID`.
+
+### Errors
+
+The caller is told the outcome in a status code and a fixed message, the same
+on both frameworks. An endpoint's error can name the backend, the URL it
+called, or why a token was refused, so none of its text reaches the caller:
+
+| Cause | Code | Message |
+|---|---|---|
+| `*interceptors.DeniedError`, including a refused placeholder value | `PermissionDenied` | `access denied` |
+| `*interceptors.UnauthenticatedError`, including an unreadable credential | `Unauthenticated` | `unauthenticated` |
+| `context.Canceled` | `Canceled` | `request canceled` |
+| `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
+| anything else — a backend failure, a method with no descriptor, a placeholder with no mapping, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+
+The full error goes to the `WithDecisionObserver` observer for every check
+(see [Recording the decision](#recording-the-decision)). The error an
+interceptor returns also unwraps to it, so an interceptor placed outside these
+can `errors.As` / `errors.Is` it — that is where a policy lookup or resolution
+failure, which no observer sees, can be logged. The interceptors write no logs
+of their own.
+
 ## Verification Backends
 
 The `endpoint` package provides four backends:
@@ -277,7 +350,9 @@ type VerifierEndpoint interface {
 }
 ```
 
-Bearer token and request ID are passed via `context.Context`, set by the framework-specific `VerificationInterceptor`.
+Bearer token and request ID are passed via `context.Context`, set by the
+framework-specific `VerificationInterceptor` (see
+[Bearer token and request ID](#bearer-token-and-request-id)).
 
 The interface carries only the resolved resource and action, so anything else an
 endpoint wants must come off the context itself. Only the o3co endpoint does:
@@ -310,8 +385,8 @@ the group granted.
 
 **For every check, denials included.** A denied RPC's handler never runs, so
 the verification interceptors also take an observer. It sees every check — on
-gRPC streams, the opening check and each `RecvMsg` re-check — with the
-endpoint's error before it is mapped for the caller:
+streams, the opening check and each re-check of a received message, on both
+frameworks — with the endpoint's error before it is mapped for the caller:
 
 ```go
 observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
@@ -354,8 +429,8 @@ verdict, the deny code, the reason with each evaluation, and the request ID
 that was sent (`Decision.RequestID`). Its `decision` log event carries the same
 request ID, so the two records join on it. The verifier keeps an
 `x-request-id` only if it is at most 128 characters of
-`[A-Za-z0-9-_.:+/=#]`; an ID outside that shape reaches it as none, and joins
-nothing.
+`[A-Za-z0-9-_.:+/=#]`, and the interceptors carry an inbound ID only in that
+shape, generating one otherwise, so the ID they send always joins.
 
 The HTTP status still decides. A body that is empty, not a decision, missing a
 key the verifier's contract requires, null or mistyped anywhere it types a
@@ -395,12 +470,18 @@ A stream is authorized **before its handler is invoked**, on both frameworks —
 a bidirectional or client-streaming handler that sends before it receives, or a
 handler that never receives, is checked like any other.
 
-On gRPC the check is then repeated on each `RecvMsg`. The resource and action
-are fixed for the life of a stream, so that re-check is not a second opinion on
-the same question: it is what stops a stream that keeps receiving once its grant
-has been revoked, or its token expired, since the stream opened. Sends are not
-re-checked, so a server-streaming RPC is checked before its handler runs and
-again when the generated handler reads its one request, and never after that.
+The check is then repeated on each message the handler receives — `RecvMsg` on
+gRPC, `Receive` on ConnectRPC. The resource and action are fixed for the life
+of a stream, so that re-check is not a second opinion on the same question: it
+is what stops a stream that keeps receiving once its grant has been revoked, or
+its token expired, since the stream opened. It runs after the message arrives,
+so a message that arrives after revocation is cleared and never handed to the
+handler, which gets the mapped error instead. A receive that fails — the client
+closed its side, the stream broke — has no message and is not re-checked.
+
+Sends are not re-checked, so a server-streaming RPC is checked before its
+handler runs and again when the handler reads its one request, and never after
+that.
 
 `field_mappings` are not supported for streaming RPCs — the policy interceptor
 runs before the handler reads any request message, and a client or
