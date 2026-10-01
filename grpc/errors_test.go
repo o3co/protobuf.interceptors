@@ -157,3 +157,50 @@ func TestVerificationInterceptor_RPCContextEnded(t *testing.T) {
 		})
 	}
 }
+
+// A policy the interceptor cannot apply, or a chain in the wrong order, is a
+// server fault: the caller is told only that the check failed, and the
+// returned error unwraps to what went wrong.
+func TestPolicyAndGuardErrors_CallerMessageIsFixed(t *testing.T) {
+	noHandler := func(context.Context, any) (any, error) {
+		t.Fatal("the handler must not run")
+		return nil, nil
+	}
+	noStreamHandler := func(any, grpc.ServerStream) error {
+		t.Fatal("the handler must not run")
+		return nil
+	}
+	cases := []struct {
+		name  string
+		cause string
+		run   func() error
+	}{
+		{"request is not a proto message", "proto.Message", func() error {
+			_, err := policygrpc.PolicyOptionInterceptor()(context.Background(), "not a message",
+				&grpc.UnaryServerInfo{FullMethod: "/test.v1.TestService/GetResourceById"}, noHandler)
+			return err
+		}},
+		{"unary chain out of order", "must run before", func() error {
+			_, err := policygrpc.VerificationInterceptor(endpointtest.Allow())(context.Background(), nil,
+				&grpc.UnaryServerInfo{FullMethod: "/test.v1.TestService/GetResource"}, noHandler)
+			return err
+		}},
+		{"field_mappings on a stream", "field_mappings", func() error {
+			return policygrpc.PolicyOptionStreamInterceptor()(nil, &fakeServerStream{ctx: context.Background()},
+				&grpc.StreamServerInfo{FullMethod: "/test.v1.TestService/GetResourceById"}, noStreamHandler)
+		}},
+		{"stream chain out of order", "must run before", func() error {
+			return policygrpc.VerificationStreamInterceptor(endpointtest.Allow())(nil,
+				&fakeServerStream{ctx: context.Background()}, streamInfo(), noStreamHandler)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			assertFixedMessage(t, err, codes.Internal, "authorization check failed")
+			if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), tc.cause) {
+				t.Errorf("error %v does not unwrap to a cause naming %q", err, tc.cause)
+			}
+		})
+	}
+}
