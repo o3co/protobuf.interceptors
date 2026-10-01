@@ -2,6 +2,8 @@
 
 最終更新: 2026-10-01
 
+[English](README.md)
+
 [![CI](https://github.com/o3co/protobuf.interceptors/actions/workflows/ci.yml/badge.svg)](https://github.com/o3co/protobuf.interceptors/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/o3co/protobuf.interceptors/graph/badge.svg)](https://codecov.io/gh/o3co/protobuf.interceptors)
 [![Go Reference](https://pkg.go.dev/badge/github.com/o3co/protobuf.interceptors.svg)](https://pkg.go.dev/github.com/o3co/protobuf.interceptors)
@@ -256,7 +258,7 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 
 検証インターセプターは両方をリクエスト（gRPC メタデータまたは HTTP ヘッダー）から読み、エンドポイントを呼ぶコンテキストに置く:
 
-- **Bearer トークン** — `authorization` から。何も持たないリクエストにはトークンが無く、それを通してよいかはバックエンドの判定である。`endpoint` パッケージのエンドポイントはどれも、バックエンドに問い合わせずに `UnauthenticatedError` として拒否する。それ以外の場合、リクエストは `Bearer <token>` 形式の値をちょうど 1 つ持たなければならない: スキームは大文字小文字を区別せずに比較し（RFC 9110 §11.1）、トークンは空でなく、Unicode の空白を含まないこと（RFC 6750 の `b64token` は空白を含まない）。複数の値、別のスキーム、空のトークンは、どのバックエンドにも問い合わせる前に `Unauthenticated` で拒否され、オブザーバーはその拒否を見る。ポリシーの無いメソッドは検査されない: 正しい形のトークンはそのコンテキストに置かれるが、不正な形のクレデンシャルは拒否されない。
+- **Bearer トークン** — `authorization` から。何も持たないリクエストにはトークンが無く、インターセプターはそれを拒否しない。通してよいかはエンドポイントの判定である。`endpoint` パッケージのエンドポイントはどれも、バックエンドに問い合わせずに `UnauthenticatedError` として拒否するが、独自の `VerifierEndpoint` は通してもよい。それ以外の場合、リクエストは `Bearer <token>` 形式の値をちょうど 1 つ持たなければならない: スキームは大文字小文字を区別せずに比較し（RFC 9110 §11.1）、トークンは空でなく、Unicode の空白を含まないこと（RFC 6750 の `b64token` は空白を含まない）。複数の値、別のスキーム、空のトークンは、どのバックエンドにも問い合わせる前に `Unauthenticated` で拒否され、オブザーバーはその拒否を見る。ポリシーの無いメソッドは検査されない: 正しい形のトークンはそのコンテキストに置かれるが、不正な形のクレデンシャルは拒否されない。
 - **リクエスト ID** — `x-request-id` から。送られた 1 つの値が `A-Z a-z 0-9 - _ . : + / = #` の 1〜128 文字 — auth.policy-verifier が受け付ける形 — であれば、それを保持する。それ以外 — 無い、複数ある、その形から外れる — の場合、インターセプターは `YYYYMMDDHHmmss_<16 桁の 16 進数>`（UTC の秒と 8 バイトの乱数）を生成する。両フレームワークとも、`interceptors.InboundBearerToken` と `interceptors.InboundRequestID` を通して同じことをする。
 
 ### エラー
@@ -311,7 +313,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | オプション | 効果 |
 |---|---|
 | `WithO3coTimeout(d)` | HTTP クライアントのタイムアウト。デフォルト `10s`。`d` が正でなければ panic する。 |
-| `WithO3coMaxResponseBodySize(n)` | レスポンスボディから読むバイト数の上限。デフォルト 1 MiB。`n` が正でなければ panic する。 |
+| `WithO3coMaxResponseBodySize(n)` | `n` バイトまでのレスポンスボディを受け付ける。それより大きいボディを検出するために 1 バイト余分に読み、検出したボディは答えとして読まない。デフォルト 1 MiB。`n` が正でなければ panic する。 |
 | `WithO3coLogLevel(level)` | エンドポイント内部のロガーのレベル。デフォルト `slog.LevelError`。 |
 | `WithO3coRequestIDHeaderKey(key)` | リクエスト ID を転送するヘッダー。デフォルト `x-request-id`。`""` で転送しない。`key` が `Authorization`、`Content-Type`、`Accept` 以外の RFC 7230 トークンでなければ panic する。`WithO3coHeaders` のヘッダーも同じキーを指すと `NewO3coEndpoint` がエラーを返す。OPA と Cedar のオプションも同じ検査をする。 |
 | `WithO3coHeaders(map[string]string)` | すべての verify リクエストに加える静的ヘッダー。複数回の呼び出しはマージされる。 |
@@ -336,12 +338,12 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### OPA エンドポイント
 
-`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` — トークンは送られたまま — で問い合わせるので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）か `false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
+`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` — トークンは送られたまま — で問い合わせるので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
 
 | オプション | 効果 |
 |---|---|
 | `WithOPATimeout(d)` | HTTP クライアントのタイムアウト。デフォルト `10s`。`d` が正でなければ panic する。 |
-| `WithOPAMaxResponseBodySize(n)` | レスポンスボディから読むバイト数の上限。デフォルト 1 MiB。`n` が正でなければ panic する。 |
+| `WithOPAMaxResponseBodySize(n)` | `n` バイトまでのレスポンスボディを受け付ける。それより大きいボディを検出するために 1 バイト余分に読み、検出したボディは答えとして読まない。デフォルト 1 MiB。`n` が正でなければ panic する。 |
 | `WithOPALogLevel(level)` | エンドポイント内部のロガーのレベル。デフォルト `slog.LevelError`。 |
 | `WithOPARequestIDHeaderKey(key)` | リクエスト ID を転送するヘッダー。デフォルト `x-request-id`。`""` で転送しない。`key` が `Authorization`、`Content-Type`、`Accept` 以外の RFC 7230 トークンでなければ panic する。 |
 | `WithOPAAllowInsecure()` | ループバック以外のホストへの `http://` ベース URL を許可する。 |
@@ -358,7 +360,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 | `WithCedarActionPrefix(prefix)` | アクションのエンティティ型。デフォルト `Action`。 |
 | `WithCedarResourcePrefix(prefix)` | リソースのエンティティ型。デフォルト `Resource`。 |
 | `WithCedarTimeout(d)` | HTTP クライアントのタイムアウト。デフォルト `10s`。`d` が正でなければ panic する。 |
-| `WithCedarMaxResponseBodySize(n)` | レスポンスボディから読むバイト数の上限。デフォルト 1 MiB。`n` が正でなければ panic する。 |
+| `WithCedarMaxResponseBodySize(n)` | `n` バイトまでのレスポンスボディを受け付ける。それより大きいボディを検出するために 1 バイト余分に読み、検出したボディは答えとして読まない。デフォルト 1 MiB。`n` が正でなければ panic する。 |
 | `WithCedarLogLevel(level)` | エンドポイント内部のロガーのレベル。デフォルト `slog.LevelError`。 |
 | `WithCedarRequestIDHeaderKey(key)` | リクエスト ID を転送するヘッダー。デフォルト `x-request-id`。`""` で転送しない。`key` が `Authorization`、`Content-Type`、`Accept` 以外の RFC 7230 トークンでなければ panic する。 |
 | `WithCedarAllowInsecure()` | ループバック以外のホストへの `http://` ベース URL を許可する。 |
@@ -374,7 +376,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 Bearer トークンとリクエスト ID は `context.Context` で渡され、フレームワーク別の `VerificationInterceptor` が設定する（[Bearer トークンとリクエスト ID](#bearer-トークンとリクエスト-id)を参照）。
 
-インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。それをするのは o3co エンドポイントだけである: フレームワークが抽出した `field_mappings` の値をコンテキストに置いていれば、それを `POST /verify` の `context` オブジェクトとして転送する。OPA、Cedar、static エンドポイントはリソースとアクションだけで判定する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
+インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。抽出された `field_mappings` の値を読むのは o3co エンドポイントだけで、フレームワークがそれをコンテキストに置いていれば `POST /verify` の `context` オブジェクトとして転送する。OPA はリソース、アクション、トークンで、Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
 
 ## 判定の記録
 
@@ -469,11 +471,11 @@ deciding := endpointtest.Decide(func(ctx context.Context, resource, action strin
 
 ```sh
 for dir in . grpc connectrpc; do
-  (cd "$dir" && gofmt -l . && go vet ./... && go test ./... -race -count=1)
+  (cd "$dir" && test -z "$(gofmt -l .)" && go vet ./... && go test ./... -race -count=1)
 done
 ```
 
-CI はさらに staticcheck、`go mod tidy -diff`、govulncheck を、モジュールが対応する Go ツールチェーンで実行する。そのコマンド、protobuf コードの再生成方法、変更が従う規則は [AGENTS.md](AGENTS.md) にある（英語のみ）。
+CI はさらに、gofmt、staticcheck、`go mod tidy -diff` を最小ツールチェーン（`go` ディレクティブ）で、govulncheck を最新の stable で実行する。そのコマンド、protobuf コードの再生成方法、変更が従う規則は [AGENTS.md](AGENTS.md) にある（英語のみ）。
 
 ### ワイヤー契約テスト
 
@@ -498,7 +500,7 @@ O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/confor
 - **フレームワークモジュールは、それをリリースしたときのコアのリリース**、つまり当時の最新を require する。フレームワークモジュールを `go get` するとそのコアのバージョンが入る。利用者のモジュールがより新しいものを require していれば、そちらになる。
 - **メジャーバージョンが `0` の間は、マイナーリリースで API が壊れることがある。** パッチリリースでは壊れない。マイナーを上げる前にリリースノートを読むこと。
 - **リリースノート**は [GitHub Releases](https://github.com/o3co/protobuf.interceptors/releases) で、タグごとに 1 つある。CHANGELOG は無い。
-- **撤回（retract）されたバージョン** — `grpc/v0.1.0`、`connectrpc/v0.1.0`、`connectrpc/v0.2.0` は存在しないコアのバージョンを require しており、取得できない。撤回を記したそのモジュールの次のバージョンが公開されると、`go get` は撤回されたバージョンを選ばなくなる。
+- **撤回（retract）されたバージョン** — `grpc/v0.1.0`、`connectrpc/v0.1.0`、`connectrpc/v0.2.0` は存在しないコアのバージョンを require しており、ビルドも require もできない。撤回を記したそのモジュールの次のリリース（プレリリースではないもの）が公開されると、`go get` は撤回されたバージョンを選ばなくなり、それを require している箇所では警告を出す。
 
 ## ライセンス
 

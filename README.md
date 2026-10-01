@@ -2,6 +2,8 @@
 
 Last updated: 2026-10-01
 
+[日本語](README.ja.md)
+
 [![CI](https://github.com/o3co/protobuf.interceptors/actions/workflows/ci.yml/badge.svg)](https://github.com/o3co/protobuf.interceptors/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/o3co/protobuf.interceptors/graph/badge.svg)](https://codecov.io/gh/o3co/protobuf.interceptors)
 [![Go Reference](https://pkg.go.dev/badge/github.com/o3co/protobuf.interceptors.svg)](https://pkg.go.dev/github.com/o3co/protobuf.interceptors)
@@ -365,10 +367,10 @@ The verification interceptors read both from the request (gRPC metadata or
 HTTP headers) and put them on the context the endpoint is called with:
 
 - **Bearer token** — from `authorization`. A request that carries none has no
-  token, and whether it may proceed is the backend's decision; every endpoint
-  in package `endpoint` refuses it as `UnauthenticatedError` without asking its
-  backend. Otherwise it
-  must carry exactly one value of the form `Bearer <token>`: the scheme is
+  token and is not refused by the interceptor: whether it may proceed is the
+  endpoint's decision. Every endpoint in package `endpoint` refuses it as
+  `UnauthenticatedError` without asking its backend; a `VerifierEndpoint` of
+  your own may let it through. Otherwise it must carry exactly one value of the form `Bearer <token>`: the scheme is
   compared case-insensitively (RFC 9110 §11.1) and the token must be non-empty
   and free of Unicode whitespace (no RFC 6750 `b64token` contains any).
   Several values, another scheme, or an empty token are refused with
@@ -468,7 +470,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | Option | Effect |
 |---|---|
 | `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. Panics unless `d` is positive. |
-| `WithO3coMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. Panics unless `n` is positive. |
+| `WithO3coMaxResponseBodySize(n)` | Accepts a response body of up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer. Default 1 MiB. Panics unless `n` is positive. |
 | `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`; a key a `WithO3coHeaders` header also names makes `NewO3coEndpoint` return an error. The OPA and Cedar options check the same. |
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
@@ -510,15 +512,15 @@ invalid. Every other `401` is still an `UnauthenticatedError`.
 `NewOPAEndpoint(baseURL, policyPath)` asks `POST {baseURL}/v1/data/{policyPath}`
 with the input `{"resource", "action", "token"}` — the bearer token as sent, so
 the policy must verify it. It allows only when the response's `result` key, in
-exactly that case, holds JSON `true`. An absent `result` (OPA's undefined) or
-`false` is a deny; a `result` that is not a boolean, a body that is not a JSON
+exactly that case, holds JSON `true`. An absent `result` (OPA's undefined),
+`null` or `false` is a deny; a `result` that is not a boolean, a body that is not a JSON
 object, one larger than the size bound, and any non-`2xx` status are errors. An
 empty `policyPath` is refused at construction.
 
 | Option | Effect |
 |---|---|
 | `WithOPATimeout(d)` | HTTP client timeout. Default `10s`. Panics unless `d` is positive. |
-| `WithOPAMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. Panics unless `n` is positive. |
+| `WithOPAMaxResponseBodySize(n)` | Accepts a response body of up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer. Default 1 MiB. Panics unless `n` is positive. |
 | `WithOPALogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithOPARequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`. |
 | `WithOPAAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
@@ -542,7 +544,7 @@ size bound, and any non-`2xx` status are errors. Without
 | `WithCedarActionPrefix(prefix)` | Entity type of the action. Default `Action`. |
 | `WithCedarResourcePrefix(prefix)` | Entity type of the resource. Default `Resource`. |
 | `WithCedarTimeout(d)` | HTTP client timeout. Default `10s`. Panics unless `d` is positive. |
-| `WithCedarMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. Panics unless `n` is positive. |
+| `WithCedarMaxResponseBodySize(n)` | Accepts a response body of up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer. Default 1 MiB. Panics unless `n` is positive. |
 | `WithCedarLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithCedarRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`. |
 | `WithCedarAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
@@ -570,10 +572,14 @@ framework-specific `VerificationInterceptor` (see
 [Bearer token and request ID](#bearer-token-and-request-id)).
 
 The interface carries only the resolved resource and action, so anything else an
-endpoint wants must come off the context itself. Only the o3co endpoint does:
-it forwards the extracted `field_mappings` values as the `context` object of
-`POST /verify`, when a framework put them there. OPA, Cedar and the static
-endpoint decide on resource and action alone — see
+endpoint wants must come off the context itself. Each built-in endpoint reads
+the bearer token there, and uses it its own way: the o3co endpoint sends it to
+the verifier, the OPA endpoint sends it as `input.token`, the Cedar endpoint
+resolves a principal from it, and the static endpoint only requires one. Only
+the o3co endpoint reads the extracted `field_mappings` values, forwarding them
+as the `context` object of `POST /verify` when a framework put them there; OPA
+decides on resource, action and token, Cedar on principal, action and
+resource, and the static endpoint matches resource and action — see
 [Extracted field forwarding](#extracted-field-forwarding).
 
 ## Recording the decision
@@ -757,13 +763,14 @@ and `connectrpc/`. The framework modules build against the checkout's core
 
 ```sh
 for dir in . grpc connectrpc; do
-  (cd "$dir" && gofmt -l . && go vet ./... && go test ./... -race -count=1)
+  (cd "$dir" && test -z "$(gofmt -l .)" && go vet ./... && go test ./... -race -count=1)
 done
 ```
 
-CI also runs staticcheck, `go mod tidy -diff` and govulncheck, on the Go
-toolchains the module supports; [AGENTS.md](AGENTS.md) lists the commands, how
-to regenerate the protobuf code, and the rules a change follows.
+CI also runs gofmt, staticcheck and `go mod tidy -diff` on the minimum
+toolchain (the `go` directive), and govulncheck on the latest stable one;
+[AGENTS.md](AGENTS.md) lists the commands, how to regenerate the protobuf code,
+and the rules a change follows.
 
 ### Wire contract tests
 
@@ -801,9 +808,10 @@ Each module has its own version and its own tags:
 - **Release notes** are the [GitHub Releases](https://github.com/o3co/protobuf.interceptors/releases),
   one per tag; there is no CHANGELOG.
 - **Retracted versions** — `grpc/v0.1.0`, `connectrpc/v0.1.0` and
-  `connectrpc/v0.2.0` require a core version that does not exist and cannot be
-  fetched. `go get` skips a retracted version once the module's next version,
-  which carries the retraction, is published.
+  `connectrpc/v0.2.0` require a core version that does not exist, so they
+  cannot be built or required. `go get` stops selecting a retracted version,
+  and warns where one is required, once the module's next release (not a
+  prerelease), which carries the retraction, is published.
 
 ## License
 
