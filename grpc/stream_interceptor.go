@@ -17,7 +17,6 @@ package grpc
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -56,7 +55,6 @@ type authServerStream struct {
 	action   string
 	verifier endpoint.VerifierEndpoint
 	cfg      *config
-	log      *slog.Logger
 }
 
 func (s *authServerStream) Context() context.Context { return s.ctx }
@@ -69,11 +67,6 @@ func (s *authServerStream) RecvMsg(m any) error {
 		if msg, ok := m.(proto.Message); ok {
 			proto.Reset(msg)
 		}
-		s.log.Error("authorization re-check failed on RecvMsg",
-			"resource", s.resource,
-			"action", s.action,
-			"error", err,
-		)
 		return toGRPCError(err)
 	}
 	return nil
@@ -85,8 +78,7 @@ func (s *authServerStream) RecvMsg(m any) error {
 //
 // Note: field_mappings are not supported for streaming RPCs (no unary request
 // message available). Methods with field_mappings will return codes.Internal.
-func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor {
-	_ = newConfig(opts)
+func PolicyOptionStreamInterceptor() grpc.StreamServerInterceptor {
 	var cache sync.Map
 
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
@@ -140,7 +132,6 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		panic("VerificationStreamInterceptor: verifier must not be nil")
 	}
 	cfg := newConfig(opts)
-	log := newLogger(cfg.logLevel)
 
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx, credErr := withInbound(ss.Context())
@@ -164,11 +155,6 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		// unauthorized.
 		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			log.Error("authorization check failed before stream handler",
-				"resource", policyData.Resource,
-				"action", policyData.Action,
-				"error", err,
-			)
 			return toGRPCError(err)
 		}
 
@@ -179,7 +165,6 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			action:       policyData.Action,
 			verifier:     verifier,
 			cfg:          cfg,
-			log:          log,
 		}
 		return handler(srv, wrapped)
 	}

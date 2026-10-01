@@ -17,8 +17,6 @@ package grpc
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"os"
 	"sync"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -30,24 +28,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Option configures an interceptor.
+// Option configures a verification interceptor.
 type Option func(*config)
 
 type config struct {
-	logLevel slog.Level
 	observer interceptors.DecisionObserver
-}
-
-// WithLogLevel sets the log level for the interceptor's internal logger.
-func WithLogLevel(level slog.Level) Option {
-	return func(c *config) {
-		c.logLevel = level
-	}
 }
 
 // WithDecisionObserver has a verification interceptor hand every
 // authorization check it makes to fn, allowed or not (see
-// interceptors.DecisionObserver). The policy option interceptors ignore it.
+// interceptors.DecisionObserver).
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(c *config) {
 		c.observer = fn
@@ -79,15 +69,11 @@ func withDecision(ctx context.Context, d *interceptors.Decision) context.Context
 }
 
 func newConfig(opts []Option) *config {
-	c := &config{logLevel: slog.LevelInfo}
+	c := &config{}
 	for _, o := range opts {
 		o(c)
 	}
 	return c
-}
-
-func newLogger(level slog.Level) *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
 // withInbound puts the request's bearer token and request ID on ctx. The
@@ -110,8 +96,7 @@ func withInbound(ctx context.Context) (context.Context, error) {
 // connectrpc.PolicyOptionInterceptor, which forwards them. A field mapping
 // whose placeholder the template does not use therefore never reaches the
 // verifier. See README, "Extracted field forwarding".
-func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
-	_ = newConfig(opts) // reserve for future logging use
+func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 	var cache sync.Map
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
