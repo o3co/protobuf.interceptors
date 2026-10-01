@@ -58,8 +58,10 @@ func parseBaseURL(raw string, allowInsecure bool, insecureOption string) (*url.U
 	return u, nil
 }
 
-// isLoopback reports whether host is localhost, or an address in 127.0.0.0/8
-// or ::1.
+// isLoopback reports whether host is localhost, in any case, or a literal
+// address in 127.0.0.0/8 or ::1. localhost is taken by name, and resolves
+// like any other host; a shorthand, numeric or zoned spelling of an address
+// is not loopback.
 func isLoopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true

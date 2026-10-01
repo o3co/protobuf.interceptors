@@ -254,7 +254,12 @@ is refused at construction rather than guessed at. An o3co or OPA request
 carries the subject's bearer token, and a Cedar request the principal resolved
 from it, so `http://` is accepted only to loopback — `localhost`, `127.0.0.0/8`, `::1` — unless the
 endpoint is given `WithO3coAllowInsecure()`, `WithOPAAllowInsecure()` or
-`WithCedarAllowInsecure()`. Anywhere else, use `https://`.
+`WithCedarAllowInsecure()`. Anywhere else, use `https://`. `localhost` is
+accepted by name, in any case, and resolves through `/etc/hosts` and DNS like
+any other host; a literal address is accepted only as written in 127.0.0.0/8
+or as `::1` (an IPv4-mapped `::ffff:127.x.y.z` included), so `localhost.`,
+`foo.localhost`, `127.1`, `2130706433`, `0.0.0.0` and a zoned `::1%lo0` are
+not loopback.
 
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
 the bearer token on it reach only the backend that was configured.

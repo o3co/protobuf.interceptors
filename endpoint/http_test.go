@@ -577,3 +577,27 @@ func TestHTTPEndpoints_BaseURLError_DoesNotCarryThePassword(t *testing.T) {
 		}
 	}
 }
+
+// Loopback is localhost by name, in any case, or a literal address in
+// 127.0.0.0/8 or ::1 — not a name or spelling that some resolver or parser
+// might also take to be one.
+func TestHTTPEndpoints_LoopbackEdges(t *testing.T) {
+	accepted := []string{"LOCALHOST", "[::ffff:127.0.0.1]", "[0:0:0:0:0:0:0:1]", "127.255.255.254"}
+	refused := []string{"localhost.", "127.1", "0.0.0.0", "[::1%25lo0]", "[fe80::1%25en0]", "2130706433", "0x7f.1", "foo.localhost"}
+	for _, c := range constructors {
+		for _, host := range accepted {
+			t.Run(c.name+"/accepted/"+host, func(t *testing.T) {
+				if err := c.build("http://"+host+":3000", false); err != nil {
+					t.Errorf("http://%s: unexpected error: %v", host, err)
+				}
+			})
+		}
+		for _, host := range refused {
+			t.Run(c.name+"/refused/"+host, func(t *testing.T) {
+				if err := c.build("http://"+host+":3000", false); err == nil {
+					t.Errorf("http://%s was accepted as loopback", host)
+				}
+			})
+		}
+	}
+}
