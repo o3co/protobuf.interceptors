@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +40,7 @@ type o3coBuildConfig struct {
 	requestIDHeaderKey       string
 	headers                  http.Header
 	requireConfirmedRevision bool
+	allowInsecure            bool
 }
 
 // O3coOption configures the o3co endpoint.
@@ -126,6 +126,16 @@ func WithO3coRequireConfirmedRevision() O3coOption {
 	}
 }
 
+// WithO3coAllowInsecure permits a plaintext http base URL to a host other
+// than loopback. Every verify request carries the subject's bearer token, and
+// over plaintext anyone on the path can read and replay it, so
+// NewO3coEndpoint refuses such a URL without this option.
+func WithO3coAllowInsecure() O3coOption {
+	return func(c *o3coBuildConfig) {
+		c.allowInsecure = true
+	}
+}
+
 // endpointControlledHeaders are the headers Verify sets from its own state, and
 // which a static header therefore must not overwrite. The request-ID header is
 // added to this set at construction, since its name is configurable.
@@ -198,26 +208,11 @@ type o3coEndpoint struct {
 }
 
 // NewO3coEndpoint constructs an o3coEndpoint that calls POST {baseURL}/verify.
-// Returns an error if baseURL is empty or invalid.
+// It returns an error unless baseURL names http or https and a host, and
+// refuses http to a host other than loopback without WithO3coAllowInsecure.
 //
 // The endpoint it returns is also a DecisionVerifier.
 func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, error) {
-	rawBase := strings.TrimSpace(baseURL)
-	if rawBase == "" {
-		return nil, fmt.Errorf("baseURL must not be empty")
-	}
-
-	if !strings.HasPrefix(rawBase, "http://") && !strings.HasPrefix(rawBase, "https://") {
-		rawBase = "http://" + rawBase
-	}
-
-	base, err := url.Parse(rawBase)
-	if err != nil {
-		return nil, fmt.Errorf("invalid authorization base url: %w", err)
-	}
-
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/verify"
-
 	cfg := &o3coBuildConfig{
 		timeout:             defaultTimeout,
 		maxResponseBodySize: defaultMaxResponseBodySize,
@@ -227,6 +222,12 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithO3coAllowInsecure")
+	if err != nil {
+		return nil, err
+	}
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/verify"
 
 	// After every option is applied: the request-ID header name a static header
 	// may collide with is only known once they all have been.

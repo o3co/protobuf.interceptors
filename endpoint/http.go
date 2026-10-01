@@ -15,9 +15,49 @@
 package endpoint
 
 import (
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
+
+// parseBaseURL parses the URL an endpoint asks its backend at. It must name
+// http or https and a host. Every request carries the subject's bearer token,
+// so plaintext is refused unless the host is loopback or allowInsecure is set;
+// insecureOption names the option that sets it.
+func parseBaseURL(raw string, allowInsecure bool, insecureOption string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("baseURL must not be empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("base URL must name the scheme http or https, got %q", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return nil, errors.New("base URL must name a host")
+	}
+	if u.Scheme == "http" && !allowInsecure && !isLoopback(u.Hostname()) {
+		return nil, fmt.Errorf("base URL %s sends the bearer token in plaintext to a host other than loopback: use https, or %s to permit it", u.Redacted(), insecureOption)
+	}
+	return u, nil
+}
+
+// isLoopback reports whether host is localhost, or an address in 127.0.0.0/8
+// or ::1.
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 // newHTTPClient returns the client an endpoint asks its backend with. It
 // follows no redirect: a 3xx is the answer, which every endpoint reads as an

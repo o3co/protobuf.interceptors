@@ -229,6 +229,13 @@ The `endpoint` package provides four backends:
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | Local evaluation |
 
+A base URL names its scheme, `http` or `https`, and a host; one without either
+is refused at construction rather than guessed at. Every request carries the
+subject's bearer token (Cedar's, the principal resolved from it), so `http://`
+is accepted only to loopback — `localhost`, `127.0.0.0/8`, `::1` — unless the
+endpoint is given `WithO3coAllowInsecure()`, `WithOPAAllowInsecure()` or
+`WithCedarAllowInsecure()`. Anywhere else, use `https://`.
+
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
 the bearer token on it reach only the backend that was configured.
 
@@ -242,6 +249,7 @@ the bearer token on it reach only the backend that was configured.
 | `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. |
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
+| `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
 optional `http.callerAuth` gate turned on. That gate expects a shared credential

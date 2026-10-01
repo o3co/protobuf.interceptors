@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -35,6 +34,7 @@ type opaBuildConfig struct {
 	maxResponseBodySize int64
 	logger              *slog.Logger
 	requestIDHeaderKey  string
+	allowInsecure       bool
 }
 
 // OPAOption configures the OPA REST endpoint.
@@ -76,6 +76,16 @@ func WithOPARequestIDHeaderKey(key string) OPAOption {
 	}
 }
 
+// WithOPAAllowInsecure permits a plaintext http base URL to a host other than
+// loopback. Every request to OPA carries the subject's bearer token, and over
+// plaintext anyone on the path can read and replay it, so NewOPAEndpoint
+// refuses such a URL without this option.
+func WithOPAAllowInsecure() OPAOption {
+	return func(c *opaBuildConfig) {
+		c.allowInsecure = true
+	}
+}
+
 // opaEndpoint is a VerifierEndpoint implementation that calls an OPA REST API.
 type opaEndpoint struct {
 	httpClient          *http.Client
@@ -105,30 +115,14 @@ type opaResponse struct {
 
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
 // The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
-// Returns an error if baseURL or policyPath is empty, or if the URL is invalid.
+// It returns an error if policyPath is empty or baseURL does not name http or
+// https and a host, and refuses http to a host other than loopback without
+// WithOPAAllowInsecure.
 func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndpoint, error) {
-	rawBase := strings.TrimSpace(baseURL)
-	if rawBase == "" {
-		return nil, fmt.Errorf("baseURL must not be empty")
-	}
-
 	rawPath := strings.TrimSpace(policyPath)
 	if rawPath == "" {
 		return nil, fmt.Errorf("policyPath must not be empty")
 	}
-
-	if !strings.HasPrefix(rawBase, "http://") && !strings.HasPrefix(rawBase, "https://") {
-		rawBase = "http://" + rawBase
-	}
-
-	base, err := url.Parse(rawBase)
-	if err != nil {
-		return nil, fmt.Errorf("invalid OPA base URL: %w", err)
-	}
-
-	// Normalize: strip trailing slash from base path, strip leading slash from policyPath.
-	rawPath = strings.TrimPrefix(rawPath, "/")
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/data/" + rawPath
 
 	cfg := &opaBuildConfig{
 		timeout:             defaultTimeout,
@@ -139,6 +133,15 @@ func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndp
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithOPAAllowInsecure")
+	if err != nil {
+		return nil, err
+	}
+
+	// Normalize: strip trailing slash from base path, strip leading slash from policyPath.
+	rawPath = strings.TrimPrefix(rawPath, "/")
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/data/" + rawPath
 
 	return &opaEndpoint{
 		httpClient:          newHTTPClient(cfg.timeout),

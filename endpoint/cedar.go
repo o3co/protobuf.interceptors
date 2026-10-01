@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -39,6 +38,7 @@ type cedarBuildConfig struct {
 	actionPrefix        string
 	resourcePrefix      string
 	principalResolver   func(ctx context.Context, token string) string
+	allowInsecure       bool
 }
 
 // CedarOption configures the Cedar agent REST endpoint.
@@ -115,6 +115,16 @@ func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) strin
 	}
 }
 
+// WithCedarAllowInsecure permits a plaintext http base URL to a host other
+// than loopback. Over plaintext anyone on the path can read and alter what is
+// asked and what is answered, so NewCedarEndpoint refuses such a URL without
+// this option.
+func WithCedarAllowInsecure() CedarOption {
+	return func(c *cedarBuildConfig) {
+		c.allowInsecure = true
+	}
+}
+
 // cedarEndpoint is a VerifierEndpoint implementation that calls a Cedar agent REST API.
 type cedarEndpoint struct {
 	httpClient          *http.Client
@@ -148,24 +158,9 @@ func formatEntityUID(entityType, id string) string {
 
 // NewCedarEndpoint constructs a VerifierEndpoint that calls the Cedar agent REST API.
 // The authorize URL is constructed as: {baseURL}/v1/is_authorized.
-// Returns an error if baseURL is empty or invalid.
+// It returns an error unless baseURL names http or https and a host, and
+// refuses http to a host other than loopback without WithCedarAllowInsecure.
 func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, error) {
-	rawBase := strings.TrimSpace(baseURL)
-	if rawBase == "" {
-		return nil, fmt.Errorf("baseURL must not be empty")
-	}
-
-	if !strings.HasPrefix(rawBase, "http://") && !strings.HasPrefix(rawBase, "https://") {
-		rawBase = "http://" + rawBase
-	}
-
-	base, err := url.Parse(rawBase)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Cedar agent base URL: %w", err)
-	}
-
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/is_authorized"
-
 	cfg := &cedarBuildConfig{
 		timeout:             defaultTimeout,
 		maxResponseBodySize: defaultMaxResponseBodySize,
@@ -179,6 +174,12 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithCedarAllowInsecure")
+	if err != nil {
+		return nil, err
+	}
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/is_authorized"
 
 	return &cedarEndpoint{
 		httpClient:          newHTTPClient(cfg.timeout),
