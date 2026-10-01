@@ -88,7 +88,7 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 
 		policy, err := getMethodPolicy(&cache, info.FullMethod)
 		if err != nil {
-			return status.Errorf(codes.Internal, "failed to look up method policy: %v", err)
+			return toGRPCError(fmt.Errorf("failed to look up method policy: %w", err))
 		}
 
 		if policy == nil {

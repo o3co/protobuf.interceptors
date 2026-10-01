@@ -120,7 +120,7 @@ func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 
 		policy, err := getMethodPolicy(&cache, info.FullMethod)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to look up method policy: %v", err)
+			return nil, toGRPCError(fmt.Errorf("failed to look up method policy: %w", err))
 		}
 
 		if policy == nil {
