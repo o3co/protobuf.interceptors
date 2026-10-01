@@ -46,6 +46,7 @@ type Responses struct {
 	} `json:"decision"`
 	RuleGroup struct {
 		Required            []string `json:"required"`
+		Optional            []string `json:"optional"`
 		OnlyOnAPassingGroup []string `json:"onlyOnAPassingGroup"`
 	} `json:"ruleGroup"`
 	RuleOutcome struct {

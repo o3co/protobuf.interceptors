@@ -53,6 +53,12 @@ type Decision struct {
 type RuleGroup struct {
 	RuleType string
 	Passed   bool
+	// Restricts marks a group of restricting rules — a delegated token's
+	// range, for one. Such a group narrows what the granting groups allow and
+	// is never a reason to allow on its own, so a group that passed and
+	// restricts granted nothing. False is a granting group, or a backend that
+	// does not mark groups.
+	Restricts bool
 	// Evaluated is every rule that actually ran, in order. A passing group
 	// stops at its first passing rule, so alternatives after it are absent.
 	Evaluated []RuleOutcome
