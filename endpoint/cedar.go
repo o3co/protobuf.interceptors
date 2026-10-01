@@ -170,11 +170,6 @@ type cedarRequest struct {
 	Context   map[string]any `json:"context"`
 }
 
-// cedarResponse is the JSON body returned by the Cedar agent's is_authorized API.
-type cedarResponse struct {
-	Decision string `json:"decision"`
-}
-
 // formatEntityUID formats a Cedar entity UID, {entityType}::"{id}", with id
 // escaped as a Cedar string literal. Unescaped, a quote or backslash in id
 // would end the literal or escape what follows it, and the UID would name
@@ -314,15 +309,14 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 		return fmt.Errorf("the Cedar agent returned non-2xx status: %d", resp.StatusCode)
 	}
 
-	// Parse the Cedar agent decision.
-	var cedarResp cedarResponse
-	if err := json.Unmarshal(respBody, &cedarResp); err != nil {
-		return fmt.Errorf("failed to parse Cedar agent response: %w", err)
+	// Only the exact key decision, holding "Allow", allows: the agent's keys
+	// are case-sensitive, and a key in another case is not the decision.
+	obj, ok := decodeObject(respBody)
+	if !ok {
+		return fmt.Errorf("failed to parse Cedar agent response: not a JSON object")
 	}
-
-	if cedarResp.Decision == "Allow" {
+	if obj["decision"] == "Allow" {
 		return nil
 	}
-
 	return &interceptors.DeniedError{Reason: "access denied by policy"}
 }

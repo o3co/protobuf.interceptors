@@ -124,12 +124,6 @@ type opaInput struct {
 	Token    string `json:"token"`
 }
 
-// opaResponse is the JSON body returned by OPA's data API.
-// Result is a pointer so we can distinguish false from absent (undefined).
-type opaResponse struct {
-	Result *bool `json:"result,omitempty"`
-}
-
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
 // The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
 // It returns an error if policyPath is empty or baseURL does not name http or
@@ -235,16 +229,21 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 		return fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode)
 	}
 
-	// Parse the OPA decision.
-	var opaResp opaResponse
-	if err := json.Unmarshal(respBody, &opaResp); err != nil {
-		return fmt.Errorf("failed to parse OPA response: %w", err)
+	// Only the exact key result, holding JSON true, allows: OPA's keys are
+	// case-sensitive, and a key in another case is not the decision.
+	obj, ok := decodeObject(respBody)
+	if !ok {
+		return fmt.Errorf("failed to parse OPA response: not a JSON object")
 	}
-
-	// result absent (undefined) or false → deny.
-	if opaResp.Result == nil || !*opaResp.Result {
-		return &interceptors.DeniedError{Reason: "access denied by policy"}
+	switch result := obj["result"].(type) {
+	case nil:
+		// result absent is OPA's undefined: deny.
+	case bool:
+		if result {
+			return nil
+		}
+	default:
+		return fmt.Errorf("failed to parse OPA response: result is not a boolean")
 	}
-
-	return nil
+	return &interceptors.DeniedError{Reason: "access denied by policy"}
 }
