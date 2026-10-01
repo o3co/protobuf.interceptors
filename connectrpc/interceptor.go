@@ -18,6 +18,7 @@ package connectrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -103,7 +104,7 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 		if len(policy.FieldMappings) > 0 {
 			msg, ok := req.Any().(proto.Message)
 			if !ok {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("request does not implement proto.Message"))
+				return nil, toConnectError(ctx, errors.New("request does not implement proto.Message"))
 			}
 			var fields map[string]string
 			resource, action, fields, err = interceptors.ResolveResourceWithFields(policy, msg)
@@ -144,7 +145,7 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 		}
 
 		if len(policy.FieldMappings) > 0 {
-			return connect.NewError(connect.CodeInternal, fmt.Errorf("field_mappings are not supported for streaming RPCs"))
+			return toConnectError(ctx, errors.New("field_mappings are not supported for streaming RPCs"))
 		}
 
 		resource, action, err := interceptors.ResolveResource(policy, nil)
@@ -229,7 +230,7 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 
 		// Guard: PolicyOptionInterceptor must have run.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("PolicyOptionInterceptor must run before VerificationInterceptor"))
+			return nil, toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
 		// No policy in context means the method has no policy — pass through.
@@ -258,7 +259,7 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 
 		// Guard: PolicyOptionInterceptor must have run.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return connect.NewError(connect.CodeInternal, fmt.Errorf("PolicyOptionInterceptor must run before VerificationInterceptor"))
+			return toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
 		// No policy in context means the method has no policy — pass through.
