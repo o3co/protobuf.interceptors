@@ -177,7 +177,8 @@ type verificationInterceptor struct {
 }
 
 // VerificationInterceptor returns a ConnectRPC Interceptor that reads Policy
-// from context and calls the verifier endpoint.
+// from context and calls the verifier endpoint. A stream is authorized before
+// its handler runs, then re-checked on each message Receive returns.
 //
 // When the endpoint is an endpoint.DecisionVerifier, the decision that allowed
 // the RPC is on the handler's context (interceptors.DecisionFromContext), and
@@ -271,6 +272,42 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return toConnectError(err)
 		}
 
-		return next(ctx, conn)
+		return next(ctx, &authStreamingHandlerConn{
+			StreamingHandlerConn: conn,
+			ctx:                  ctx,
+			resource:             policyData.Resource,
+			action:               policyData.Action,
+			v:                    v,
+		})
 	}
+}
+
+// authStreamingHandlerConn re-checks authorization on each message Receive
+// returns, before handing it over.
+//
+// The stream is already authorized before the handler is invoked. The
+// resource and action are fixed, so re-asking the verifier per message is what
+// stops a stream that keeps receiving once a grant is revoked or a token
+// expires. The check follows the receive, so a message that arrives after
+// revocation is cleared and never handed over; a receive that fails has no
+// message and is not checked. Sends are not re-checked.
+type authStreamingHandlerConn struct {
+	connect.StreamingHandlerConn
+	ctx      context.Context
+	resource string
+	action   string
+	v        *verificationInterceptor
+}
+
+func (c *authStreamingHandlerConn) Receive(msg any) error {
+	if err := c.StreamingHandlerConn.Receive(msg); err != nil {
+		return err
+	}
+	if _, err := c.v.verify(c.ctx, c.resource, c.action, nil); err != nil {
+		if m, ok := msg.(proto.Message); ok {
+			proto.Reset(m)
+		}
+		return toConnectError(err)
+	}
+	return nil
 }
