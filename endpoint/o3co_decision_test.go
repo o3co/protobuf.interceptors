@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -299,7 +300,10 @@ func TestO3coVerify_ResponseWithoutEvaluation_BehavesAsBefore(t *testing.T) {
 	}
 }
 
-func TestO3coVerify_BodyThatIsNotADecision_LeavesTheStatusToDecide(t *testing.T) {
+// An allow is a 200 carrying a whole allow. A 200 whose body is anything
+// less is not one, and is not a deny either: the verifier did not say what it
+// decided. A 403 stays a deny whatever its body holds.
+func TestO3coVerify_BodyThatIsNotAWholeDecision(t *testing.T) {
 	cases := []struct {
 		name   string
 		status int
@@ -323,8 +327,8 @@ func TestO3coVerify_BodyThatIsNotADecision_LeavesTheStatusToDecide(t *testing.T)
 			var denied *interceptors.DeniedError
 			switch tc.status {
 			case http.StatusOK:
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
+				if err == nil || errors.As(err, &denied) {
+					t.Errorf("got %T: %v, want an error that is not a denial", err, err)
 				}
 			case http.StatusForbidden:
 				if !errors.As(err, &denied) {
@@ -335,8 +339,58 @@ func TestO3coVerify_BodyThatIsNotADecision_LeavesTheStatusToDecide(t *testing.T)
 	}
 }
 
+// Only 200 is the allow status: any other 2xx is an error, even with a whole
+// allow in its body.
+func TestO3coVerify_2xxOtherThan200_IsAnError(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo, http.StatusNoContent, http.StatusPartialContent, 299} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, status, allowWithEvaluation).URL)
+			_, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+			var denied *interceptors.DeniedError
+			if err == nil || errors.As(err, &denied) {
+				t.Errorf("status %d: got %T: %v, want an error that is not a denial", status, err, err)
+			}
+		})
+	}
+}
+
+// A 200 whose body breaks off is not an allow, even when what arrived is one.
+func TestO3coVerify_200WhoseBodyFailsToRead_IsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(allowWithEvaluation)+100))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(allowWithEvaluation))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEndpoint(t, srv.URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err == nil || d != nil {
+		t.Errorf("VerifyDecision = (%+v, %v), want (nil, an error)", d, err)
+	}
+}
+
+// A 200 that is not an allow is logged at the default level, by status and
+// request ID, and without its body.
+func TestO3coVerify_200ThatIsNotAWholeAllow_IsLoggedWithoutTheBody(t *testing.T) {
+	e := newTestEndpoint(t, serve(t, http.StatusOK, `{"decision": "allow", "secret": "leak-me"}`).URL)
+	logs := captureLogs(e)
+
+	_ = e.Verify(ctxWithTokenAndRequestID("tok", "req-1"), "r", "a")
+	out := logs.String()
+	if strings.Contains(out, "leak-me") {
+		t.Errorf("default-level log carries the body:\n%s", out)
+	}
+	for _, want := range []string{"level=ERROR", "status=200", "req-1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default-level log lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 // Past the size bound the body is not read as a decision at all — a deny
-// stays a deny, an allow stays an allow with nothing reported.
+// stays a deny, and an allow is not one.
 func TestO3coVerify_OversizedBody_IsNotADecision(t *testing.T) {
 	limit := WithO3coMaxResponseBodySize(64)
 
@@ -349,8 +403,8 @@ func TestO3coVerify_OversizedBody_IsNotADecision(t *testing.T) {
 
 	allow := newTestEndpoint(t, serve(t, http.StatusOK, allowWithEvaluation).URL, limit)
 	d, err = allow.VerifyDecision(ctxWithToken("tok"), "r", "a")
-	if err != nil || d != nil {
-		t.Errorf("oversized allow = (%+v, %v), want (nil, nil)", d, err)
+	if err == nil || errors.As(err, &denied) || d != nil {
+		t.Errorf("oversized allow = (%+v, %v), want (nil, an error that is not a denial)", d, err)
 	}
 }
 
@@ -391,7 +445,8 @@ func TestO3coVerify_2xxWhoseDecisionIsNotAllow_FailsClosed(t *testing.T) {
 }
 
 // Every key the wire contract requires must be there, and not null, or the
-// body reports nothing — never part of a decision.
+// body reports nothing — never part of a decision — and a 200 carrying it is
+// not an allow.
 func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testing.T) {
 	const ev = `"evaluation": {"status": "completed", "revision": "` + testDigest + `"}`
 	const outcome = `{"code": "c", "message": "m", "passed": true, ` + ev + `}`
@@ -418,6 +473,15 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		"a null restricts":                            `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": null, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a restricts of the wrong type":               `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": "true", "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a restricts spelled in another case":         `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "Restricts": true, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a fractional determiningPoliciesOmitted":     `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": ["p"], "determiningPoliciesOmitted": 1.5}}}]}}`,
+		"an out-of-range determiningPoliciesOmitted":  `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": ["p"], "determiningPoliciesOmitted": 1e19}}}]}}`,
+		"a determiningPolicies that is not strings":   `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "evaluated": [], "satisfiedBy": {"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": null, "determiningPolicies": [7]}}}]}}`,
+		"a resource of the wrong type":                `{"resource": 1, "action": "a", "decision": "allow", "reason": {"groups": []}}`,
+		"an allow whose code is of the wrong type":    `{"resource": "r", "action": "a", "decision": "allow", "code": 1, "reason": {"groups": []}}`,
+		"an allow with a code":                        `{"resource": "r", "action": "a", "decision": "allow", "code": "c", "reason": {"groups": []}}`,
+		"an allow with a message":                     `{"resource": "r", "action": "a", "decision": "allow", "message": "m", "reason": {"groups": []}}`,
+		"an allow with a null code":                   `{"resource": "r", "action": "a", "decision": "allow", "code": null, "reason": {"groups": []}}`,
+		"an allow with a null message":                `{"resource": "r", "action": "a", "decision": "allow", "message": null, "reason": {"groups": []}}`,
 		"a JSON array":                                `[` + group + `]`,
 		"JSON null":                                   `null`,
 	}
@@ -425,8 +489,8 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		t.Run(name, func(t *testing.T) {
 			e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL)
 			d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if err == nil {
+				t.Error("expected an error: a 200 without a whole allow is not an allow")
 			}
 			if d != nil {
 				t.Errorf("decision = %+v, want nil", d)
@@ -505,10 +569,8 @@ func TestO3coRequireConfirmedRevision_AcceptsAConfirmedAllow(t *testing.T) {
 
 func TestO3coRequireConfirmedRevision_RefusesAnUnconfirmedAllow(t *testing.T) {
 	cases := map[string]string{
-		"no evaluation":  allowWithoutEvaluation,
-		"null revision":  strings.ReplaceAll(allowWithEvaluation, `"revision": "`+testDigest+`"`, `"revision": null`),
-		"no decision":    "",
-		"not a decision": `{"ok": true}`,
+		"no evaluation": allowWithoutEvaluation,
+		"null revision": strings.ReplaceAll(allowWithEvaluation, `"revision": "`+testDigest+`"`, `"revision": null`),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -591,5 +653,68 @@ func TestVerifyWithDecision_DecisionVerifierReportsItsDecision(t *testing.T) {
 	d, err := VerifyWithDecision(ctxWithToken("tok"), e, "r", "a")
 	if err != nil || !d.RevisionConfirmed() {
 		t.Errorf("VerifyWithDecision = (%+v, %v)", d, err)
+	}
+}
+
+// --- Key case ---------------------------------------------------------------------
+//
+// The wire contract's keys are case-sensitive. A key in another case is one
+// the contract does not define, which a client ignores: it must not stand in
+// for the key it resembles.
+
+func TestO3coVerify_ADecisionKeyInAnotherCase_DoesNotGrant(t *testing.T) {
+	body := strings.Replace(denyWithEvaluation, `"decision": "deny",`, `"decision": "deny", "Decision": "allow",`, 1)
+	e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err == nil {
+		t.Fatal("expected an error: a 200 whose decision is deny is not an allow")
+	}
+	if d == nil || d.Code != "cedar_deny" {
+		t.Errorf("decision = %+v, want the deny", d)
+	}
+}
+
+func TestO3coRequireConfirmedRevision_KeysInAnotherCase_DoNotConfirm(t *testing.T) {
+	const confirmed = `{"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": "` + testDigest + `"}}`
+	envelope := func(group string) string {
+		return `{"decision": "allow", "resource": "r", "action": "a", "reason": {"groups": [` + group + `]}}`
+	}
+	cases := map[string]string{
+		"a failing group that says Passed and SatisfiedBy": envelope(`{"ruleType": "cedar", "passed": false, "evaluated": [` + confirmed + `],
+			"Passed": true, "SatisfiedBy": ` + confirmed + `}`),
+		"a null revision beside a Revision": envelope(`{"ruleType": "cedar", "passed": true, "evaluated": [],
+			"satisfiedBy": {"code": "c", "message": "m", "passed": true,
+				"evaluation": {"status": "completed", "revision": null, "Revision": "` + testDigest + `"}}}`),
+		"a failed status beside a Status": envelope(`{"ruleType": "cedar", "passed": true, "evaluated": [],
+			"satisfiedBy": {"code": "c", "message": "m", "passed": true,
+				"evaluation": {"status": "failed", "revision": "` + testDigest + `", "Status": "completed"}}}`),
+		"a satisfying rule without an evaluation beside an Evaluation": envelope(`{"ruleType": "cedar", "passed": true, "evaluated": [],
+			"satisfiedBy": {"code": "c", "message": "m", "passed": true,
+				"Evaluation": {"status": "completed", "revision": "` + testDigest + `"}}}`),
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL, WithO3coRequireConfirmedRevision())
+			d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+			var unconfirmed *interceptors.UnconfirmedRevisionError
+			if !errors.As(err, &unconfirmed) {
+				t.Fatalf("expected *UnconfirmedRevisionError, got %T: %v (decision %+v)", err, err, d)
+			}
+		})
+	}
+}
+
+// The group reads as the exact keys say: failing, with no satisfying rule.
+func TestO3coVerifyDecision_PassedAndSatisfiedByInAnotherCase_AreIgnored(t *testing.T) {
+	body := `{"decision": "deny", "code": "c", "message": "m", "resource": "r", "action": "a", "reason": {"groups": [
+		{"ruleType": "cedar", "passed": false, "evaluated": [{"code": "c", "message": "m", "passed": false}],
+		 "Passed": true, "SatisfiedBy": {"code": "c", "message": "m", "passed": true}}]}}`
+	e := newTestEndpoint(t, serve(t, http.StatusForbidden, body).URL)
+	d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if d == nil || len(d.Groups) != 1 {
+		t.Fatalf("decision = %+v", d)
+	}
+	if g := d.Groups[0]; g.Passed || g.SatisfiedBy != nil {
+		t.Errorf("group = %+v, want failing with no satisfying rule", g)
 	}
 }

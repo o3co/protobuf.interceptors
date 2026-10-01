@@ -17,6 +17,7 @@ package endpoint
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -32,42 +33,21 @@ const codeCallerUnauthenticated = "caller_unauthenticated"
 // UnauthenticatedError and the framework interceptors map it to Internal.
 var ErrCallerUnauthenticated = errors.New("authorization service refused this service's caller credential")
 
-// wireDecision is the body of a POST /verify answer: the decision envelope on
-// 200 and 403, the error envelope — decision, code and message only —
-// otherwise. Keys this library does not know are ignored, as the verifier's
-// wire contract requires of a client.
+// wireDecision is the body of a POST /verify answer: read as the decision
+// envelope on any 2xx and on 403, and as the error envelope — decision, code
+// and message only — otherwise. It is read from the body decoded as a map,
+// whose keys match the contract's exactly: the one walk over it both checks
+// the envelope and builds what is returned, so no key it did not check can
+// reach a decision. Keys this library does not know, a key in another case
+// among them, are ignored, as the verifier's wire contract requires of a
+// client — except restricts in another case, which makes a group not whole
+// (see readGroup).
 type wireDecision struct {
-	Decision string      `json:"decision"`
-	Code     string      `json:"code"`
-	Message  string      `json:"message"`
-	Reason   *wireReason `json:"reason"`
-}
-
-type wireReason struct {
-	Groups []wireGroup `json:"groups"`
-}
-
-type wireGroup struct {
-	RuleType    string        `json:"ruleType"`
-	Passed      bool          `json:"passed"`
-	Restricts   bool          `json:"restricts"`
-	Evaluated   []wireOutcome `json:"evaluated"`
-	SatisfiedBy *wireOutcome  `json:"satisfiedBy"`
-}
-
-type wireOutcome struct {
-	Code       string          `json:"code"`
-	Message    string          `json:"message"`
-	Passed     bool            `json:"passed"`
-	Evaluation *wireEvaluation `json:"evaluation"`
-}
-
-type wireEvaluation struct {
-	Status                     string   `json:"status"`
-	Revision                   *string  `json:"revision"`
-	LoadedRevision             string   `json:"loadedRevision"`
-	DeterminingPolicies        []string `json:"determiningPolicies"`
-	DeterminingPoliciesOmitted int      `json:"determiningPoliciesOmitted"`
+	Decision string
+	Code     string
+	Message  string
+	// Groups are the reason's rule groups, nil in an error envelope.
+	Groups []interceptors.RuleGroup
 }
 
 // envelopeKind is which envelope a status answers with.
@@ -89,28 +69,25 @@ func decodeObject(body []byte) (map[string]any, bool) {
 	return obj, true
 }
 
-// parseEnvelope reads body, decoded as obj, as an envelope of kind. It returns
-// nil unless every key the wire contract requires of that kind is there, none
-// is null where the contract types a value, and each has the right type — so
-// that a body that is not a whole envelope reports nothing rather than part of
-// one.
-func parseEnvelope(body []byte, obj map[string]any, kind envelopeKind) *wireDecision {
-	valid := false
+// parseEnvelope reads obj as an envelope of kind. It returns nil unless every
+// key the wire contract requires of that kind is there, none is null where the
+// contract types a value, and each has the right type — so that a body that
+// is not a whole envelope reports nothing rather than part of one.
+func parseEnvelope(obj map[string]any, kind envelopeKind) *wireDecision {
+	var (
+		w  *wireDecision
+		ok bool
+	)
 	switch kind {
 	case decisionEnvelope:
-		valid = validDecision(obj)
+		w, ok = readDecision(obj)
 	case errorEnvelope:
-		valid = present(obj, "decision", "code", "message")
+		w, ok = readError(obj)
 	}
-	if !valid {
+	if !ok {
 		return nil
 	}
-	// Presence is checked above; the typed decode checks every value's type.
-	var w wireDecision
-	if err := json.Unmarshal(body, &w); err != nil {
-		return nil
-	}
-	return &w
+	return w
 }
 
 // present reports whether obj holds each of keys, none of them null.
@@ -123,96 +100,202 @@ func present(obj map[string]any, keys ...string) bool {
 	return true
 }
 
-func validDecision(obj map[string]any) bool {
-	if !present(obj, "resource", "action", "decision", "reason") {
-		return false
+func readError(obj map[string]any) (*wireDecision, bool) {
+	decision, ok1 := obj["decision"].(string)
+	code, ok2 := obj["code"].(string)
+	message, ok3 := obj["message"].(string)
+	if !ok1 || !ok2 || !ok3 {
+		return nil, false
 	}
-	switch obj["decision"] {
+	return &wireDecision{Decision: decision, Code: code, Message: message}, true
+}
+
+func readDecision(obj map[string]any) (*wireDecision, bool) {
+	if !present(obj, "resource", "action", "decision", "reason") {
+		return nil, false
+	}
+	_, okResource := obj["resource"].(string)
+	_, okAction := obj["action"].(string)
+	if !okResource || !okAction {
+		return nil, false
+	}
+	w := &wireDecision{}
+	w.Decision, _ = obj["decision"].(string)
+	switch w.Decision {
 	case "allow":
+		// An allow never carries code or message, not even as null: those
+		// are a deny's.
+		_, hasCode := obj["code"]
+		_, hasMessage := obj["message"]
+		if hasCode || hasMessage {
+			return nil, false
+		}
 	case "deny":
-		if !present(obj, "code", "message") {
-			return false
+		var okCode, okMessage bool
+		w.Code, okCode = obj["code"].(string)
+		w.Message, okMessage = obj["message"].(string)
+		if !okCode || !okMessage {
+			return nil, false
 		}
 	default:
-		return false
+		return nil, false
 	}
 	reason, ok := obj["reason"].(map[string]any)
 	if !ok {
-		return false
+		return nil, false
 	}
 	groups, ok := reason["groups"].([]any)
 	if !ok {
-		return false
+		return nil, false
 	}
+	w.Groups = make([]interceptors.RuleGroup, 0, len(groups))
 	for _, g := range groups {
-		if !validGroup(g) {
-			return false
+		group, ok := readGroup(g)
+		if !ok {
+			return nil, false
 		}
+		w.Groups = append(w.Groups, group)
 	}
-	return true
+	return w, true
 }
 
-func validGroup(v any) bool {
+func readGroup(v any) (interceptors.RuleGroup, bool) {
 	g, ok := v.(map[string]any)
 	if !ok || !present(g, "ruleType", "passed", "evaluated") {
-		return false
+		return interceptors.RuleGroup{}, false
 	}
-	evaluated, ok := g["evaluated"].([]any)
-	if !ok {
-		return false
+	ruleType, okRuleType := g["ruleType"].(string)
+	passed, okPassed := g["passed"].(bool)
+	evaluated, okEvaluated := g["evaluated"].([]any)
+	if !okRuleType || !okPassed || !okEvaluated {
+		return interceptors.RuleGroup{}, false
 	}
+	group := interceptors.RuleGroup{RuleType: ruleType, Passed: passed}
 	for _, o := range evaluated {
-		if !validOutcome(o) {
-			return false
+		outcome, ok := readOutcome(o)
+		if !ok {
+			return interceptors.RuleGroup{}, false
 		}
+		group.Evaluated = append(group.Evaluated, outcome)
 	}
 	// restricts is optional and, when sent, true: a group of restricting
-	// rules. Any other value is not the contract's, and neither is the key in
-	// another case: encoding/json would decode it into Restricts, unchecked,
-	// and a group so marked is left out of what must be confirmed.
+	// rules. Any other value is not the contract's. Unlike other unknown keys,
+	// the key in another case is refused rather than ignored: a group marked
+	// restricting is left out of what must be confirmed, and a client that
+	// matched keys case-insensitively would mark this one.
 	for k, v := range g {
 		if strings.EqualFold(k, "restricts") && (k != "restricts" || v != true) {
-			return false
+			return interceptors.RuleGroup{}, false
 		}
 	}
+	group.Restricts = g["restricts"] == true
 	// satisfiedBy marks a pass: a passing group names the rule that satisfied
 	// it, and a failing one, where every alternative refused, names none.
 	satisfiedBy, has := g["satisfiedBy"]
-	if g["passed"] == true {
-		return has && validOutcome(satisfiedBy)
+	if passed != has {
+		return interceptors.RuleGroup{}, false
 	}
-	return !has
+	if has {
+		outcome, ok := readOutcome(satisfiedBy)
+		if !ok {
+			return interceptors.RuleGroup{}, false
+		}
+		group.SatisfiedBy = &outcome
+	}
+	return group, true
 }
 
-func validOutcome(v any) bool {
+func readOutcome(v any) (interceptors.RuleOutcome, bool) {
 	o, ok := v.(map[string]any)
 	if !ok || !present(o, "code", "message", "passed") {
-		return false
+		return interceptors.RuleOutcome{}, false
 	}
-	evaluation, has := o["evaluation"]
-	return !has || validEvaluation(evaluation)
+	code, okCode := o["code"].(string)
+	message, okMessage := o["message"].(string)
+	passed, okPassed := o["passed"].(bool)
+	if !okCode || !okMessage || !okPassed {
+		return interceptors.RuleOutcome{}, false
+	}
+	outcome := interceptors.RuleOutcome{Code: code, Message: message, Passed: passed}
+	if evaluation, has := o["evaluation"]; has {
+		e, ok := readEvaluation(evaluation)
+		if !ok {
+			return interceptors.RuleOutcome{}, false
+		}
+		outcome.Evaluation = e
+	}
+	return outcome, true
 }
 
-func validEvaluation(v any) bool {
+func readEvaluation(v any) (*interceptors.Evaluation, bool) {
 	e, ok := v.(map[string]any)
-	if !ok || !present(e, "status") {
-		return false
+	if !ok {
+		return nil, false
 	}
-	for _, k := range []string{"loadedRevision", "determiningPolicies", "determiningPoliciesOmitted"} {
-		if x, has := e[k]; has && x == nil {
-			return false
+	status, ok := e["status"].(string)
+	if !ok {
+		return nil, false
+	}
+	out := &interceptors.Evaluation{Status: interceptors.EvaluationStatus(status)}
+	// Optional keys: absent is unknown, null is not the contract's.
+	if x, has := e["loadedRevision"]; has {
+		if out.LoadedRevision, ok = x.(string); !ok {
+			return nil, false
 		}
 	}
-	switch e["status"] {
-	case string(interceptors.EvaluationCompleted), string(interceptors.EvaluationFailed):
-		// An evaluated answer always names its revision, and null is one: the
-		// explicit unknown.
-		_, has := e["revision"]
-		return has
+	if x, has := e["determiningPolicies"]; has {
+		if out.DeterminingPolicies, ok = readStrings(x); !ok {
+			return nil, false
+		}
+	}
+	if x, has := e["determiningPoliciesOmitted"]; has {
+		if out.DeterminingPoliciesOmitted, ok = readInt(x); !ok {
+			return nil, false
+		}
+	}
+	// revision is a string, or null: the explicit unknown.
+	revision, has := e["revision"]
+	if has && revision != nil {
+		if out.Revision, ok = revision.(string); !ok {
+			return nil, false
+		}
+	}
+	switch out.Status {
+	case interceptors.EvaluationCompleted, interceptors.EvaluationFailed:
+		// An evaluated answer always names its revision, and null is one.
+		if !has {
+			return nil, false
+		}
 	}
 	// not_invoked carries nothing else, and a status added after this library
 	// was written is passed through as it came.
-	return true
+	return out, true
+}
+
+func readStrings(v any) ([]string, bool) {
+	items, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, s)
+	}
+	return out, true
+}
+
+// readInt reads a JSON number that is an integer within int's range.
+func readInt(v any) (int, bool) {
+	f, ok := v.(float64)
+	// float64(math.MaxInt) is 2^63, one past the largest int.
+	if !ok || f != math.Trunc(f) || f < math.MinInt || f >= math.MaxInt {
+		return 0, false
+	}
+	return int(f), true
 }
 
 // toDecision converts w, sent with requestID, to the library's decision. A
@@ -221,36 +304,5 @@ func (w *wireDecision) toDecision(requestID string) *interceptors.Decision {
 	if w == nil {
 		return nil
 	}
-	d := &interceptors.Decision{Code: w.Code, Message: w.Message, RequestID: requestID}
-	if w.Reason != nil {
-		d.Groups = make([]interceptors.RuleGroup, 0, len(w.Reason.Groups))
-		for _, g := range w.Reason.Groups {
-			group := interceptors.RuleGroup{RuleType: g.RuleType, Passed: g.Passed, Restricts: g.Restricts}
-			for _, o := range g.Evaluated {
-				group.Evaluated = append(group.Evaluated, o.toOutcome())
-			}
-			if g.SatisfiedBy != nil {
-				s := g.SatisfiedBy.toOutcome()
-				group.SatisfiedBy = &s
-			}
-			d.Groups = append(d.Groups, group)
-		}
-	}
-	return d
-}
-
-func (o wireOutcome) toOutcome() interceptors.RuleOutcome {
-	out := interceptors.RuleOutcome{Code: o.Code, Message: o.Message, Passed: o.Passed}
-	if e := o.Evaluation; e != nil {
-		out.Evaluation = &interceptors.Evaluation{
-			Status:                     interceptors.EvaluationStatus(e.Status),
-			LoadedRevision:             e.LoadedRevision,
-			DeterminingPolicies:        e.DeterminingPolicies,
-			DeterminingPoliciesOmitted: e.DeterminingPoliciesOmitted,
-		}
-		if e.Revision != nil {
-			out.Evaluation.Revision = *e.Revision
-		}
-	}
-	return out
+	return &interceptors.Decision{Code: w.Code, Message: w.Message, Groups: w.Groups, RequestID: requestID}
 }

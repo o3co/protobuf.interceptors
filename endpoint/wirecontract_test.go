@@ -77,8 +77,17 @@ func TestWireContract_StatusesMeanWhatTheVerifierMeans(t *testing.T) {
 	isDenied := func(err error) bool { var d *interceptors.DeniedError; return errors.As(err, &d) }
 	isUnauth := func(err error) bool { var u *interceptors.UnauthenticatedError; return errors.As(err, &u) }
 
-	check("allow", c.Status["allow"], "", func(err error) bool { return err == nil })
+	allow := mustJSON(t, fill(t, "an allow", c.Decision.Required, map[string]any{
+		"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{}},
+	}))
+	check("allow", c.Status["allow"], allow, func(err error) bool { return err == nil })
+	check("allow status without a decision", c.Status["allow"], "", func(err error) bool {
+		return err != nil && !isDenied(err) && !isUnauth(err)
+	})
 	check("deny", c.Status["deny"], "", isDenied)
+	if status := c.Status["allow"]; status != http.StatusOK {
+		t.Errorf("the contract's allow status is %d; this endpoint reads an allow only from 200", status)
+	}
 	for _, code := range []string{c.Codes["missingToken"], c.Codes["invalidToken"], c.Codes["unsupportedScheme"]} {
 		check("unauthenticated/"+code, c.Status["unauthenticated"], errorEnvelope(code), isUnauth)
 	}
@@ -299,13 +308,41 @@ func TestWireContract_AnEnvelopeMissingARequiredKeyIsNotADecision(t *testing.T) 
 							target[key] = nil
 						}
 						e := newTestEndpoint(t, serve(t, status, mustJSON(t, env)).URL)
-						d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+						d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
 						if d != nil {
 							t.Errorf("decision = %+v, want nil", d)
+						}
+						if err == nil {
+							t.Error("expected an error: an envelope that is not whole neither allows nor is silent")
 						}
 					})
 				}
 			}
+		}
+	}
+}
+
+// An allow never carries the keys the contract keeps for a deny, not even as
+// null: an allow that does is not a whole one, and a 200 carrying it does not
+// allow.
+func TestWireContract_AnAllowCarryingADenyKeyIsNotADecision(t *testing.T) {
+	c := wirecontract.Load(t)
+	if len(c.Decision.AllowNeverCarries) == 0 {
+		t.Fatal("the wire contract lists nothing an allow never carries")
+	}
+	for _, key := range c.Decision.AllowNeverCarries {
+		for name, value := range map[string]any{"a string": "x", "null": nil} {
+			t.Run(key+"/"+name, func(t *testing.T) {
+				allow := fill(t, "an allow", c.Decision.Required, map[string]any{
+					"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{}},
+				})
+				allow[key] = value
+				e := newTestEndpoint(t, serve(t, c.Status["allow"], mustJSON(t, allow)).URL)
+				d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+				if err == nil || d != nil {
+					t.Errorf("VerifyDecision = (%+v, %v), want (nil, an error)", d, err)
+				}
+			})
 		}
 	}
 }
