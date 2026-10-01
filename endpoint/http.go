@@ -59,13 +59,15 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// newHTTPClient returns the client an endpoint asks its backend with. It
-// follows no redirect: a 3xx is the answer, which every endpoint reads as an
-// error, so the request and the credentials on it reach only the configured
-// backend.
-func newHTTPClient(timeout time.Duration) *http.Client {
+// newHTTPClient returns the client an endpoint asks its backend with, over
+// transport, or http.DefaultTransport when it is nil. It follows no redirect,
+// whatever the transport: a 3xx is the answer, which every endpoint reads as
+// an error, so the request and the credentials on it reach only the
+// configured backend.
+func newHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
 	return &http.Client{
-		Timeout: timeout,
+		Transport: transport,
+		Timeout:   timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

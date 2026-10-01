@@ -35,6 +35,7 @@ type opaBuildConfig struct {
 	logger              *slog.Logger
 	requestIDHeaderKey  string
 	allowInsecure       bool
+	transport           http.RoundTripper
 }
 
 // OPAOption configures the OPA REST endpoint.
@@ -73,6 +74,19 @@ func WithOPALogLevel(level slog.Level) OPAOption {
 func WithOPARequestIDHeaderKey(key string) OPAOption {
 	return func(c *opaBuildConfig) {
 		c.requestIDHeaderKey = key
+	}
+}
+
+// WithOPATransport sets the transport requests to OPA are sent over:
+// an *http.Transport whose TLSClientConfig holds a client certificate or a
+// private CA, for one. The endpoint's timeout and redirect policy still apply
+// over it. Default is http.DefaultTransport. Panics if rt is nil.
+func WithOPATransport(rt http.RoundTripper) OPAOption {
+	if rt == nil {
+		panic("transport must not be nil")
+	}
+	return func(c *opaBuildConfig) {
+		c.transport = rt
 	}
 }
 
@@ -144,7 +158,7 @@ func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndp
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/data/" + rawPath
 
 	return &opaEndpoint{
-		httpClient:          newHTTPClient(cfg.timeout),
+		httpClient:          newHTTPClient(cfg.timeout, cfg.transport),
 		evaluateURL:         base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,

@@ -41,6 +41,7 @@ type o3coBuildConfig struct {
 	headers                  http.Header
 	requireConfirmedRevision bool
 	allowInsecure            bool
+	transport                http.RoundTripper
 }
 
 // O3coOption configures the o3co endpoint.
@@ -123,6 +124,19 @@ func WithO3coHeaders(headers map[string]string) O3coOption {
 func WithO3coRequireConfirmedRevision() O3coOption {
 	return func(c *o3coBuildConfig) {
 		c.requireConfirmedRevision = true
+	}
+}
+
+// WithO3coTransport sets the transport requests to the verifier are sent over:
+// an *http.Transport whose TLSClientConfig holds a client certificate or a
+// private CA, for one. The endpoint's timeout and redirect policy still apply
+// over it. Default is http.DefaultTransport. Panics if rt is nil.
+func WithO3coTransport(rt http.RoundTripper) O3coOption {
+	if rt == nil {
+		panic("transport must not be nil")
+	}
+	return func(c *o3coBuildConfig) {
+		c.transport = rt
 	}
 }
 
@@ -236,7 +250,7 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 	}
 
 	return &o3coEndpoint{
-		httpClient:               newHTTPClient(cfg.timeout),
+		httpClient:               newHTTPClient(cfg.timeout, cfg.transport),
 		verifyURL:                base.String(),
 		maxResponseBodySize:      cfg.maxResponseBodySize,
 		logger:                   cfg.logger,

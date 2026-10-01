@@ -39,6 +39,7 @@ type cedarBuildConfig struct {
 	resourcePrefix      string
 	principalResolver   func(ctx context.Context, token string) string
 	allowInsecure       bool
+	transport           http.RoundTripper
 }
 
 // CedarOption configures the Cedar agent REST endpoint.
@@ -115,6 +116,19 @@ func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) strin
 	}
 }
 
+// WithCedarTransport sets the transport requests to the Cedar agent are sent over:
+// an *http.Transport whose TLSClientConfig holds a client certificate or a
+// private CA, for one. The endpoint's timeout and redirect policy still apply
+// over it. Default is http.DefaultTransport. Panics if rt is nil.
+func WithCedarTransport(rt http.RoundTripper) CedarOption {
+	if rt == nil {
+		panic("transport must not be nil")
+	}
+	return func(c *cedarBuildConfig) {
+		c.transport = rt
+	}
+}
+
 // WithCedarAllowInsecure permits a plaintext http base URL to a host other
 // than loopback. Over plaintext anyone on the path can read and alter what is
 // asked and what is answered, so NewCedarEndpoint refuses such a URL without
@@ -182,7 +196,7 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/is_authorized"
 
 	return &cedarEndpoint{
-		httpClient:          newHTTPClient(cfg.timeout),
+		httpClient:          newHTTPClient(cfg.timeout, cfg.transport),
 		authorizeURL:        base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,

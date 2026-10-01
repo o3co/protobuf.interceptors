@@ -239,6 +239,23 @@ endpoint is given `WithO3coAllowInsecure()`, `WithOPAAllowInsecure()` or
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
 the bearer token on it reach only the backend that was configured.
 
+For mutual TLS or a private CA, give the endpoint the transport to send over —
+`WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,
+for example an `*http.Transport` with its `TLSClientConfig` set. The endpoint's
+timeout and its refusal to follow redirects still apply.
+
+```go
+transport := http.DefaultTransport.(*http.Transport).Clone()
+transport.TLSClientConfig = &tls.Config{
+    RootCAs:      privateCAs,
+    Certificates: []tls.Certificate{clientCert},
+}
+verifier, err := endpoint.NewO3coEndpoint(
+    "https://verifier.internal:3000",
+    endpoint.WithO3coTransport(transport),
+)
+```
+
 ### o3co endpoint options
 
 | Option | Effect |
@@ -250,6 +267,7 @@ the bearer token on it reach only the backend that was configured.
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 | `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
 optional `http.callerAuth` gate turned on. That gate expects a shared credential
