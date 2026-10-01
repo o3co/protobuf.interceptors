@@ -16,7 +16,7 @@ permissions:
 env:
   # The auth.policy-verifier release the o3co endpoint is held to. Move it in
   # the same change that follows a new contract.
-  VERIFIER_RELEASE: v0.15.0
+  VERIFIER_RELEASE: v0.16.0
 
 jobs:
   wire-contract:
