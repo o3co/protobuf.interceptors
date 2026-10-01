@@ -17,3 +17,12 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260831171406-18b4a7587f8a // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 )
+
+retract (
+	// Requires the core module at v0.0.0-00010101000000-000000000000, a
+	// version that does not exist, so it cannot be fetched.
+	v0.2.0
+	// Requires the core module at v0.0.0-00010101000000-000000000000, a
+	// version that does not exist, so it cannot be fetched.
+	v0.1.0
+)
