@@ -16,15 +16,14 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -118,7 +117,7 @@ func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 		if len(policy.FieldMappings) > 0 {
 			msg, ok := req.(proto.Message)
 			if !ok {
-				return nil, status.Errorf(codes.Internal, "request does not implement proto.Message")
+				return nil, toGRPCError(ctx, errors.New("request does not implement proto.Message"))
 			}
 			resource, action, err = interceptors.ResolveResource(policy, msg)
 		} else {
@@ -157,7 +156,7 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 
 		// Guard: PolicyOptionInterceptor must have run before this interceptor.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return nil, status.Errorf(codes.Internal, "PolicyOptionInterceptor must run before VerificationInterceptor")
+			return nil, toGRPCError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
 		// Get the policy from context; if none, pass through (no policy = no enforcement).

@@ -16,14 +16,13 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -102,7 +101,7 @@ func PolicyOptionStreamInterceptor() grpc.StreamServerInterceptor {
 		// before any request message is read, and a client or bidirectional
 		// stream has no single one.
 		if len(policy.FieldMappings) > 0 {
-			return status.Errorf(codes.Internal, "field_mappings are not supported for streaming RPCs")
+			return toGRPCError(ctx, errors.New("field_mappings are not supported for streaming RPCs"))
 		}
 
 		resource, action, err := interceptors.ResolveResource(policy, nil)
@@ -138,7 +137,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 
 		// Guard: PolicyOptionStreamInterceptor must have run before this interceptor.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return status.Errorf(codes.Internal, "PolicyOptionStreamInterceptor must run before VerificationStreamInterceptor")
+			return toGRPCError(ctx, errors.New("PolicyOptionStreamInterceptor must run before VerificationStreamInterceptor"))
 		}
 
 		policyData, ok := interceptors.PolicyFromContext(ctx)
