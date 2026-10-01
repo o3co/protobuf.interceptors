@@ -1,0 +1,125 @@
+name: Release
+
+# Each module is released by a tag of its own: vX.Y.Z for the core module at
+# the root, grpc/vX.Y.Z and connectrpc/vX.Y.Z for the framework modules. See
+# AGENTS.md, "Release process".
+on:
+  push:
+    tags: ['v*', 'grpc/v*', 'connectrpc/v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Every tag, so a framework module's release can be compared with
+          # the newest core release.
+          fetch-depth: 0
+
+      # The one parse of the tag: the later steps read its outputs and never
+      # re-derive them from the ref.
+      - name: Classify the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$TAG" in
+            grpc/v*)       module=grpc;       dir=grpc;       version="${TAG#grpc/}" ;;
+            connectrpc/v*) module=connectrpc; dir=connectrpc; version="${TAG#connectrpc/}" ;;
+            v*)            module=core;       dir=.;          version="$TAG" ;;
+            *)
+              echo "::error::$TAG names no module of this repository"
+              exit 1
+              ;;
+          esac
+
+          # A Go module version is v + SemVer 2.0.0 without build metadata.
+          ident='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${ident}(\.${ident})*)?$"
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error::$version is not v followed by a SemVer version without build metadata"
+            exit 1
+          fi
+          # The module paths carry no /vN suffix, which Go requires from v2 on.
+          if [ "${BASH_REMATCH[1]}" -gt 1 ]; then
+            echo "::error::$version needs a /v${BASH_REMATCH[1]} module path, which this repository does not have"
+            exit 1
+          fi
+
+          path="$(awk '$1 == "module" { print $2; exit }' "$dir/go.mod")"
+          if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+
+          {
+            echo "module=$module"
+            echo "dir=$dir"
+            echo "version=$version"
+            echo "path=$path"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ steps.tag.outputs.dir }}/go.mod
+
+      - name: Vet and test
+        working-directory: ${{ steps.tag.outputs.dir }}
+        run: |
+          go vet ./...
+          go test ./... -race -count=1
+
+      # A framework module builds against the checkout's core (replace => ../),
+      # but a consumer gets the core version its go.mod requires. So the
+      # release requires the newest core release, and builds and passes its
+      # tests against that published version.
+      - name: Check the core version required
+        if: steps.tag.outputs.module != 'core'
+        working-directory: ${{ steps.tag.outputs.dir }}
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          required="$(go mod edit -json | jq -r '.Require[] | select(.Path == "github.com/o3co/protobuf.interceptors") | .Version')"
+          # A full release is held to the newest full core release; a
+          # prerelease may require a core prerelease.
+          newest="$(git -c versionsort.suffix=- tag -l 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]' \
+            | if [ "$PRERELEASE" = true ]; then cat; else grep -v -- '-'; fi \
+            | head -n 1)"
+          if [ -z "$required" ] || [ "$required" != "$newest" ]; then
+            echo "::error::go.mod requires core ${required:-nothing}, and the newest core release is $newest: raise the require in a pull request, then tag again"
+            exit 1
+          fi
+          echo "requires core $required, the newest core release"
+
+      - name: Build and test against the published core
+        if: steps.tag.outputs.module != 'core'
+        working-directory: ${{ steps.tag.outputs.dir }}
+        run: |
+          go mod edit -dropreplace=github.com/o3co/protobuf.interceptors
+          go mod download github.com/o3co/protobuf.interceptors
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+      # A tag with a SemVer prerelease suffix (vX.Y.Z-rc.1) is not published
+      # as the latest full release.
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+
+      # Ask the module proxy for the version, so consumers and pkg.go.dev see
+      # it without waiting for the first `go get`.
+      - name: Warm the module proxy
+        working-directory: ${{ runner.temp }}
+        env:
+          GOPROXY: proxy.golang.org
+          MODULE: ${{ steps.tag.outputs.path }}@${{ steps.tag.outputs.version }}
+        run: go list -m "$MODULE"
