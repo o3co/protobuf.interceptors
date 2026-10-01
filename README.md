@@ -250,9 +250,9 @@ Cedar string literal, so a quote or backslash in it cannot change the entity
 it names.
 
 A base URL names its scheme, `http` or `https`, and a host; one without either
-is refused at construction rather than guessed at. Every request carries the
-subject's bearer token (Cedar's, the principal resolved from it), so `http://`
-is accepted only to loopback — `localhost`, `127.0.0.0/8`, `::1` — unless the
+is refused at construction rather than guessed at. An o3co or OPA request
+carries the subject's bearer token, and a Cedar request the principal resolved
+from it, so `http://` is accepted only to loopback — `localhost`, `127.0.0.0/8`, `::1` — unless the
 endpoint is given `WithO3coAllowInsecure()`, `WithOPAAllowInsecure()` or
 `WithCedarAllowInsecure()`. Anywhere else, use `https://`.
 
