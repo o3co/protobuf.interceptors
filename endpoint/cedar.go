@@ -181,7 +181,7 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 	}
 
 	return &cedarEndpoint{
-		httpClient:          &http.Client{Timeout: cfg.timeout},
+		httpClient:          newHTTPClient(cfg.timeout),
 		authorizeURL:        base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,

@@ -229,6 +229,9 @@ The `endpoint` package provides four backends:
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | Local evaluation |
 
+No HTTP backend follows a redirect: a `3xx` is an error, so the request and
+the bearer token on it reach only the backend that was configured.
+
 ### o3co endpoint options
 
 | Option | Effect |

@@ -141,7 +141,7 @@ func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndp
 	}
 
 	return &opaEndpoint{
-		httpClient:          &http.Client{Timeout: cfg.timeout},
+		httpClient:          newHTTPClient(cfg.timeout),
 		evaluateURL:         base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,

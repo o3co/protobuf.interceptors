@@ -235,7 +235,7 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 	}
 
 	return &o3coEndpoint{
-		httpClient:               &http.Client{Timeout: cfg.timeout},
+		httpClient:               newHTTPClient(cfg.timeout),
 		verifyURL:                base.String(),
 		maxResponseBodySize:      cfg.maxResponseBodySize,
 		logger:                   cfg.logger,
