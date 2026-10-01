@@ -127,8 +127,10 @@ func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) (stri
 
 // WithCedarTransport sets the transport requests to the Cedar agent are sent over:
 // an *http.Transport whose TLSClientConfig holds a client certificate or a
-// private CA, for one. The endpoint's timeout and redirect policy still apply
-// over it. Default is http.DefaultTransport. Panics if rt is nil.
+// private CA, for one. The endpoint's timeout and its refusal to follow
+// redirects hold over a transport that honours the request's context and does
+// not follow redirects itself, as *http.Transport does. Default is
+// http.DefaultTransport. Panics if rt is nil.
 func WithCedarTransport(rt http.RoundTripper) CedarOption {
 	if rt == nil {
 		panic("transport must not be nil")

@@ -149,10 +149,13 @@ func truncatedBody(body []byte) string {
 }
 
 // newHTTPClient returns the client an endpoint asks its backend with, over
-// transport, or http.DefaultTransport when it is nil. It follows no redirect,
-// whatever the transport: a 3xx is the answer, which every endpoint reads as
-// an error, so the request and the credentials on it reach only the
-// configured backend.
+// transport, or http.DefaultTransport when it is nil. The client follows no
+// redirect: a 3xx is the answer, which every endpoint reads as an error, so
+// the request and the credentials on it reach only the configured backend.
+// Its timeout ends a request by cancelling the request's context. Both hold
+// for a transport that honours that context and does not follow redirects
+// itself, as *http.Transport does; a transport of the caller's that does
+// neither is outside what the client can enforce.
 func newHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
 	return &http.Client{
 		Transport: transport,

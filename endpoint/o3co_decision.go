@@ -33,13 +33,15 @@ const codeCallerUnauthenticated = "caller_unauthenticated"
 // UnauthenticatedError and the framework interceptors map it to Internal.
 var ErrCallerUnauthenticated = errors.New("authorization service refused this service's caller credential")
 
-// wireDecision is the body of a POST /verify answer: the decision envelope on
-// 200 and 403, the error envelope — decision, code and message only —
-// otherwise. It is read from the body decoded as a map, whose keys match the
-// contract's exactly: the one walk over it both checks the envelope and
-// builds what is returned, so no key it did not check can reach a decision.
-// Keys this library does not know, a key in another case among them, are
-// ignored, as the verifier's wire contract requires of a client.
+// wireDecision is the body of a POST /verify answer: read as the decision
+// envelope on any 2xx and on 403, and as the error envelope — decision, code
+// and message only — otherwise. It is read from the body decoded as a map,
+// whose keys match the contract's exactly: the one walk over it both checks
+// the envelope and builds what is returned, so no key it did not check can
+// reach a decision. Keys this library does not know, a key in another case
+// among them, are ignored, as the verifier's wire contract requires of a
+// client — except restricts in another case, which makes a group not whole
+// (see readGroup).
 type wireDecision struct {
 	Decision string
 	Code     string

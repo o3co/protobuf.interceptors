@@ -267,7 +267,9 @@ to answer, and wraps neither.
 For mutual TLS or a private CA, give the endpoint the transport to send over —
 `WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,
 for example an `*http.Transport` with its `TLSClientConfig` set. The endpoint's
-timeout and its refusal to follow redirects still apply.
+timeout and its refusal to follow redirects still apply to a transport that
+honours the request's context and does not follow redirects itself, as
+`*http.Transport` does.
 
 ```go
 transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -422,7 +424,11 @@ whole deny (which is still reported to the observer). The interceptors map that
 error to `Internal`. A `403` is a deny whatever its body holds; the body only
 reports why. Keys are matched as the contract spells them: one in another
 case (`Passed`, `Decision`) is a key the contract does not define, and is
-ignored like any other, so it cannot stand in for the key it resembles.
+ignored like any other, so it cannot stand in for the key it resembles. The
+exception is `restricts` in another case, which is refused rather than
+ignored: the envelope is then not whole, and a `200` carrying it fails closed.
+OPA's `result` and the Cedar agent's `decision` are likewise read only by
+their exact key.
 
 ### Requiring a confirmed revision
 
