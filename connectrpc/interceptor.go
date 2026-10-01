@@ -19,7 +19,7 @@ package connectrpc
 import (
 	"context"
 	"fmt"
-	"strings"
+	"net/http"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -56,18 +56,15 @@ func getPolicyFromSpec(spec connect.Spec) *pb.Policy {
 	return policy
 }
 
-// extractBearerTokenFromHeader extracts the Bearer token from an http.Header.
-func extractBearerTokenFromHeader(header interface{ Get(string) string }) string {
-	v := header.Get("Authorization")
-	if strings.HasPrefix(v, "Bearer ") {
-		return strings.TrimPrefix(v, "Bearer ")
+// withInbound puts the request's bearer token and request ID on ctx. The
+// error is a credential that could not be read; it refuses only a method that
+// has a policy, since a method without one is not checked.
+func withInbound(ctx context.Context, header http.Header) (context.Context, error) {
+	token, err := interceptors.InboundBearerToken(header.Values("Authorization"))
+	if token != "" {
+		ctx = interceptors.WithBearerToken(ctx, token)
 	}
-	return ""
-}
-
-// extractRequestIDFromHeader extracts X-Request-Id from an http.Header, returning empty string if absent.
-func extractRequestIDFromHeader(header interface{ Get(string) string }) string {
-	return header.Get("X-Request-Id")
+	return interceptors.WithRequestID(ctx, interceptors.InboundRequestID(header.Values("X-Request-Id"))), err
 }
 
 // policyOptionInterceptor implements connect.Interceptor for PolicyOptionInterceptor.
@@ -194,9 +191,14 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 }
 
 // verify runs one authorization check, hands it to the observer, if any, and
-// returns the context the handler runs with.
-func (v *verificationInterceptor) verify(ctx context.Context, resource, action string) (context.Context, error) {
-	decision, err := endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+// returns the context the handler runs with. A credential the interceptor
+// could not read (credErr) refuses the check without asking the verifier.
+func (v *verificationInterceptor) verify(ctx context.Context, resource, action string, credErr error) (context.Context, error) {
+	var decision *interceptors.Decision
+	err := credErr
+	if err == nil {
+		decision, err = endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+	}
 	if v.observer != nil {
 		v.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
 	}
@@ -211,15 +213,7 @@ func (v *verificationInterceptor) verify(ctx context.Context, resource, action s
 
 func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		// Extract and store bearer token.
-		if token := extractBearerTokenFromHeader(req.Header()); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
-		}
-
-		// Extract or store request ID.
-		if rid := extractRequestIDFromHeader(req.Header()); rid != "" {
-			ctx = interceptors.WithRequestID(ctx, rid)
-		}
+		ctx, credErr := withInbound(ctx, req.Header())
 
 		// Guard: PolicyOptionInterceptor must have run.
 		if !interceptors.InterceptorRanFromContext(ctx) {
@@ -232,7 +226,7 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			return next(ctx, req)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action)
+		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return nil, toConnectError(err)
 		}
@@ -248,15 +242,7 @@ func (v *verificationInterceptor) WrapStreamingClient(next connect.StreamingClie
 
 func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		// Extract and store bearer token.
-		if token := extractBearerTokenFromHeader(conn.RequestHeader()); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
-		}
-
-		// Extract or store request ID.
-		if rid := extractRequestIDFromHeader(conn.RequestHeader()); rid != "" {
-			ctx = interceptors.WithRequestID(ctx, rid)
-		}
+		ctx, credErr := withInbound(ctx, conn.RequestHeader())
 
 		// Guard: PolicyOptionInterceptor must have run.
 		if !interceptors.InterceptorRanFromContext(ctx) {
@@ -269,7 +255,7 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return next(ctx, conn)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action)
+		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return toConnectError(err)
 		}
