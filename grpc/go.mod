@@ -18,5 +18,5 @@ require (
 )
 
 // Requires the core module at v0.0.0-00010101000000-000000000000, a version
-// that does not exist, so it cannot be fetched.
+// that does not exist, so it cannot be built or required.
 retract v0.1.0
