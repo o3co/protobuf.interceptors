@@ -156,3 +156,64 @@ func TestConnectVerification_RPCContextEnded(t *testing.T) {
 		})
 	}
 }
+
+// anyRequest is a unary request with a given spec and payload.
+type anyRequest struct {
+	connect.AnyRequest
+	spec connect.Spec
+	msg  any
+}
+
+func (r anyRequest) Spec() connect.Spec { return r.spec }
+func (r anyRequest) Any() any           { return r.msg }
+
+// A policy the interceptor cannot apply, or a chain in the wrong order, is a
+// server fault: the caller is told only that the check failed, and the
+// returned error unwraps to what went wrong.
+func TestConnectPolicyAndGuardErrors_CallerMessageIsFixed(t *testing.T) {
+	noUnary := func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+		t.Fatal("the handler must not run")
+		return nil, nil
+	}
+	noStream := func(context.Context, connect.StreamingHandlerConn) error {
+		t.Fatal("the handler must not run")
+		return nil
+	}
+	conn := &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}}
+	cases := []struct {
+		name  string
+		cause string
+		run   func() error
+	}{
+		{"request is not a proto message", "proto.Message", func() error {
+			req := anyRequest{
+				AnyRequest: connect.NewRequest(&testpb.GetResourceByIdRequest{}),
+				spec:       connect.Spec{Schema: methodDescriptor("GetResourceById")},
+				msg:        "not a message",
+			}
+			_, err := policyconnect.PolicyOptionInterceptor().WrapUnary(noUnary)(context.Background(), req)
+			return err
+		}},
+		{"unary chain out of order", "must run before", func() error {
+			req := anyRequest{AnyRequest: connect.NewRequest(&testpb.GetResourceRequest{})}
+			_, err := policyconnect.VerificationInterceptor(endpointtest.Allow()).WrapUnary(noUnary)(context.Background(), req)
+			return err
+		}},
+		{"field_mappings on a stream", "field_mappings", func() error {
+			return policyconnect.PolicyOptionInterceptor().WrapStreamingHandler(noStream)(context.Background(),
+				&specConn{spec: connect.Spec{Schema: methodDescriptor("GetResourceById")}})
+		}},
+		{"stream chain out of order", "must run before", func() error {
+			return policyconnect.VerificationInterceptor(endpointtest.Allow()).WrapStreamingHandler(noStream)(context.Background(), conn)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			assertFixedMessage(t, err, connect.CodeInternal, "authorization check failed")
+			if !strings.Contains(fmt.Sprint(errors.Unwrap(errors.Unwrap(err))), tc.cause) {
+				t.Errorf("error %v does not unwrap to a cause naming %q", err, tc.cause)
+			}
+		})
+	}
+}
