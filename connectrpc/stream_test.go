@@ -28,6 +28,7 @@ import (
 	"github.com/o3co/protobuf.interceptors/endpoint"
 	"github.com/o3co/protobuf.interceptors/endpointtest"
 	testpb "github.com/o3co/protobuf.interceptors/testproto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // revokedAfter allows the first n checks and denies every one after.
@@ -137,5 +138,93 @@ func TestConnectVerification_ReceiveError_IsNotRechecked(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("verify calls = %d, want only the opening check", calls)
+	}
+}
+
+func methodDescriptor(name string) protoreflect.MethodDescriptor {
+	return testpb.File_test_service_proto.Services().ByName("TestService").Methods().ByName(protoreflect.Name(name))
+}
+
+func TestConnectPolicyOption_Streaming(t *testing.T) {
+	interceptor := policyconnect.PolicyOptionInterceptor()
+
+	t.Run("field_mappings are refused", func(t *testing.T) {
+		handler := interceptor.WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+			t.Error("the handler ran for a policy the interceptor refused")
+			return nil
+		})
+		// GetResourceById's policy declares field_mappings; the interceptor
+		// refuses the option, whatever the method's cardinality.
+		err := handler(context.Background(), &specConn{spec: connect.Spec{Schema: methodDescriptor("GetResourceById")}})
+		if connect.CodeOf(err) != connect.CodeInternal {
+			t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodeInternal)
+		}
+	})
+
+	t.Run("a policy is resolved onto the context", func(t *testing.T) {
+		var got *interceptors.PolicyData
+		handler := interceptor.WrapStreamingHandler(func(ctx context.Context, _ connect.StreamingHandlerConn) error {
+			got, _ = interceptors.PolicyFromContext(ctx)
+			return nil
+		})
+		if err := handler(context.Background(), &specConn{spec: connect.Spec{Schema: methodDescriptor("UploadResources")}}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.Resource != "resource" || got.Action != "write" {
+			t.Errorf("policy = %+v, want {Resource:resource Action:write}", got)
+		}
+	})
+
+	t.Run("no policy passes through, marked", func(t *testing.T) {
+		var ran, hasPolicy bool
+		handler := interceptor.WrapStreamingHandler(func(ctx context.Context, _ connect.StreamingHandlerConn) error {
+			ran = interceptors.InterceptorRanFromContext(ctx)
+			_, hasPolicy = interceptors.PolicyFromContext(ctx)
+			return nil
+		})
+		if err := handler(context.Background(), &specConn{spec: connect.Spec{Schema: methodDescriptor("HealthCheck")}}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !ran || hasPolicy {
+			t.Errorf("ran = %v, policy = %v; want marked and no policy", ran, hasPolicy)
+		}
+	})
+}
+
+// A bidirectional or client-streaming handler may send before it receives, so
+// a denied stream is refused before its handler runs.
+func TestConnectStreamChain_Denied_HandlerNeverRuns(t *testing.T) {
+	impl := &uploadHandler{}
+	var opened atomic.Bool
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(endpointtest.Func(func(context.Context, string, string) error {
+			opened.Store(true)
+			return &interceptors.DeniedError{Reason: "no"}
+		})),
+	)
+	defer cleanup()
+
+	err := upload(client, "first")
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodePermissionDenied)
+	}
+	if !opened.Load() {
+		t.Error("the stream was not checked")
+	}
+	if got := impl.all(); len(got) != 0 {
+		t.Errorf("handler received %q from a denied stream", got)
+	}
+}
+
+func TestConnectVerification_Streaming_WithoutPolicyOptionInterceptor_IsInternal(t *testing.T) {
+	handler := policyconnect.VerificationInterceptor(endpointtest.Allow()).
+		WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+			t.Error("the handler must not run when the policy interceptor did not")
+			return nil
+		})
+	err := handler(context.Background(), &fakeStreamingConn{header: http.Header{"Authorization": {"Bearer tok"}}})
+	if connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodeInternal)
 	}
 }

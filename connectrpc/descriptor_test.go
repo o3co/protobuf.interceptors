@@ -32,10 +32,6 @@ import (
 
 const getResourceProcedure = "/test.v1.TestService/GetResource"
 
-func getResourceDescriptor() protoreflect.MethodDescriptor {
-	return testpb.File_test_service_proto.Services().ByName("TestService").Methods().ByName("GetResource")
-}
-
 // foreignOptions is a method descriptor whose options are not MethodOptions.
 type foreignOptions struct {
 	protoreflect.MethodDescriptor
@@ -81,7 +77,7 @@ func TestConnectChain_HandlerWithoutASchema_IsRefused(t *testing.T) {
 }
 
 func TestConnectChain_SchemaWithForeignOptions_IsRefused(t *testing.T) {
-	reached, err := serveHandBuilt(t, connect.WithSchema(foreignOptions{getResourceDescriptor()}))
+	reached, err := serveHandBuilt(t, connect.WithSchema(foreignOptions{methodDescriptor("GetResource")}))
 	if connect.CodeOf(err) != connect.CodeInternal {
 		t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodeInternal)
 	}
@@ -93,7 +89,7 @@ func TestConnectChain_SchemaWithForeignOptions_IsRefused(t *testing.T) {
 // The counterpart: the same hand-built handler with its schema is checked
 // and runs.
 func TestConnectChain_HandBuiltHandlerWithASchema_Runs(t *testing.T) {
-	reached, err := serveHandBuilt(t, connect.WithSchema(getResourceDescriptor()))
+	reached, err := serveHandBuilt(t, connect.WithSchema(methodDescriptor("GetResource")))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
