@@ -31,6 +31,7 @@ import (
 
 // testServiceHandler implements the ConnectRPC TestService.
 type testServiceHandler struct {
+	testpbconnect.UnimplementedTestServiceHandler
 	// getResourceByIDCalled records whether the handler was reached. Read from
 	// the test goroutine while the server writes it, so it is atomic.
 	getResourceByIDCalled atomic.Bool

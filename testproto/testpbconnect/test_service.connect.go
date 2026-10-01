@@ -43,6 +43,9 @@ const (
 	TestServiceGetResourceByIdProcedure = "/test.v1.TestService/GetResourceById"
 	// TestServiceHealthCheckProcedure is the fully-qualified name of the TestService's HealthCheck RPC.
 	TestServiceHealthCheckProcedure = "/test.v1.TestService/HealthCheck"
+	// TestServiceUploadResourcesProcedure is the fully-qualified name of the TestService's
+	// UploadResources RPC.
+	TestServiceUploadResourcesProcedure = "/test.v1.TestService/UploadResources"
 )
 
 // TestServiceClient is a client for the test.v1.TestService service.
@@ -51,6 +54,7 @@ type TestServiceClient interface {
 	CreateResource(context.Context, *connect.Request[testproto.CreateResourceRequest]) (*connect.Response[testproto.CreateResourceResponse], error)
 	GetResourceById(context.Context, *connect.Request[testproto.GetResourceByIdRequest]) (*connect.Response[testproto.GetResourceResponse], error)
 	HealthCheck(context.Context, *connect.Request[testproto.HealthCheckRequest]) (*connect.Response[testproto.HealthCheckResponse], error)
+	UploadResources(context.Context) *connect.ClientStreamForClient[testproto.CreateResourceRequest, testproto.CreateResourceResponse]
 }
 
 // NewTestServiceClient constructs a client for the test.v1.TestService service. By default, it uses
@@ -88,6 +92,12 @@ func NewTestServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(testServiceMethods.ByName("HealthCheck")),
 			connect.WithClientOptions(opts...),
 		),
+		uploadResources: connect.NewClient[testproto.CreateResourceRequest, testproto.CreateResourceResponse](
+			httpClient,
+			baseURL+TestServiceUploadResourcesProcedure,
+			connect.WithSchema(testServiceMethods.ByName("UploadResources")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -97,6 +107,7 @@ type testServiceClient struct {
 	createResource  *connect.Client[testproto.CreateResourceRequest, testproto.CreateResourceResponse]
 	getResourceById *connect.Client[testproto.GetResourceByIdRequest, testproto.GetResourceResponse]
 	healthCheck     *connect.Client[testproto.HealthCheckRequest, testproto.HealthCheckResponse]
+	uploadResources *connect.Client[testproto.CreateResourceRequest, testproto.CreateResourceResponse]
 }
 
 // GetResource calls test.v1.TestService.GetResource.
@@ -119,12 +130,18 @@ func (c *testServiceClient) HealthCheck(ctx context.Context, req *connect.Reques
 	return c.healthCheck.CallUnary(ctx, req)
 }
 
+// UploadResources calls test.v1.TestService.UploadResources.
+func (c *testServiceClient) UploadResources(ctx context.Context) *connect.ClientStreamForClient[testproto.CreateResourceRequest, testproto.CreateResourceResponse] {
+	return c.uploadResources.CallClientStream(ctx)
+}
+
 // TestServiceHandler is an implementation of the test.v1.TestService service.
 type TestServiceHandler interface {
 	GetResource(context.Context, *connect.Request[testproto.GetResourceRequest]) (*connect.Response[testproto.GetResourceResponse], error)
 	CreateResource(context.Context, *connect.Request[testproto.CreateResourceRequest]) (*connect.Response[testproto.CreateResourceResponse], error)
 	GetResourceById(context.Context, *connect.Request[testproto.GetResourceByIdRequest]) (*connect.Response[testproto.GetResourceResponse], error)
 	HealthCheck(context.Context, *connect.Request[testproto.HealthCheckRequest]) (*connect.Response[testproto.HealthCheckResponse], error)
+	UploadResources(context.Context, *connect.ClientStream[testproto.CreateResourceRequest]) (*connect.Response[testproto.CreateResourceResponse], error)
 }
 
 // NewTestServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -158,6 +175,12 @@ func NewTestServiceHandler(svc TestServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(testServiceMethods.ByName("HealthCheck")),
 		connect.WithHandlerOptions(opts...),
 	)
+	testServiceUploadResourcesHandler := connect.NewClientStreamHandler(
+		TestServiceUploadResourcesProcedure,
+		svc.UploadResources,
+		connect.WithSchema(testServiceMethods.ByName("UploadResources")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/test.v1.TestService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case TestServiceGetResourceProcedure:
@@ -168,6 +191,8 @@ func NewTestServiceHandler(svc TestServiceHandler, opts ...connect.HandlerOption
 			testServiceGetResourceByIdHandler.ServeHTTP(w, r)
 		case TestServiceHealthCheckProcedure:
 			testServiceHealthCheckHandler.ServeHTTP(w, r)
+		case TestServiceUploadResourcesProcedure:
+			testServiceUploadResourcesHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -191,4 +216,8 @@ func (UnimplementedTestServiceHandler) GetResourceById(context.Context, *connect
 
 func (UnimplementedTestServiceHandler) HealthCheck(context.Context, *connect.Request[testproto.HealthCheckRequest]) (*connect.Response[testproto.HealthCheckResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("test.v1.TestService.HealthCheck is not implemented"))
+}
+
+func (UnimplementedTestServiceHandler) UploadResources(context.Context, *connect.ClientStream[testproto.CreateResourceRequest]) (*connect.Response[testproto.CreateResourceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("test.v1.TestService.UploadResources is not implemented"))
 }
