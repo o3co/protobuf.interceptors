@@ -291,13 +291,16 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	// Send the request.
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("Cedar agent request failed: %w", err)
+		return requestError(ctx, "Cedar agent request failed", err)
 	}
 	defer resp.Body.Close()
 
 	// Read the response body up to maxResponseBodySize bytes.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize))
 	if err != nil {
+		if ctx.Err() != nil {
+			return requestError(ctx, "reading the Cedar agent response failed", err)
+		}
 		e.logger.Error("failed to read Cedar agent response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}

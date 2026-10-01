@@ -304,7 +304,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	// --- Send request ---------------------------------------------------------
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, requestError(ctx, "request failed", err)
 	}
 	defer resp.Body.Close()
 
@@ -317,6 +317,9 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	}
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, requestError(ctx, "reading the response failed", err)
+		}
 		e.logger.Error("failed to read response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}

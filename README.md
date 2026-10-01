@@ -259,6 +259,11 @@ endpoint is given `WithO3coAllowInsecure()`, `WithOPAAllowInsecure()` or
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
 the bearer token on it reach only the backend that was configured.
 
+When the caller's context is cancelled or its deadline passes, an HTTP
+endpoint's error wraps `ctx.Err()`, so `errors.Is` finds `context.Canceled` or
+`context.DeadlineExceeded`. The endpoint's own timeout is the backend failing
+to answer, and wraps neither.
+
 For mutual TLS or a private CA, give the endpoint the transport to send over —
 `WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,
 for example an `*http.Transport` with its `TLSClientConfig` set. The endpoint's

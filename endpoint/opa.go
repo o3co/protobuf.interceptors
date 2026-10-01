@@ -212,13 +212,16 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 	// Send the request.
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("OPA request failed: %w", err)
+		return requestError(ctx, "OPA request failed", err)
 	}
 	defer resp.Body.Close()
 
 	// Read the response body up to maxResponseBodySize bytes.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize))
 	if err != nil {
+		if ctx.Err() != nil {
+			return requestError(ctx, "reading the OPA response failed", err)
+		}
 		e.logger.Error("failed to read OPA response body", "error", err, "x-request-id", requestID)
 		respBody = nil
 	}

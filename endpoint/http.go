@@ -15,6 +15,7 @@
 package endpoint
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -96,6 +97,18 @@ func validHeaderName(name string) bool {
 		}
 	}
 	return true
+}
+
+// requestError reports err, which ended a request to the backend made under
+// ctx. When ctx itself ended, the error wraps ctx.Err(), so errors.Is finds
+// context.Canceled or context.DeadlineExceeded. Otherwise it is the backend's
+// failure and wraps no context error — net/http reports the endpoint's own
+// timeout as context.DeadlineExceeded, which must not read as the caller's.
+func requestError(ctx context.Context, what string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%s: %w", what, ctxErr)
+	}
+	return fmt.Errorf("%s: %v", what, err)
 }
 
 // maxLoggedBodySize bounds how much of a response body is logged, at Debug.
