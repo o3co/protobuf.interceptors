@@ -38,6 +38,12 @@ func parseBaseURL(raw string, allowInsecure bool, insecureOption string) (*url.U
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		// A *url.Error quotes the whole URL, password included; its cause
+		// names only what is wrong.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
