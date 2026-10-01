@@ -205,7 +205,17 @@ import (
     "github.com/o3co/protobuf.interceptors/endpoint"
 )
 
-verifier, _ := endpoint.NewCedarEndpoint("http://localhost:8180")
+// The Cedar agent authenticates nothing: the resolver verifies the bearer
+// token and names the principal it stands for.
+verifier, _ := endpoint.NewCedarEndpoint("http://localhost:8180",
+    endpoint.WithCedarPrincipalResolver(func(ctx context.Context, token string) (string, error) {
+        claims, err := verifyJWT(ctx, token) // signature, expiry, issuer, audience
+        if err != nil {
+            return "", err
+        }
+        return claims.Subject, nil
+    }),
+)
 
 mux := http.NewServeMux()
 path, handler := foopbconnect.NewFooServiceHandler(
@@ -225,9 +235,19 @@ The `endpoint` package provides four backends:
 | Backend | Constructor | Protocol |
 |---|---|---|
 | OPA | `endpoint.NewOPAEndpoint(baseURL, policyPath)` | `POST /v1/data/{path}` |
-| Cedar Agent | `endpoint.NewCedarEndpoint(baseURL)` | `POST /v1/is_authorized` |
+| Cedar Agent | `endpoint.NewCedarEndpoint(baseURL, endpoint.WithCedarPrincipalResolver(fn))` | `POST /v1/is_authorized` |
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | Local evaluation |
+
+**The Cedar endpoint does no authentication.** The Cedar agent decides for
+whatever principal it is asked about, and is never shown the bearer token, so
+`NewCedarEndpoint` requires `WithCedarPrincipalResolver`: a function that
+verifies the token — for a JWT its signature, expiry, issuer and audience — and
+returns the principal's id. A resolver that only decodes the token lets any
+caller name any principal. An error or an empty id is an
+`UnauthenticatedError`, and the agent is not asked. The id is escaped as a
+Cedar string literal, so a quote or backslash in it cannot change the entity
+it names.
 
 A base URL names its scheme, `http` or `https`, and a host; one without either
 is refused at construction rather than guessed at. Every request carries the

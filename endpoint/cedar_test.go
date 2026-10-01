@@ -187,8 +187,8 @@ func TestCedarVerify_PrincipalIsWhatTheResolverReturns(t *testing.T) {
 // request unauthenticated, and the Cedar agent is never asked.
 func TestCedarVerify_ResolverRefusal_IsUnauthenticatedAndAsksNothing(t *testing.T) {
 	cases := map[string]func(context.Context, string) (string, error){
-		"an error":           func(context.Context, string) (string, error) { return "", errors.New("signature does not verify") },
-		"an error and an id": func(context.Context, string) (string, error) { return "alice", errors.New("expired") },
+		"an error":           func(context.Context, string) (string, error) { return "", errors.New("resolver detail: signature") },
+		"an error and an id": func(context.Context, string) (string, error) { return "alice", errors.New("resolver detail: key") },
 		"no principal":       func(context.Context, string) (string, error) { return "", nil },
 	}
 	for name, resolve := range cases {
@@ -209,7 +209,7 @@ func TestCedarVerify_ResolverRefusal_IsUnauthenticatedAndAsksNothing(t *testing.
 			if !errors.As(err, &unauth) {
 				t.Fatalf("expected *UnauthenticatedError, got %T: %v", err, err)
 			}
-			if strings.Contains(unauth.Reason, "signature") || strings.Contains(unauth.Reason, "expired") {
+			if strings.Contains(unauth.Reason, "resolver detail") {
 				t.Errorf("the reason %q carries the resolver's error to the RPC caller", unauth.Reason)
 			}
 			if n := asked.Load(); n != 0 {

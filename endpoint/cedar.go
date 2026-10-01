@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,7 +38,7 @@ type cedarBuildConfig struct {
 	principalPrefix     string
 	actionPrefix        string
 	resourcePrefix      string
-	principalResolver   func(ctx context.Context, token string) string
+	principalResolver   func(ctx context.Context, token string) (string, error)
 	allowInsecure       bool
 	transport           http.RoundTripper
 }
@@ -105,9 +106,15 @@ func WithCedarResourcePrefix(prefix string) CedarOption {
 	}
 }
 
-// WithCedarPrincipalResolver sets a custom function to resolve the principal ID from the
-// raw bearer token. The default resolver returns the token value as-is.
-func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) string) CedarOption {
+// WithCedarPrincipalResolver sets the function that authenticates the bearer
+// token and returns the id of the principal it stands for. NewCedarEndpoint
+// requires it: the Cedar agent decides for whatever principal it is given and
+// authenticates nothing, so the resolver is where the token is checked, and
+// must verify it — a JWT's signature, expiry, issuer and audience — rather
+// than only read it. An error or an empty id refuses the request as
+// *interceptors.UnauthenticatedError before the agent is asked; the error
+// does not reach the RPC caller. Panics if fn is nil.
+func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) (string, error)) CedarOption {
 	if fn == nil {
 		panic("principalResolver must not be nil")
 	}
@@ -149,7 +156,7 @@ type cedarEndpoint struct {
 	principalPrefix     string
 	actionPrefix        string
 	resourcePrefix      string
-	principalResolver   func(ctx context.Context, token string) string
+	principalResolver   func(ctx context.Context, token string) (string, error)
 }
 
 // cedarRequest is the JSON body sent to the Cedar agent's is_authorized API.
@@ -165,15 +172,37 @@ type cedarResponse struct {
 	Decision string `json:"decision"`
 }
 
-// formatEntityUID formats a Cedar entity UID as {entityType}::"{id}".
+// formatEntityUID formats a Cedar entity UID, {entityType}::"{id}", with id
+// escaped as a Cedar string literal. Unescaped, a quote or backslash in id
+// would end the literal or escape what follows it, and the UID would name
+// another entity or none. Control characters are escaped as \u{...} too.
 func formatEntityUID(entityType, id string) string {
-	return fmt.Sprintf(`%s::"%s"`, entityType, id)
+	var b strings.Builder
+	b.WriteString(entityType)
+	b.WriteString(`::"`)
+	for _, r := range id {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\u{%x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // NewCedarEndpoint constructs a VerifierEndpoint that calls the Cedar agent REST API.
 // The authorize URL is constructed as: {baseURL}/v1/is_authorized.
-// It returns an error unless baseURL names http or https and a host, and
-// refuses http to a host other than loopback without WithCedarAllowInsecure.
+// It returns an error without WithCedarPrincipalResolver, or unless baseURL
+// names http or https and a host, and refuses http to a host other than
+// loopback without WithCedarAllowInsecure.
+//
+// The endpoint does no authentication of its own: the principal it asks
+// about is the one the resolver returns.
 func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, error) {
 	cfg := &cedarBuildConfig{
 		timeout:             defaultTimeout,
@@ -183,10 +212,13 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 		principalPrefix:     "User",
 		actionPrefix:        "Action",
 		resourcePrefix:      "Resource",
-		principalResolver:   func(_ context.Context, token string) string { return token },
 	}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+
+	if cfg.principalResolver == nil {
+		return nil, errors.New("a principal resolver is required: WithCedarPrincipalResolver authenticates the bearer token and names the principal")
 	}
 
 	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithCedarAllowInsecure")
@@ -218,8 +250,11 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 		return err
 	}
 
-	// Resolve the principal ID from the token.
-	principalID := e.principalResolver(ctx, token)
+	principalID, err := e.principalResolver(ctx, token)
+	if err != nil || principalID == "" {
+		e.logger.Debug("principal resolver refused the bearer token", "error", err, "x-request-id", getRequestID(ctx))
+		return &interceptors.UnauthenticatedError{Reason: "invalid or expired token"}
+	}
 
 	// Build the Cedar agent request body using entity UID format.
 	reqBody := cedarRequest{
