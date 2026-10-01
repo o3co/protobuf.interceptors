@@ -17,6 +17,7 @@ package endpoint
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 )
@@ -166,9 +167,13 @@ func validGroup(v any) bool {
 		}
 	}
 	// restricts is optional and, when sent, true: a group of restricting
-	// rules. Any other value is not the contract's.
-	if r, has := g["restricts"]; has && r != true {
-		return false
+	// rules. Any other value is not the contract's, and neither is the key in
+	// another case: encoding/json would decode it into Restricts, unchecked,
+	// and a group so marked is left out of what must be confirmed.
+	for k, v := range g {
+		if strings.EqualFold(k, "restricts") && (k != "restricts" || v != true) {
+			return false
+		}
 	}
 	// satisfiedBy marks a pass: a passing group names the rule that satisfied
 	// it, and a failing one, where every alternative refused, names none.
