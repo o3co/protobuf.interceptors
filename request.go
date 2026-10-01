@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // requestIDPattern and requestIDMaxLength are the x-request-id shape
@@ -64,8 +65,9 @@ func requestIDAt(now time.Time) string {
 // none has no token and no error: whether that may proceed is the verifier's
 // decision. Otherwise the request must carry exactly one value, of the form
 // "Bearer <token>" with the scheme compared case-insensitively (RFC 9110
-// §11.1) and a non-empty token without whitespace (RFC 6750 §2.1); anything
-// else is an *UnauthenticatedError rather than an anonymous request.
+// §11.1) and a non-empty token with no Unicode whitespace (unicode.IsSpace),
+// which no RFC 6750 §2.1 b64token contains; anything else is an
+// *UnauthenticatedError rather than an anonymous request.
 func InboundBearerToken(values []string) (string, error) {
 	if len(values) == 0 {
 		return "", nil
@@ -73,7 +75,7 @@ func InboundBearerToken(values []string) (string, error) {
 	if len(values) == 1 {
 		scheme, token, ok := strings.Cut(values[0], " ")
 		token = strings.TrimLeft(token, " ")
-		if ok && strings.EqualFold(scheme, "Bearer") && token != "" && !strings.ContainsAny(token, " \t") {
+		if ok && strings.EqualFold(scheme, "Bearer") && token != "" && !strings.ContainsFunc(token, unicode.IsSpace) {
 			return token, nil
 		}
 	}
