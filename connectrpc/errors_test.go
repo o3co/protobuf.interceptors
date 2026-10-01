@@ -1,0 +1,219 @@
+// Copyright 2026 1o1 Co. Ltd.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package connectrpc_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	interceptors "github.com/o3co/protobuf.interceptors"
+	policyconnect "github.com/o3co/protobuf.interceptors/connectrpc"
+	"github.com/o3co/protobuf.interceptors/endpointtest"
+	testpb "github.com/o3co/protobuf.interceptors/testproto"
+)
+
+// backendFailure is an error the way an HTTP endpoint reports one: it names
+// the backend and the URL it called.
+func backendFailure(cause error) error {
+	return fmt.Errorf("OPA request failed: %w", &url.Error{
+		Op: "Post", URL: "http://opa.internal:8181/v1/data/authz", Err: cause,
+	})
+}
+
+// leaks are fragments of an endpoint's error that must never reach the caller.
+var leaks = []string{"http", "opa", "OPA", "8181", "Cedar", "verifier", "refused", "placeholder", "<id>", "token expired"}
+
+func assertFixedMessage(t *testing.T, err error, code connect.Code, message string) {
+	t.Helper()
+	if connect.CodeOf(err) != code {
+		t.Errorf("code = %v, want %v", connect.CodeOf(err), code)
+	}
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *connect.Error, got %T", err)
+	}
+	if ce.Message() != message {
+		t.Errorf("message = %q, want %q", ce.Message(), message)
+	}
+	for _, leak := range leaks {
+		if strings.Contains(ce.Message(), leak) {
+			t.Errorf("the caller's message %q carries %q", ce.Message(), leak)
+		}
+	}
+}
+
+// The caller is told the outcome in a fixed message. What the endpoint said —
+// a backend name, a URL, a reason — stays in the service.
+func TestConnectChain_CallerMessageIsFixed(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		code    connect.Code
+		message string
+	}{
+		{"denied", &interceptors.DeniedError{Reason: "denied by http://opa.internal:8181"}, connect.CodePermissionDenied, "access denied"},
+		{"unauthenticated", &interceptors.UnauthenticatedError{Reason: "OPA says token expired"}, connect.CodeUnauthenticated, "unauthenticated"},
+		{"backend failure", backendFailure(errors.New("connection refused")), connect.CodeInternal, "authorization check failed"},
+		// The endpoint's own timeout or cancellation, while the RPC is live, is
+		// the service's failure, not the caller's deadline.
+		{"endpoint canceled", backendFailure(context.Canceled), connect.CodeInternal, "authorization check failed"},
+		{"endpoint timed out", backendFailure(context.DeadlineExceeded), connect.CodeInternal, "authorization check failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, cleanup := startConnectServer(t,
+				policyconnect.PolicyOptionInterceptor(),
+				policyconnect.VerificationInterceptor(endpointtest.Func(
+					func(context.Context, string, string) error { return tc.err },
+				)),
+			)
+			defer cleanup()
+
+			assertFixedMessage(t, getResource(t, client), tc.code, tc.message)
+		})
+	}
+}
+
+// A refused placeholder value is a denial like any other: the caller is not
+// told which placeholder or which character.
+func TestConnectChain_RefusedPlaceholderValue_CallerMessageIsFixed(t *testing.T) {
+	client, cleanup := startConnectServer(t,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(endpointtest.Allow()),
+	)
+	defer cleanup()
+
+	req := connect.NewRequest(&testpb.GetResourceByIdRequest{Id: "1.member:2"})
+	req.Header().Set("Authorization", "Bearer tok")
+	_, err := client.GetResourceById(context.Background(), req)
+	assertFixedMessage(t, err, connect.CodePermissionDenied, "access denied")
+}
+
+// The error an interceptor returns unwraps to the endpoint's, so an
+// interceptor placed outside it can record what the caller is not told.
+func TestConnectVerification_ReturnedErrorUnwrapsToTheCause(t *testing.T) {
+	cause := backendFailure(errors.New("connection refused"))
+	wrapped := policyconnect.VerificationInterceptor(endpointtest.Func(
+		func(context.Context, string, string) error { return cause },
+	)).WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+		t.Fatal("the handler must not run")
+		return nil
+	})
+
+	ctx := interceptors.WithPolicy(interceptors.MarkInterceptorRan(context.Background()), "resource", "read")
+	err := wrapped(ctx, &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}})
+	if !errors.Is(err, cause) {
+		t.Errorf("error %v does not unwrap to the endpoint's error", err)
+	}
+	assertFixedMessage(t, err, connect.CodeInternal, "authorization check failed")
+}
+
+// When the RPC's own context has ended, the caller is told so.
+func TestConnectVerification_RPCContextEnded(t *testing.T) {
+	base := interceptors.WithPolicy(interceptors.MarkInterceptorRan(context.Background()), "resource", "read")
+	canceled, cancel := context.WithCancel(base)
+	cancel()
+	expired, cancelExpired := context.WithDeadline(base, time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	cases := []struct {
+		name    string
+		ctx     context.Context
+		code    connect.Code
+		message string
+	}{
+		{"canceled", canceled, connect.CodeCanceled, "request canceled"},
+		{"deadline exceeded", expired, connect.CodeDeadlineExceeded, "deadline exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := policyconnect.VerificationInterceptor(endpointtest.Func(
+				func(ctx context.Context, _, _ string) error { return backendFailure(ctx.Err()) },
+			)).WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+				t.Fatal("the handler must not run")
+				return nil
+			})
+			err := wrapped(tc.ctx, &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}})
+			assertFixedMessage(t, err, tc.code, tc.message)
+		})
+	}
+}
+
+// anyRequest is a unary request with a given spec and payload.
+type anyRequest struct {
+	connect.AnyRequest
+	spec connect.Spec
+	msg  any
+}
+
+func (r anyRequest) Spec() connect.Spec { return r.spec }
+func (r anyRequest) Any() any           { return r.msg }
+
+// A policy the interceptor cannot apply, or a chain in the wrong order, is a
+// server fault: the caller is told only that the check failed, and the
+// returned error unwraps to what went wrong.
+func TestConnectPolicyAndGuardErrors_CallerMessageIsFixed(t *testing.T) {
+	noUnary := func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+		t.Fatal("the handler must not run")
+		return nil, nil
+	}
+	noStream := func(context.Context, connect.StreamingHandlerConn) error {
+		t.Fatal("the handler must not run")
+		return nil
+	}
+	conn := &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}}
+	cases := []struct {
+		name  string
+		cause string
+		run   func() error
+	}{
+		{"request is not a proto message", "proto.Message", func() error {
+			req := anyRequest{
+				AnyRequest: connect.NewRequest(&testpb.GetResourceByIdRequest{}),
+				spec:       connect.Spec{Schema: methodDescriptor("GetResourceById")},
+				msg:        "not a message",
+			}
+			_, err := policyconnect.PolicyOptionInterceptor().WrapUnary(noUnary)(context.Background(), req)
+			return err
+		}},
+		{"unary chain out of order", "must run before", func() error {
+			req := anyRequest{AnyRequest: connect.NewRequest(&testpb.GetResourceRequest{})}
+			_, err := policyconnect.VerificationInterceptor(endpointtest.Allow()).WrapUnary(noUnary)(context.Background(), req)
+			return err
+		}},
+		{"field_mappings on a stream", "field_mappings", func() error {
+			return policyconnect.PolicyOptionInterceptor().WrapStreamingHandler(noStream)(context.Background(),
+				&specConn{spec: connect.Spec{Schema: methodDescriptor("GetResourceById")}})
+		}},
+		{"stream chain out of order", "must run before", func() error {
+			return policyconnect.VerificationInterceptor(endpointtest.Allow()).WrapStreamingHandler(noStream)(context.Background(), conn)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			assertFixedMessage(t, err, connect.CodeInternal, "authorization check failed")
+			if !strings.Contains(fmt.Sprint(errors.Unwrap(errors.Unwrap(err))), tc.cause) {
+				t.Errorf("error %v does not unwrap to a cause naming %q", err, tc.cause)
+			}
+		})
+	}
+}

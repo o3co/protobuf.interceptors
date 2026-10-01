@@ -16,42 +16,27 @@ package grpc
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"log/slog"
-	"os"
-	"strings"
 	"sync"
-	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
-// Option configures an interceptor.
+// Option configures a verification interceptor.
 type Option func(*config)
 
 type config struct {
-	logLevel slog.Level
 	observer interceptors.DecisionObserver
-}
-
-// WithLogLevel sets the log level for the interceptor's internal logger.
-func WithLogLevel(level slog.Level) Option {
-	return func(c *config) {
-		c.logLevel = level
-	}
 }
 
 // WithDecisionObserver has a verification interceptor hand every
 // authorization check it makes to fn, allowed or not (see
-// interceptors.DecisionObserver). The policy option interceptors ignore it.
+// interceptors.DecisionObserver).
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(c *config) {
 		c.observer = fn
@@ -59,8 +44,14 @@ func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 }
 
 // verify runs one authorization check and hands it to the observer, if any.
-func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string) (*interceptors.Decision, error) {
-	decision, err := endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+// A credential the interceptor could not read (credErr) refuses the check
+// without asking the verifier.
+func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string, credErr error) (*interceptors.Decision, error) {
+	var decision *interceptors.Decision
+	err := credErr
+	if err == nil {
+		decision, err = endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+	}
 	if c.observer != nil {
 		c.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
 	}
@@ -77,59 +68,23 @@ func withDecision(ctx context.Context, d *interceptors.Decision) context.Context
 }
 
 func newConfig(opts []Option) *config {
-	c := &config{logLevel: slog.LevelInfo}
+	c := &config{}
 	for _, o := range opts {
 		o(c)
 	}
 	return c
 }
 
-func newLogger(level slog.Level) *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-}
-
-// generateRequestID returns a request ID formatted as YYYYMMDDHHmmss_<16 hex
-// digits>: the UTC second, so IDs sort by arrival to the second, then 8 bytes
-// from crypto/rand, so two requests that read the same clock value still get
-// distinct IDs. Within one second the order is arbitrary.
-func generateRequestID() string {
-	return requestIDAt(time.Now())
-}
-
-// requestIDAt is generateRequestID at the clock value now.
-func requestIDAt(now time.Time) string {
-	var suffix [8]byte
-	// crypto/rand.Read never returns an error: it fills the buffer entirely,
-	// or crashes the program if Reader fails.
-	_, _ = rand.Read(suffix[:])
-	return now.UTC().Format("20060102150405") + "_" + hex.EncodeToString(suffix[:])
-}
-
-// extractBearerToken extracts the Bearer token from gRPC incoming metadata.
-// Returns empty string if not present.
-func extractBearerToken(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ""
+// withInbound puts the request's bearer token and request ID on ctx. The
+// error is a credential that could not be read; it refuses only a method that
+// has a policy, since a method without one is not checked.
+func withInbound(ctx context.Context) (context.Context, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	token, err := interceptors.InboundBearerToken(md.Get("authorization"))
+	if token != "" {
+		ctx = interceptors.WithBearerToken(ctx, token)
 	}
-	vals := md.Get("authorization")
-	for _, v := range vals {
-		if strings.HasPrefix(v, "Bearer ") {
-			return strings.TrimPrefix(v, "Bearer ")
-		}
-	}
-	return ""
-}
-
-// extractOrGenerateRequestID extracts x-request-id from gRPC metadata, or generates one.
-func extractOrGenerateRequestID(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if ok {
-		if vals := md.Get("x-request-id"); len(vals) > 0 && vals[0] != "" {
-			return vals[0]
-		}
-	}
-	return generateRequestID()
+	return interceptors.WithRequestID(ctx, interceptors.InboundRequestID(md.Get("x-request-id"))), err
 }
 
 // PolicyOptionInterceptor returns a gRPC UnaryServerInterceptor that reads
@@ -140,8 +95,7 @@ func extractOrGenerateRequestID(ctx context.Context) string {
 // connectrpc.PolicyOptionInterceptor, which forwards them. A field mapping
 // whose placeholder the template does not use therefore never reaches the
 // verifier. See README, "Extracted field forwarding".
-func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
-	_ = newConfig(opts) // reserve for future logging use
+func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 	var cache sync.Map
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -150,7 +104,7 @@ func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 
 		policy, err := getMethodPolicy(&cache, info.FullMethod)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to look up method policy: %v", err)
+			return nil, toGRPCError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
 		}
 
 		if policy == nil {
@@ -163,7 +117,7 @@ func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 		if len(policy.FieldMappings) > 0 {
 			msg, ok := req.(proto.Message)
 			if !ok {
-				return nil, status.Errorf(codes.Internal, "request does not implement proto.Message")
+				return nil, toGRPCError(ctx, errors.New("request does not implement proto.Message"))
 			}
 			resource, action, err = interceptors.ResolveResource(policy, msg)
 		} else {
@@ -174,7 +128,7 @@ func PolicyOptionInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 		// a denial rather than a server fault. Anything else still maps to
 		// Internal — an unmapped error must never let the handler run.
 		if err != nil {
-			return nil, toGRPCError(fmt.Errorf("failed to resolve resource: %w", err))
+			return nil, toGRPCError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -198,18 +152,11 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 	cfg := newConfig(opts)
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		// Extract and store bearer token from incoming metadata.
-		if token := extractBearerToken(ctx); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
-		}
-
-		// Extract or generate request ID.
-		requestID := extractOrGenerateRequestID(ctx)
-		ctx = interceptors.WithRequestID(ctx, requestID)
+		ctx, credErr := withInbound(ctx)
 
 		// Guard: PolicyOptionInterceptor must have run before this interceptor.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return nil, status.Errorf(codes.Internal, "PolicyOptionInterceptor must run before VerificationInterceptor")
+			return nil, toGRPCError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
 		// Get the policy from context; if none, pass through (no policy = no enforcement).
@@ -219,9 +166,9 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 		}
 
 		// Call the verifier endpoint.
-		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action)
+		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return nil, toGRPCError(err)
+			return nil, toGRPCError(ctx, err)
 		}
 
 		return handler(withDecision(ctx, decision), req)

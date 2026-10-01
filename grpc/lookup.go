@@ -31,11 +31,6 @@ type rpcMethod struct {
 	Method  string
 }
 
-type cachedPolicy struct {
-	policy *pb.Policy
-	err    error
-}
-
 func parseFullMethodName(fullMethodName string) (rpcMethod, error) {
 	if len(fullMethodName) == 0 || fullMethodName[0] != '/' {
 		return rpcMethod{}, fmt.Errorf("invalid full method format: %s", fullMethodName)
@@ -48,14 +43,22 @@ func parseFullMethodName(fullMethodName string) (rpcMethod, error) {
 	return rpcMethod{Service: method[:lastSlash], Method: method[lastSlash+1:]}, nil
 }
 
+// getMethodPolicy returns the policy of the method fullMethodName names, nil
+// when its descriptor carries no policy option. A method whose descriptor is
+// not registered is an error, not "no policy": its policy cannot be known.
+//
+// Only found methods are cached, so the cache is bounded by the registered
+// methods however many names callers send.
 func getMethodPolicy(cache *sync.Map, fullMethodName string) (*pb.Policy, error) {
 	if v, ok := cache.Load(fullMethodName); ok {
-		c := v.(*cachedPolicy)
-		return c.policy, c.err
+		return v.(*pb.Policy), nil
 	}
 	policy, err := lookupMethodPolicy(fullMethodName)
-	cache.Store(fullMethodName, &cachedPolicy{policy: policy, err: err})
-	return policy, err
+	if err != nil {
+		return nil, err
+	}
+	cache.Store(fullMethodName, policy)
+	return policy, nil
 }
 
 func lookupMethodPolicy(fullMethodName string) (*pb.Policy, error) {
@@ -64,44 +67,29 @@ func lookupMethodPolicy(fullMethodName string) (*pb.Policy, error) {
 		return nil, err
 	}
 
-	var serviceDesc protoreflect.ServiceDescriptor
-	protoregistry.GlobalFiles.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
-		services := fd.Services()
-		for i := 0; i < services.Len(); i++ {
-			svc := services.Get(i)
-			if string(svc.FullName()) == mm.Service {
-				serviceDesc = svc
-				return false
-			}
-		}
-		return true
-	})
-
-	if serviceDesc == nil {
-		return nil, nil
+	d, err := protoregistry.GlobalFiles.FindDescriptorByName(protoreflect.FullName(mm.Service))
+	if err != nil {
+		return nil, fmt.Errorf("no descriptor for service %q: %w", mm.Service, err)
 	}
-
+	serviceDesc, ok := d.(protoreflect.ServiceDescriptor)
+	if !ok {
+		return nil, fmt.Errorf("%q is not a service", mm.Service)
+	}
 	methodDesc := serviceDesc.Methods().ByName(protoreflect.Name(mm.Method))
 	if methodDesc == nil {
-		return nil, nil
+		return nil, fmt.Errorf("no descriptor for method %q", fullMethodName)
 	}
 
-	opts := methodDesc.Options()
-	if opts == nil {
-		return nil, nil
-	}
-
-	methodOptions, ok := opts.(*descriptorpb.MethodOptions)
+	methodOptions, ok := methodDesc.Options().(*descriptorpb.MethodOptions)
 	if !ok {
-		return nil, fmt.Errorf("unexpected method options type %T", opts)
+		return nil, fmt.Errorf("unexpected method options type %T", methodDesc.Options())
 	}
-
-	if proto.HasExtension(methodOptions, pb.E_Policy) {
-		ext := proto.GetExtension(methodOptions, pb.E_Policy)
-		if policy, ok := ext.(*pb.Policy); ok {
-			return policy, nil
-		}
+	if !proto.HasExtension(methodOptions, pb.E_Policy) {
+		return nil, nil
 	}
-
-	return nil, nil
+	policy, ok := proto.GetExtension(methodOptions, pb.E_Policy).(*pb.Policy)
+	if !ok {
+		return nil, fmt.Errorf("unexpected policy option type %T", proto.GetExtension(methodOptions, pb.E_Policy))
+	}
+	return policy, nil
 }

@@ -29,6 +29,13 @@ service TestService {
   }
 
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  rpc UploadResources(stream CreateResourceRequest) returns (CreateResourceResponse) {
+    option (o3co.authz.v1.policy) = {
+      resource: "resource"
+      action: "write"
+    };
+  }
 }
 
 message GetResourceRequest { string id = 1; }

@@ -18,8 +18,10 @@ package connectrpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
+	"net/http"
+	"reflect"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -30,44 +32,38 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
-// getPolicyFromSpec extracts the Policy proto option from a connect.Spec's Schema.
-// Returns nil if no policy option is defined.
-func getPolicyFromSpec(spec connect.Spec) *pb.Policy {
+// getPolicyFromSpec returns the policy of the method spec describes, nil when
+// its descriptor carries no policy option. A spec whose Schema is not a method
+// descriptor — a handler built without connect.WithSchema — is an error, not
+// "no policy": its policy cannot be known.
+func getPolicyFromSpec(spec connect.Spec) (*pb.Policy, error) {
 	md, ok := spec.Schema.(protoreflect.MethodDescriptor)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("no method descriptor for %q: build the handler with connect.WithSchema", spec.Procedure)
 	}
-	opts := md.Options()
-	if opts == nil {
-		return nil
-	}
-	methodOptions, ok := opts.(*descriptorpb.MethodOptions)
+	methodOptions, ok := md.Options().(*descriptorpb.MethodOptions)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("unexpected method options type %T", md.Options())
 	}
 	if !proto.HasExtension(methodOptions, pb.E_Policy) {
-		return nil
+		return nil, nil
 	}
-	ext := proto.GetExtension(methodOptions, pb.E_Policy)
-	policy, ok := ext.(*pb.Policy)
+	policy, ok := proto.GetExtension(methodOptions, pb.E_Policy).(*pb.Policy)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("unexpected policy option type %T", proto.GetExtension(methodOptions, pb.E_Policy))
 	}
-	return policy
+	return policy, nil
 }
 
-// extractBearerTokenFromHeader extracts the Bearer token from an http.Header.
-func extractBearerTokenFromHeader(header interface{ Get(string) string }) string {
-	v := header.Get("Authorization")
-	if strings.HasPrefix(v, "Bearer ") {
-		return strings.TrimPrefix(v, "Bearer ")
+// withInbound puts the request's bearer token and request ID on ctx. The
+// error is a credential that could not be read; it refuses only a method that
+// has a policy, since a method without one is not checked.
+func withInbound(ctx context.Context, header http.Header) (context.Context, error) {
+	token, err := interceptors.InboundBearerToken(header.Values("Authorization"))
+	if token != "" {
+		ctx = interceptors.WithBearerToken(ctx, token)
 	}
-	return ""
-}
-
-// extractRequestIDFromHeader extracts X-Request-Id from an http.Header, returning empty string if absent.
-func extractRequestIDFromHeader(header interface{ Get(string) string }) string {
-	return header.Get("X-Request-Id")
+	return interceptors.WithRequestID(ctx, interceptors.InboundRequestID(header.Values("X-Request-Id"))), err
 }
 
 // policyOptionInterceptor implements connect.Interceptor for PolicyOptionInterceptor.
@@ -89,21 +85,27 @@ func PolicyOptionInterceptor() connect.Interceptor {
 
 func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		// The interceptors guard handlers; a client's call is not theirs.
+		if req.Spec().IsClient {
+			return next(ctx, req)
+		}
+
 		ctx = interceptors.MarkInterceptorRan(ctx)
 
-		policy := getPolicyFromSpec(req.Spec())
+		policy, err := getPolicyFromSpec(req.Spec())
+		if err != nil {
+			return nil, toConnectError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
+		}
 		if policy == nil {
 			// No policy defined — pass through.
 			return next(ctx, req)
 		}
 
 		var resource, action string
-		var err error
-
 		if len(policy.FieldMappings) > 0 {
 			msg, ok := req.Any().(proto.Message)
 			if !ok {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("request does not implement proto.Message"))
+				return nil, toConnectError(ctx, errors.New("request does not implement proto.Message"))
 			}
 			var fields map[string]string
 			resource, action, fields, err = interceptors.ResolveResourceWithFields(policy, msg)
@@ -118,7 +120,7 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 		// a denial rather than a server fault. Anything else still maps to
 		// Internal — an unmapped error must never let the handler run.
 		if err != nil {
-			return nil, toConnectError(fmt.Errorf("failed to resolve resource: %w", err))
+			return nil, toConnectError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -127,7 +129,7 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 }
 
 func (p *policyOptionInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	// Pass-through for client-side streaming.
+	// The interceptors guard handlers; a client's stream is not theirs.
 	return next
 }
 
@@ -135,20 +137,23 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
 		ctx = interceptors.MarkInterceptorRan(ctx)
 
-		policy := getPolicyFromSpec(conn.Spec())
+		policy, err := getPolicyFromSpec(conn.Spec())
+		if err != nil {
+			return toConnectError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
+		}
 		if policy == nil {
 			return next(ctx, conn)
 		}
 
 		if len(policy.FieldMappings) > 0 {
-			return connect.NewError(connect.CodeInternal, fmt.Errorf("field_mappings are not supported for streaming RPCs"))
+			return toConnectError(ctx, errors.New("field_mappings are not supported for streaming RPCs"))
 		}
 
 		resource, action, err := interceptors.ResolveResource(policy, nil)
 		if err != nil {
 			// See WrapUnary: a refused placeholder value is a denial,
 			// everything else is Internal.
-			return toConnectError(fmt.Errorf("failed to resolve resource: %w", err))
+			return toConnectError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -174,7 +179,8 @@ type verificationInterceptor struct {
 }
 
 // VerificationInterceptor returns a ConnectRPC Interceptor that reads Policy
-// from context and calls the verifier endpoint.
+// from context and calls the verifier endpoint. A stream is authorized before
+// its handler runs, then re-checked on each message Receive returns.
 //
 // When the endpoint is an endpoint.DecisionVerifier, the decision that allowed
 // the RPC is on the handler's context (interceptors.DecisionFromContext), and
@@ -194,9 +200,14 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 }
 
 // verify runs one authorization check, hands it to the observer, if any, and
-// returns the context the handler runs with.
-func (v *verificationInterceptor) verify(ctx context.Context, resource, action string) (context.Context, error) {
-	decision, err := endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+// returns the context the handler runs with. A credential the interceptor
+// could not read (credErr) refuses the check without asking the verifier.
+func (v *verificationInterceptor) verify(ctx context.Context, resource, action string, credErr error) (context.Context, error) {
+	var decision *interceptors.Decision
+	err := credErr
+	if err == nil {
+		decision, err = endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+	}
 	if v.observer != nil {
 		v.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
 	}
@@ -211,19 +222,16 @@ func (v *verificationInterceptor) verify(ctx context.Context, resource, action s
 
 func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		// Extract and store bearer token.
-		if token := extractBearerTokenFromHeader(req.Header()); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
+		// The interceptors guard handlers; a client's call is not theirs.
+		if req.Spec().IsClient {
+			return next(ctx, req)
 		}
 
-		// Extract or store request ID.
-		if rid := extractRequestIDFromHeader(req.Header()); rid != "" {
-			ctx = interceptors.WithRequestID(ctx, rid)
-		}
+		ctx, credErr := withInbound(ctx, req.Header())
 
 		// Guard: PolicyOptionInterceptor must have run.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("PolicyOptionInterceptor must run before VerificationInterceptor"))
+			return nil, toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
 		// No policy in context means the method has no policy — pass through.
@@ -232,9 +240,9 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			return next(ctx, req)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action)
+		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return nil, toConnectError(err)
+			return nil, toConnectError(ctx, err)
 		}
 
 		return next(ctx, req)
@@ -242,25 +250,17 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 }
 
 func (v *verificationInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	// Pass-through for client-side streaming.
+	// The interceptors guard handlers; a client's stream is not theirs.
 	return next
 }
 
 func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		// Extract and store bearer token.
-		if token := extractBearerTokenFromHeader(conn.RequestHeader()); token != "" {
-			ctx = interceptors.WithBearerToken(ctx, token)
-		}
-
-		// Extract or store request ID.
-		if rid := extractRequestIDFromHeader(conn.RequestHeader()); rid != "" {
-			ctx = interceptors.WithRequestID(ctx, rid)
-		}
+		ctx, credErr := withInbound(ctx, conn.RequestHeader())
 
 		// Guard: PolicyOptionInterceptor must have run.
 		if !interceptors.InterceptorRanFromContext(ctx) {
-			return connect.NewError(connect.CodeInternal, fmt.Errorf("PolicyOptionInterceptor must run before VerificationInterceptor"))
+			return toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
 		// No policy in context means the method has no policy — pass through.
@@ -269,11 +269,58 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return next(ctx, conn)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action)
+		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return toConnectError(err)
+			return toConnectError(ctx, err)
 		}
 
-		return next(ctx, conn)
+		return next(ctx, &authStreamingHandlerConn{
+			StreamingHandlerConn: conn,
+			ctx:                  ctx,
+			resource:             policyData.Resource,
+			action:               policyData.Action,
+			v:                    v,
+		})
+	}
+}
+
+// authStreamingHandlerConn re-checks authorization on each message Receive
+// returns, before handing it over.
+//
+// The stream is already authorized before the handler is invoked. The
+// resource and action are fixed, so re-asking the verifier per message is what
+// stops a stream that keeps receiving once a grant is revoked or a token
+// expires. The check follows the receive, so a message that arrives after
+// revocation is cleared and never handed over; a receive that fails has no
+// message and is not checked. Sends are not re-checked.
+type authStreamingHandlerConn struct {
+	connect.StreamingHandlerConn
+	ctx      context.Context
+	resource string
+	action   string
+	v        *verificationInterceptor
+}
+
+func (c *authStreamingHandlerConn) Receive(msg any) error {
+	if err := c.StreamingHandlerConn.Receive(msg); err != nil {
+		return err
+	}
+	if _, err := c.v.verify(c.ctx, c.resource, c.action, nil); err != nil {
+		clearMessage(msg)
+		return toConnectError(c.ctx, err)
+	}
+	return nil
+}
+
+// clearMessage zeroes a received message that must not be handed over: a
+// proto message is reset, and any other pointer, as a non-proto codec decodes
+// into, has its target set to the zero value.
+func clearMessage(m any) {
+	if msg, ok := m.(proto.Message); ok {
+		proto.Reset(msg)
+		return
+	}
+	if rv := reflect.ValueOf(m); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		rv.Elem().SetZero()
 	}
 }

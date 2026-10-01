@@ -16,13 +16,21 @@ package grpc_test
 
 import (
 	"context"
+	"io"
+	"net"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
+	"github.com/o3co/protobuf.interceptors/endpoint"
 	"github.com/o3co/protobuf.interceptors/endpointtest"
 	policygrpc "github.com/o3co/protobuf.interceptors/grpc"
+	testpb "github.com/o3co/protobuf.interceptors/testproto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -34,6 +42,8 @@ type fakeServerStream struct {
 	ctx       context.Context
 	sendCalls int
 	recvCalls int
+	// recv, when set, is what the transport does on RecvMsg.
+	recv func(m any) error
 }
 
 func (s *fakeServerStream) Context() context.Context { return s.ctx }
@@ -43,8 +53,11 @@ func (s *fakeServerStream) SendMsg(any) error {
 	return nil
 }
 
-func (s *fakeServerStream) RecvMsg(any) error {
+func (s *fakeServerStream) RecvMsg(m any) error {
 	s.recvCalls++
+	if s.recv != nil {
+		return s.recv(m)
+	}
 	return nil
 }
 
@@ -186,26 +199,33 @@ func TestVerificationStreamInterceptor_Allowed_StreamStillWorks(t *testing.T) {
 }
 
 // TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization pins the
-// per-message check made after the up-front one: the resource and action are
-// fixed for the life of a stream, so the re-check exists to refuse the next
-// message to a stream that keeps receiving once its authorization is
-// withdrawn; sends are not re-checked.
+// per-message check made after the up-front one. The resource and action are
+// fixed for the life of a stream, so the re-check exists to refuse a message
+// that arrives once authorization is withdrawn: it runs after the transport
+// returns the message, and a refused message is cleared, never handed over.
 func TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization(t *testing.T) {
 	calls := 0
+	var order []string
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
 		func(context.Context, string, string) error {
 			calls++
+			order = append(order, "verify")
 			if calls == 1 {
 				return nil // opening the stream is allowed
 			}
 			return &interceptors.DeniedError{Reason: "grant revoked mid-stream"}
 		},
 	))
-	stream := &fakeServerStream{ctx: policyStreamCtx()}
+	stream := &fakeServerStream{ctx: policyStreamCtx(), recv: func(m any) error {
+		order = append(order, "recv")
+		m.(*testpb.CreateResourceRequest).Name = "arrived after revocation"
+		return nil
+	}}
 
 	var recvErr error
+	msg := &testpb.CreateResourceRequest{}
 	err := interceptor(nil, stream, streamInfo(), func(_ any, ss grpc.ServerStream) error {
-		recvErr = ss.RecvMsg(new(string))
+		recvErr = ss.RecvMsg(msg)
 		return recvErr
 	})
 	if err == nil {
@@ -214,8 +234,43 @@ func TestVerificationStreamInterceptor_RecvMsg_RechecksAuthorization(t *testing.
 	if status.Code(recvErr) != codes.PermissionDenied {
 		t.Errorf("RecvMsg code = %v, want %v", status.Code(recvErr), codes.PermissionDenied)
 	}
-	if stream.recvCalls != 0 {
-		t.Errorf("recvCalls = %d, want 0: a message must not be delivered after the re-check denies", stream.recvCalls)
+	if calls != 2 {
+		t.Errorf("verify calls = %d, want the opening check and one re-check", calls)
+	}
+	if want := []string{"verify", "recv", "verify"}; !slices.Equal(order, want) {
+		t.Errorf("order = %v, want %v: the re-check follows the message it authorizes", order, want)
+	}
+	if msg.Name != "" {
+		t.Errorf("the refused message reached the handler: %q", msg.Name)
+	}
+}
+
+// A receive that fails — the client closed its side, the stream broke — has
+// no message to authorize, so it is not re-checked and its error is returned
+// as is.
+func TestVerificationStreamInterceptor_RecvMsgError_IsNotRechecked(t *testing.T) {
+	calls := 0
+	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
+		func(context.Context, string, string) error {
+			calls++
+			if calls == 1 {
+				return nil
+			}
+			return &interceptors.DeniedError{Reason: "must not be asked"}
+		},
+	))
+	stream := &fakeServerStream{ctx: policyStreamCtx(), recv: func(any) error { return io.EOF }}
+
+	var recvErr error
+	_ = interceptor(nil, stream, streamInfo(), func(_ any, ss grpc.ServerStream) error {
+		recvErr = ss.RecvMsg(&testpb.CreateResourceRequest{})
+		return nil
+	})
+	if recvErr != io.EOF {
+		t.Errorf("RecvMsg error = %v, want io.EOF", recvErr)
+	}
+	if calls != 1 {
+		t.Errorf("verify calls = %d, want only the opening check", calls)
 	}
 }
 
@@ -313,5 +368,112 @@ func TestPolicyOptionStreamInterceptor_NoFieldMappings_ResolvesPolicy(t *testing
 	}
 	if captured.Resource != "resource" || captured.Action != "read" {
 		t.Errorf("policy = %+v, want {Resource:resource Action:read}", captured)
+	}
+}
+
+// uploadServer is the handler of the client-streaming UploadResources RPC. It
+// records every message it is handed.
+type uploadServer struct {
+	testServer
+	mu       sync.Mutex
+	received []string
+}
+
+func (s *uploadServer) UploadResources(stream grpc.ClientStreamingServer[testpb.CreateResourceRequest, testpb.CreateResourceResponse]) error {
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			return stream.SendAndClose(&testpb.CreateResourceResponse{Id: "done"})
+		}
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.received = append(s.received, msg.Name)
+		s.mu.Unlock()
+	}
+}
+
+func (s *uploadServer) all() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.received...)
+}
+
+// revokedAfter allows the first n checks and denies every one after.
+func revokedAfter(n int) endpoint.VerifierEndpoint {
+	var calls atomic.Int32
+	return endpointtest.Func(func(context.Context, string, string) error {
+		if int(calls.Add(1)) <= n {
+			return nil
+		}
+		return &interceptors.DeniedError{Reason: "grant revoked"}
+	})
+}
+
+// On a real stream: the grant is revoked after the stream opened and its first
+// message was delivered, so the next message the client sends never reaches
+// the handler.
+func TestStreamChain_RevokedAfterOpen_NextMessageIsNotDelivered(t *testing.T) {
+	impl := &uploadServer{}
+	rec := &recorder{}
+	srv := grpc.NewServer(grpc.ChainStreamInterceptor(
+		policygrpc.PolicyOptionStreamInterceptor(),
+		// The opening check and the re-check of the first message are allowed.
+		policygrpc.VerificationStreamInterceptor(revokedAfter(2), policygrpc.WithDecisionObserver(rec.observe)),
+	))
+	testpb.RegisterTestServiceServer(srv, impl)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.Stop()
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := testpb.NewTestServiceClient(conn).UploadResources(bearerCtx("tok"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, name := range []string{"first", "second"} {
+		// A send may fail once the server has ended the stream; the status
+		// comes from CloseAndRecv.
+		if err := stream.Send(&testpb.CreateResourceRequest{Name: name}); err != nil {
+			break
+		}
+	}
+	_, err = stream.CloseAndRecv()
+
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+	if got := impl.all(); len(got) != 1 || got[0] != "first" {
+		t.Errorf("handler received %q, want only the message sent before revocation", got)
+	}
+	if events := rec.all(); len(events) != 3 {
+		t.Errorf("observer saw %d checks, want the opening one and one per message", len(events))
+	}
+}
+
+// A message decoded by a codec other than protobuf is cleared too.
+func TestVerificationStreamInterceptor_RefusedNonProtoMessage_IsCleared(t *testing.T) {
+	interceptor := policygrpc.VerificationStreamInterceptor(revokedAfter(1))
+	stream := &fakeServerStream{ctx: policyStreamCtx(), recv: func(m any) error {
+		*m.(*string) = "arrived after revocation"
+		return nil
+	}}
+	msg := new(string)
+	err := interceptor(nil, stream, streamInfo(), func(_ any, ss grpc.ServerStream) error {
+		return ss.RecvMsg(msg)
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+	if *msg != "" {
+		t.Errorf("the refused message reached the handler: %q", *msg)
 	}
 }

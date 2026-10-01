@@ -15,8 +15,13 @@
 package interceptors
 
 // DeniedError indicates that the authorization check denied the request.
+//
+// The framework interceptors tell the RPC caller only PermissionDenied with
+// the fixed message "access denied"; the error itself goes to the
+// DecisionObserver.
 type DeniedError struct {
-	// Reason is what the RPC caller is told. It never carries the decision.
+	// Reason describes the denial for the service. It never carries the
+	// decision, and the framework interceptors never send it to the caller.
 	Reason string
 	// Decision is what the backend reported behind the denial, nil when it
 	// reported nothing or when no backend was asked (see ResourceValueError).
@@ -27,6 +32,8 @@ type DeniedError struct {
 func (e *DeniedError) Error() string { return e.Reason }
 
 // UnauthenticatedError indicates that the request lacks valid authentication.
+// The framework interceptors tell the RPC caller only Unauthenticated with a
+// fixed message, never Reason.
 type UnauthenticatedError struct {
 	Reason string
 }
@@ -38,8 +45,8 @@ func (e *UnauthenticatedError) Error() string { return e.Reason }
 // Decision.RevisionConfirmed). Only an endpoint configured to require them
 // returns it. It is not a denial — the backend allowed, and the service could
 // not establish what the allow rests on — so the framework interceptors map
-// it to Internal. Its message reaches the RPC caller, so it says nothing of
-// the decision, nor that a revision was required.
+// it to Internal. Its message says nothing of the decision, nor that a
+// revision was required.
 type UnconfirmedRevisionError struct {
 	// Decision is the allow that was not accepted, nil when the backend
 	// reported none at all.
@@ -63,8 +70,8 @@ type ResourceValueError struct {
 	// surrounding angle brackets.
 	Placeholder string
 	// Value is the refused value. It is attacker-controlled request data and
-	// is deliberately absent from Error(), so it is not echoed back over the
-	// wire; it is here for in-process logging that has decided to log it.
+	// is deliberately absent from Error(), so printing the error does not
+	// repeat it; it is here for in-process logging that has decided to log it.
 	Value string
 	// Reason states what disqualified the value.
 	Reason string
