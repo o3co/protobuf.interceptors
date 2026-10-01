@@ -16,7 +16,9 @@ package endpoint
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -421,6 +423,81 @@ func TestRequestIDHeaderKey_TokenOrEmpty_IsAccepted(t *testing.T) {
 		for _, key := range []string{"", "x-request-id", "X-Correlation-ID", "traceparent"} {
 			t.Run(name+"/"+key, func(t *testing.T) {
 				option(key)
+			})
+		}
+	}
+}
+
+// stall answers nothing until the request is abandoned, after first writing
+// prefix as the start of a 200 body when it is not empty.
+func stall(t *testing.T, prefix string) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The server notices the client leave only once the request body
+		// is read.
+		_, _ = io.Copy(io.Discard, r.Body)
+		if prefix != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(prefix))
+			w.(http.Flusher).Flush()
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	return srv
+}
+
+// When the caller's context ends, the error says so: errors.Is finds
+// context.Canceled or context.DeadlineExceeded, wherever the request was.
+func TestHTTPEndpoints_CallerContextEnded_WrapsItsError(t *testing.T) {
+	for _, b := range httpBackends() {
+		t.Run(b.name+"/cancelled before the request", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(ctxWithToken("tok"))
+			cancel()
+			err := b.build(t, serve(t, http.StatusOK, b.allow).URL).Verify(ctx, "r", "a")
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("got %T: %v, want an error wrapping context.Canceled", err, err)
+			}
+		})
+		t.Run(b.name+"/deadline while awaiting the answer", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(ctxWithToken("tok"), 50*time.Millisecond)
+			defer cancel()
+			err := b.build(t, stall(t, "").URL).Verify(ctx, "r", "a")
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("got %T: %v, want an error wrapping context.DeadlineExceeded", err, err)
+			}
+		})
+		t.Run(b.name+"/deadline while reading the body", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(ctxWithToken("tok"), 50*time.Millisecond)
+			defer cancel()
+			err := b.build(t, stall(t, b.allow[:5]).URL).Verify(ctx, "r", "a")
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("got %T: %v, want an error wrapping context.DeadlineExceeded", err, err)
+			}
+		})
+	}
+}
+
+// The endpoint's own timeout is the backend failing to answer, not the
+// caller's deadline: the error wraps no context error.
+func TestHTTPEndpoints_EndpointTimeout_IsNotTheCallersContext(t *testing.T) {
+	for _, b := range transported {
+		for name, prefix := range map[string]string{"awaiting the answer": "", "reading the body": b.allow[:5]} {
+			t.Run(b.name+"/"+name, func(t *testing.T) {
+				ep, err := b.build(stall(t, prefix).URL, http.DefaultTransport, 50*time.Millisecond)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				err = ep.Verify(ctxWithToken("tok"), "r", "a")
+				if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					t.Errorf("got %T: %v, want an error wrapping no context error", err, err)
+				}
 			})
 		}
 	}
