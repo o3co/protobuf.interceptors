@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop]
   pull_request:
-    branches: [develop, main]
+    branches: [develop]
 
 permissions:
   contents: read
@@ -34,8 +34,41 @@ jobs:
           go-version: ${{ matrix.go != 'minimum' && matrix.go || '' }}
           go-version-file: ${{ matrix.go == 'minimum' && format('{0}/go.mod', matrix.module.dir) || '' }}
       - run: go version
+
+      # Formatting, static analysis and module tidiness are properties of the
+      # source, so each module is checked once, on the minimum toolchain: the
+      # pinned staticcheck supports it, and gofmt and go mod tidy can answer
+      # differently on a newer one.
+      - name: Check formatting
+        if: matrix.go == 'minimum'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Check that go.mod and go.sum are tidy
+        if: matrix.go == 'minimum'
+        run: go mod tidy -diff
+      - name: staticcheck
+        if: matrix.go == 'minimum'
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
       - run: go vet ./...
-      - run: go test ./... -count=1
+      - run: go test ./... -race -count=1 -covermode=atomic -coverprofile=cover.out
+
+      # One report per module, from the minimum toolchain; codecov.yml carries
+      # each flag forward when a run does not upload it.
+      - name: Upload coverage to Codecov (${{ matrix.module.name }})
+        if: matrix.go == 'minimum'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ matrix.module.dir }}/cover.out
+          flags: ${{ matrix.module.name }}
+          disable_search: true
+          fail_ci_if_error: false
 
   proto-sync:
     runs-on: ubuntu-latest
