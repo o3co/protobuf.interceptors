@@ -257,3 +257,18 @@ func TestCedarVerify_PrincipalWithAQuote_IsEscapedOnTheWire(t *testing.T) {
 		t.Errorf("principal = %v, want %s", principal, `User::"x\""`)
 	}
 }
+
+// The Cedar agent's keys are case-sensitive: a key in another case is not
+// decision, and cannot allow.
+func TestCedarVerify_DecisionInAnotherCase_DoesNotAllow(t *testing.T) {
+	for _, body := range []string{`{"decision": "Deny", "DECISION": "Allow"}`, `{"Decision": "Allow"}`} {
+		t.Run(body, func(t *testing.T) {
+			ep, _ := NewCedarEndpoint(serve(t, http.StatusOK, body).URL, WithCedarPrincipalResolver(tokenAsPrincipal))
+			err := ep.Verify(ctxWithToken("tok"), "resource", "read")
+			var denied *interceptors.DeniedError
+			if !errors.As(err, &denied) {
+				t.Fatalf("expected *DeniedError, got %T: %v", err, err)
+			}
+		})
+	}
+}
