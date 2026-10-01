@@ -65,13 +65,20 @@ The policy is read from the method's descriptor in the protobuf registry:
 
 - **Descriptor found, policy option set** — the RPC is checked.
 - **Descriptor found, no policy option** — the RPC is not checked and passes
-  through. The gRPC health and reflection services are such methods.
+  through. On grpc-go, the health and reflection services
+  (`google.golang.org/grpc/health`, `google.golang.org/grpc/reflection`) are
+  such methods.
 - **No descriptor** — the RPC is **refused** with `Internal` before its handler
   runs, since its policy cannot be known. On gRPC that is a method missing from
-  `protoregistry.GlobalFiles`: one served by `grpc.UnknownServiceHandler`, or
-  by a hand-written `ServiceDesc` whose `.proto` was never registered. On
-  ConnectRPC it is a handler built without `connect.WithSchema` (generated
-  handlers always set it).
+  `protoregistry.GlobalFiles`: one served by `grpc.UnknownServiceHandler`, by a
+  hand-written `ServiceDesc` whose `.proto` was never registered, or by a
+  gogo/protobuf-generated service, whose descriptors are registered with gogo's
+  registry rather than `GlobalFiles`. On ConnectRPC it is a handler built
+  without `connect.WithSchema`: hand-built handlers, code from a
+  protoc-gen-connect-go too old to emit `connect.WithSchema`, and ConnectRPC's
+  own `connectrpc.com/grpchealth` and `connectrpc.com/grpcreflect` handlers,
+  which set no schema. Mount those without these interceptors (see
+  [ConnectRPC](#connectrpc)).
 
 Server reflection publishes method options, so a client that can reach the
 reflection service can read every method's policy option: its resource
@@ -247,6 +254,28 @@ path, handler := foopbconnect.NewFooServiceHandler(
 mux.Handle(path, handler)
 ```
 
+`connectrpc.com/grpchealth` and `connectrpc.com/grpcreflect` build their
+handlers without `connect.WithSchema`, so behind these interceptors every
+health check and reflection request is refused with `Internal`. Pass the
+interceptors to your service handlers only, not as one option shared by every
+handler:
+
+```go
+// The service is checked.
+mux.Handle(foopbconnect.NewFooServiceHandler(&fooServer{},
+    connect.WithInterceptors(
+        policyconnect.PolicyOptionInterceptor(),
+        policyconnect.VerificationInterceptor(verifier),
+    ),
+))
+
+// Health and reflection are mounted without the interceptors.
+mux.Handle(grpchealth.NewHandler(grpchealth.NewStaticChecker(foopbconnect.FooServiceName)))
+reflector := grpcreflect.NewStaticReflector(foopbconnect.FooServiceName)
+mux.Handle(grpcreflect.NewHandlerV1(reflector))
+mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
+```
+
 The interceptors guard handlers. Passed to a ConnectRPC client, both pass every
 call through untouched.
 
@@ -259,10 +288,11 @@ HTTP headers) and put them on the context the endpoint is called with:
   token, and whether it may proceed is the backend's decision. Otherwise it
   must carry exactly one value of the form `Bearer <token>`: the scheme is
   compared case-insensitively (RFC 9110 §11.1) and the token must be non-empty
-  and free of whitespace. Several values, another scheme, or an empty token are
-  refused with `Unauthenticated` before any backend is asked, and the observer
-  sees the refusal. A method with no policy is not checked, so its credential
-  is not read.
+  and free of Unicode whitespace (no RFC 6750 `b64token` contains any).
+  Several values, another scheme, or an empty token are refused with
+  `Unauthenticated` before any backend is asked, and the observer sees the
+  refusal. A method with no policy is not checked: a well-formed token is still
+  placed on its context, and a malformed credential is not refused.
 - **Request ID** — from `x-request-id`. The one value sent is kept when it is
   1–128 characters of `A-Z a-z 0-9 - _ . : + / = #`, the shape
   auth.policy-verifier accepts. Otherwise — none, several, or one outside that
@@ -280,9 +310,9 @@ called, or why a token was refused, so none of its text reaches the caller:
 |---|---|---|
 | `*interceptors.DeniedError`, including a refused placeholder value | `PermissionDenied` | `access denied` |
 | `*interceptors.UnauthenticatedError`, including an unreadable credential | `Unauthenticated` | `unauthenticated` |
-| `context.Canceled` | `Canceled` | `request canceled` |
-| `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
-| anything else — a backend failure, a method with no descriptor, a placeholder with no mapping, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `context.Canceled`, when the RPC's own context was canceled | `Canceled` | `request canceled` |
+| `context.DeadlineExceeded`, when the RPC's own deadline passed | `DeadlineExceeded` | `deadline exceeded` |
+| anything else — a backend failure (including the endpoint's own HTTP timeout while the RPC is live), a method with no descriptor, a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
 The full error goes to the `WithDecisionObserver` observer for every check
 (see [Recording the decision](#recording-the-decision)). The error an
@@ -476,8 +506,10 @@ of a stream, so that re-check is not a second opinion on the same question: it
 is what stops a stream that keeps receiving once its grant has been revoked, or
 its token expired, since the stream opened. It runs after the message arrives,
 so a message that arrives after revocation is cleared and never handed to the
-handler, which gets the mapped error instead. A receive that fails — the client
-closed its side, the stream broke — has no message and is not re-checked.
+handler, which gets the mapped error instead, whatever codec decoded it. A
+receive that fails — the client closed its side, the stream broke — has no
+message and is not re-checked. Each received message costs one verifier call,
+so a stream can also end partway when the verifier fails.
 
 Sends are not re-checked, so a server-streaming RPC is checked before its
 handler runs and again when the handler reads its one request, and never after
