@@ -20,6 +20,7 @@ import (
 	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -192,7 +193,10 @@ func TestWireContract_EveryRuleGroupKeyDecodes(t *testing.T) {
 	if err != nil || d == nil || len(d.Groups) != 1 {
 		t.Fatalf("VerifyDecision = (%+v, %v)", d, err)
 	}
-	if _, sent := group["restricts"]; sent && !d.Groups[0].Restricts {
+	if !slices.Contains(c.RuleGroup.Optional, "restricts") {
+		t.Fatalf("the wire contract no longer lists restricts on a rule group: %v", c.RuleGroup.Optional)
+	}
+	if !d.Groups[0].Restricts {
 		t.Error("restricts: true decoded as a granting group")
 	}
 }

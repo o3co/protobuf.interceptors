@@ -119,6 +119,32 @@ func TestO3coVerifyDecision_RestrictingGroup_IsMarked(t *testing.T) {
 	}
 }
 
+// A delegated token outside its range is denied by its restricting group,
+// which the denial reports as restricting.
+func TestO3coVerifyDecision_DenyWithAFailingRestrictingGroup_IsMarked(t *testing.T) {
+	const body = `{
+  "decision": "deny", "code": "outside_delegation_range", "message": "Outside the delegation range",
+  "resource": "project:p2.report", "action": "run",
+  "reason": { "groups": [ {
+    "ruleType": "cedar", "passed": true,
+    "evaluated": [ { "code": "cedar_permit", "message": "Permitted", "passed": true } ],
+    "satisfiedBy": { "code": "cedar_permit", "message": "Permitted", "passed": true }
+  }, {
+    "ruleType": "delegation_range", "passed": false, "restricts": true,
+    "evaluated": [ { "code": "outside_delegation_range", "message": "Outside the delegation range", "passed": false } ]
+  } ] }
+}`
+	e := newTestEndpoint(t, serve(t, http.StatusForbidden, body).URL)
+	_, err := e.VerifyDecision(ctxWithToken("tok"), "project:p2.report", "run")
+	var denied *interceptors.DeniedError
+	if !errors.As(err, &denied) || denied.Decision == nil || len(denied.Decision.Groups) != 2 {
+		t.Fatalf("VerifyDecision error = %T: %v", err, err)
+	}
+	if g := denied.Decision.Groups; g[0].Restricts || !g[1].Restricts || g[1].Passed {
+		t.Errorf("Groups = %+v, want a granting group and a failing restricting one", g)
+	}
+}
+
 // The delegation range's group has no policy source; the allow is confirmed by
 // the policy that granted it.
 func TestO3coRequireConfirmedRevision_AcceptsAnAllowARestrictingGroupNarrowed(t *testing.T) {
@@ -391,6 +417,7 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		"a restricts of false":                        `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": false, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a null restricts":                            `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": null, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a restricts of the wrong type":               `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "restricts": "true", "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
+		"a restricts spelled in another case":         `{"resource": "r", "action": "a", "decision": "allow", "reason": {"groups": [{"ruleType": "cedar", "passed": true, "Restricts": true, "evaluated": [` + outcome + `], "satisfiedBy": ` + outcome + `}]}}`,
 		"a JSON array":                                `[` + group + `]`,
 		"JSON null":                                   `null`,
 	}
