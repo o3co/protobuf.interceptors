@@ -502,3 +502,37 @@ func TestHTTPEndpoints_EndpointTimeout_IsNotTheCallersContext(t *testing.T) {
 		}
 	}
 }
+
+// A body past the size bound is not read as a decision, even when the part
+// within it is an allow.
+func TestOPAAndCedar_OversizedAllow_IsAnError(t *testing.T) {
+	const opaAllow, cedarAllow = `{"result": true}`, `{"decision": "Allow"}`
+	cases := map[string]func(url string) (VerifierEndpoint, error){
+		"opa": func(url string) (VerifierEndpoint, error) {
+			return NewOPAEndpoint(url, "authz/allow", WithOPAMaxResponseBodySize(int64(len(opaAllow))))
+		},
+		"cedar": func(url string) (VerifierEndpoint, error) {
+			return NewCedarEndpoint(url, WithCedarPrincipalResolver(tokenAsPrincipal), WithCedarMaxResponseBodySize(int64(len(cedarAllow))))
+		},
+	}
+	bodies := map[string]string{"opa": opaAllow, "cedar": cedarAllow}
+	for name, build := range cases {
+		t.Run(name, func(t *testing.T) {
+			ep, err := build(serve(t, http.StatusOK, bodies[name]+"          ").URL)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			err = ep.Verify(ctxWithToken("tok"), "r", "a")
+			var denied *interceptors.DeniedError
+			if err == nil || errors.As(err, &denied) {
+				t.Errorf("got %T: %v, want an error that is not a denial", err, err)
+			}
+
+			// At the bound exactly, the body is read.
+			ep, _ = build(serve(t, http.StatusOK, bodies[name]).URL)
+			if err := ep.Verify(ctxWithToken("tok"), "r", "a"); err != nil {
+				t.Errorf("a body at the bound: unexpected error: %v", err)
+			}
+		})
+	}
+}
