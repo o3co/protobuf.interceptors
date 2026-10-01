@@ -214,9 +214,18 @@ func TestConnectChain_DecisionDoesNotReachTheCaller(t *testing.T) {
 type fakeStreamingConn struct {
 	connect.StreamingHandlerConn
 	header http.Header
+	// recv, when set, is what the transport does on Receive.
+	recv func(msg any) error
 }
 
 func (c *fakeStreamingConn) RequestHeader() http.Header { return c.header }
+
+func (c *fakeStreamingConn) Receive(msg any) error {
+	if c.recv != nil {
+		return c.recv(msg)
+	}
+	return nil
+}
 
 func TestConnectVerification_Streaming_DecisionReachesTheHandlerAndTheObserver(t *testing.T) {
 	want := confirmedDecision()
