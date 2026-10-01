@@ -15,9 +15,12 @@
 package endpoint
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -341,6 +344,51 @@ func TestHTTPEndpoints_NilTransport_Panics(t *testing.T) {
 				}
 			}()
 			b.nilOpt()
+		})
+	}
+}
+
+// bufferLogger returns a logger at level writing to the buffer it returns.
+func bufferLogger(level slog.Level) (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})), &buf
+}
+
+// An error answer is logged at the default level by its status and request
+// ID; its body, which may echo the request, only at Debug.
+func TestOPAAndCedar_ErrorResponseBody_IsLoggedOnlyAtDebug(t *testing.T) {
+	const body = `{"error": "leak-me"}`
+	setLogger := map[string]func(VerifierEndpoint, *slog.Logger){
+		"opa":   func(ep VerifierEndpoint, l *slog.Logger) { ep.(*opaEndpoint).logger = l },
+		"cedar": func(ep VerifierEndpoint, l *slog.Logger) { ep.(*cedarEndpoint).logger = l },
+	}
+	for _, b := range httpBackends() {
+		set, ok := setLogger[b.name]
+		if !ok {
+			continue
+		}
+		t.Run(b.name, func(t *testing.T) {
+			ep := b.build(t, serve(t, http.StatusInternalServerError, body).URL)
+
+			logger, logs := bufferLogger(slog.LevelError)
+			set(ep, logger)
+			_ = ep.Verify(ctxWithTokenAndRequestID("tok", "req-1"), "r", "a")
+			out := logs.String()
+			if strings.Contains(out, "leak-me") {
+				t.Errorf("default-level log carries the response body:\n%s", out)
+			}
+			for _, want := range []string{"level=ERROR", "status=500", "req-1"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("default-level log lacks %q:\n%s", want, out)
+				}
+			}
+
+			logger, logs = bufferLogger(slog.LevelDebug)
+			set(ep, logger)
+			_ = ep.Verify(ctxWithTokenAndRequestID("tok", "req-1"), "r", "a")
+			if out := logs.String(); !strings.Contains(out, "leak-me") {
+				t.Errorf("debug-level log lacks the response body:\n%s", out)
+			}
 		})
 	}
 }
