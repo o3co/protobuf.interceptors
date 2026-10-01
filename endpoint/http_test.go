@@ -63,7 +63,7 @@ func httpBackends() []httpBackend {
 			name: "cedar",
 			build: func(t *testing.T, baseURL string) VerifierEndpoint {
 				t.Helper()
-				ep, err := NewCedarEndpoint(baseURL)
+				ep, err := NewCedarEndpoint(baseURL, WithCedarPrincipalResolver(tokenAsPrincipal))
 				if err != nil {
 					t.Fatalf("NewCedarEndpoint: %v", err)
 				}
@@ -128,7 +128,7 @@ var constructors = []struct {
 		return err
 	}},
 	{"cedar", func(baseURL string, allowInsecure bool) error {
-		var opts []CedarOption
+		opts := []CedarOption{WithCedarPrincipalResolver(tokenAsPrincipal)}
 		if allowInsecure {
 			opts = append(opts, WithCedarAllowInsecure())
 		}
@@ -233,7 +233,7 @@ var transported = []struct {
 	{
 		name: "cedar",
 		build: func(baseURL string, rt http.RoundTripper, timeout time.Duration) (VerifierEndpoint, error) {
-			return NewCedarEndpoint(baseURL, WithCedarTransport(rt), WithCedarTimeout(timeout))
+			return NewCedarEndpoint(baseURL, WithCedarPrincipalResolver(tokenAsPrincipal), WithCedarTransport(rt), WithCedarTimeout(timeout))
 		},
 		allow:  `{"decision": "Allow"}`,
 		nilOpt: func() { WithCedarTransport(nil) },

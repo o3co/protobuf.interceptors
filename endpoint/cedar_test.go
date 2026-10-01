@@ -21,10 +21,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 )
+
+// tokenAsPrincipal resolves the bearer token to itself. It authenticates
+// nothing, and is fit only for tests.
+func tokenAsPrincipal(_ context.Context, token string) (string, error) { return token, nil }
 
 func cedarServerWithDecision(decision string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,14 +40,14 @@ func cedarServerWithDecision(decision string) *httptest.Server {
 }
 
 func TestNewCedarEndpoint_EmptyURL_ReturnsError(t *testing.T) {
-	_, err := NewCedarEndpoint("")
+	_, err := NewCedarEndpoint("", WithCedarPrincipalResolver(tokenAsPrincipal))
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestNewCedarEndpoint_ValidURL_ConstructsCorrectEndpoint(t *testing.T) {
-	ep, err := NewCedarEndpoint("http://localhost:8180")
+	ep, err := NewCedarEndpoint("http://localhost:8180", WithCedarPrincipalResolver(tokenAsPrincipal))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,7 +60,7 @@ func TestNewCedarEndpoint_ValidURL_ConstructsCorrectEndpoint(t *testing.T) {
 func TestCedarVerify_Allow_ReturnsNil(t *testing.T) {
 	srv := cedarServerWithDecision("Allow")
 	defer srv.Close()
-	ep, _ := NewCedarEndpoint(srv.URL)
+	ep, _ := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(tokenAsPrincipal))
 	err := ep.Verify(ctxWithToken("tok"), "resource", "read")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -64,7 +70,7 @@ func TestCedarVerify_Allow_ReturnsNil(t *testing.T) {
 func TestCedarVerify_Deny_ReturnsDeniedError(t *testing.T) {
 	srv := cedarServerWithDecision("Deny")
 	defer srv.Close()
-	ep, _ := NewCedarEndpoint(srv.URL)
+	ep, _ := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(tokenAsPrincipal))
 	err := ep.Verify(ctxWithToken("tok"), "resource", "read")
 	if err == nil {
 		t.Fatal("expected error")
@@ -76,7 +82,7 @@ func TestCedarVerify_Deny_ReturnsDeniedError(t *testing.T) {
 }
 
 func TestCedarVerify_NoToken_ReturnsUnauthenticatedError(t *testing.T) {
-	ep, _ := NewCedarEndpoint("http://localhost:9999")
+	ep, _ := NewCedarEndpoint("http://localhost:9999", WithCedarPrincipalResolver(tokenAsPrincipal))
 	err := ep.Verify(context.Background(), "resource", "read")
 	if err == nil {
 		t.Fatal("expected error")
@@ -105,7 +111,7 @@ func TestCedarVerify_RequestBody_ContainsCedarEntityUIDs(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "Allow"})
 	}))
 	defer srv.Close()
-	ep, _ := NewCedarEndpoint(srv.URL)
+	ep, _ := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(tokenAsPrincipal))
 	_ = ep.Verify(ctxWithToken("my-token"), "posts/123", "read")
 }
 
@@ -128,9 +134,126 @@ func TestCedarVerify_CustomPrefixes(t *testing.T) {
 	}))
 	defer srv.Close()
 	ep, _ := NewCedarEndpoint(srv.URL,
+		WithCedarPrincipalResolver(tokenAsPrincipal),
 		WithCedarPrincipalPrefix("Account"),
 		WithCedarActionPrefix("Operation"),
 		WithCedarResourcePrefix("Document"),
 	)
 	_ = ep.Verify(ctxWithToken("my-token"), "file.txt", "read")
+}
+
+// The endpoint authenticates nothing itself: the principal is whatever the
+// resolver says, so there is no default for it to fall back on.
+func TestNewCedarEndpoint_WithoutAPrincipalResolver_ReturnsErrorNamingTheOption(t *testing.T) {
+	_, err := NewCedarEndpoint("http://localhost:8180")
+	if err == nil {
+		t.Fatal("expected an error without a principal resolver")
+	}
+	if !strings.Contains(err.Error(), "WithCedarPrincipalResolver") {
+		t.Errorf("error %q does not name WithCedarPrincipalResolver", err)
+	}
+}
+
+func TestCedarVerify_PrincipalIsWhatTheResolverReturns(t *testing.T) {
+	var principal any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		principal = req["principal"]
+		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "Allow"})
+	}))
+	defer srv.Close()
+
+	var seen string
+	ep, err := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(func(_ context.Context, token string) (string, error) {
+		seen = token
+		return "alice", nil
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := ep.Verify(ctxWithToken("signed-token"), "r", "a"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if seen != "signed-token" {
+		t.Errorf("the resolver was given %q, want the bearer token", seen)
+	}
+	if principal != `User::"alice"` {
+		t.Errorf("principal = %v, want %q", principal, `User::"alice"`)
+	}
+}
+
+// A resolver that refuses the token, or names no principal, leaves the
+// request unauthenticated, and the Cedar agent is never asked.
+func TestCedarVerify_ResolverRefusal_IsUnauthenticatedAndAsksNothing(t *testing.T) {
+	cases := map[string]func(context.Context, string) (string, error){
+		"an error":           func(context.Context, string) (string, error) { return "", errors.New("signature does not verify") },
+		"an error and an id": func(context.Context, string) (string, error) { return "alice", errors.New("expired") },
+		"no principal":       func(context.Context, string) (string, error) { return "", nil },
+	}
+	for name, resolve := range cases {
+		t.Run(name, func(t *testing.T) {
+			var asked atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				asked.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]string{"decision": "Allow"})
+			}))
+			defer srv.Close()
+
+			ep, err := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(resolve))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			err = ep.Verify(ctxWithToken("tok"), "r", "a")
+			var unauth *interceptors.UnauthenticatedError
+			if !errors.As(err, &unauth) {
+				t.Fatalf("expected *UnauthenticatedError, got %T: %v", err, err)
+			}
+			if strings.Contains(unauth.Reason, "signature") || strings.Contains(unauth.Reason, "expired") {
+				t.Errorf("the reason %q carries the resolver's error to the RPC caller", unauth.Reason)
+			}
+			if n := asked.Load(); n != 0 {
+				t.Errorf("the Cedar agent was asked %d times, want never", n)
+			}
+		})
+	}
+}
+
+// An id is a Cedar string literal: a quote or backslash in it is escaped, so
+// a crafted id names one entity of the configured type and nothing else.
+func TestFormatEntityUID_EscapesTheID(t *testing.T) {
+	cases := map[string]string{
+		"alice":                           `User::"alice"`,
+		`x"`:                              `User::"x\""`,
+		`x\`:                              `User::"x\\"`,
+		`x" || principal == User::"admin`: `User::"x\" || principal == User::\"admin"`,
+		"line\nbreak":                     `User::"line\u{a}break"`,
+		"nul\x00":                         `User::"nul\u{0}"`,
+		"tab\tand del\x7f":                `User::"tab\u{9}and del\u{7f}"`,
+	}
+	for id, want := range cases {
+		if got := formatEntityUID("User", id); got != want {
+			t.Errorf("formatEntityUID(%q) = %s, want %s", id, got, want)
+		}
+	}
+}
+
+func TestCedarVerify_PrincipalWithAQuote_IsEscapedOnTheWire(t *testing.T) {
+	var principal any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		principal = req["principal"]
+		_ = json.NewEncoder(w).Encode(map[string]string{"decision": "Allow"})
+	}))
+	defer srv.Close()
+
+	ep, err := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(func(context.Context, string) (string, error) { return `x"`, nil }))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_ = ep.Verify(ctxWithToken("tok"), "r", "a")
+	if principal != `User::"x\""` {
+		t.Errorf("principal = %v, want %s", principal, `User::"x\""`)
+	}
 }
