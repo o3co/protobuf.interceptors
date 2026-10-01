@@ -307,23 +307,33 @@ func TestHTTPEndpoints_Transport_DoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-// stallingTransport answers nothing until the request is abandoned.
-type stallingTransport struct{}
+// stallingTransport answers nothing until the request is abandoned, and
+// records that it was entered and why the request ended.
+type stallingTransport struct {
+	entered atomic.Int32
+	ended   chan error
+}
 
-func (stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (s *stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.entered.Add(1)
 	<-req.Context().Done()
+	s.ended <- req.Context().Err()
 	return nil, req.Context().Err()
 }
 
-// The endpoint's timeout bounds a request over a transport of the caller's.
+// The endpoint's timeout bounds a request over a transport of the caller's:
+// the request reaches the transport, and the timeout is what ends it.
 func TestHTTPEndpoints_Transport_KeepsTheTimeout(t *testing.T) {
+	const timeout = 50 * time.Millisecond
 	for _, b := range transported {
 		t.Run(b.name, func(t *testing.T) {
-			ep, err := b.build("http://localhost:1", stallingTransport{}, 50*time.Millisecond)
+			rt := &stallingTransport{ended: make(chan error, 1)}
+			ep, err := b.build("http://localhost:1", rt, timeout)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			done := make(chan error, 1)
+			start := time.Now()
 			go func() { done <- ep.Verify(ctxWithToken("tok"), "r", "a") }()
 			select {
 			case err := <-done:
@@ -332,6 +342,15 @@ func TestHTTPEndpoints_Transport_KeepsTheTimeout(t *testing.T) {
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("the timeout was not enforced")
+			}
+			if elapsed := time.Since(start); elapsed < timeout {
+				t.Errorf("the call ended after %v, before the %v timeout", elapsed, timeout)
+			}
+			if n := rt.entered.Load(); n != 1 {
+				t.Fatalf("the transport was entered %d times, want 1", n)
+			}
+			if cause := <-rt.ended; !errors.Is(cause, context.DeadlineExceeded) {
+				t.Errorf("the request ended with %v, want its deadline", cause)
 			}
 		})
 	}
