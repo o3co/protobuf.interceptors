@@ -536,3 +536,25 @@ func TestOPAAndCedar_OversizedAllow_IsAnError(t *testing.T) {
 		})
 	}
 }
+
+// A base URL's password stays out of the error, whatever is wrong with it.
+func TestHTTPEndpoints_BaseURLError_DoesNotCarryThePassword(t *testing.T) {
+	for _, c := range constructors {
+		for _, baseURL := range []string{
+			"https://svc:s3cret@verifier internal/",
+			"https://svc:s3cret@verifier.internal:port/",
+			"http://svc:s3cret@verifier.internal/",
+			"ftp://svc:s3cret@verifier.internal/",
+		} {
+			t.Run(c.name+"/"+baseURL, func(t *testing.T) {
+				err := c.build(baseURL, false)
+				if err == nil {
+					t.Fatalf("%q was accepted", baseURL)
+				}
+				if strings.Contains(err.Error(), "s3cret") {
+					t.Errorf("the error carries the password: %v", err)
+				}
+			})
+		}
+	}
+}
