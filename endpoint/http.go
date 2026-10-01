@@ -59,6 +59,19 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// maxLoggedBodySize bounds how much of a response body is logged, at Debug.
+const maxLoggedBodySize = 1024
+
+// truncatedBody returns body cut to maxLoggedBodySize, for a Debug log line.
+// A body is never logged at the default level: it may echo the request or
+// carry the reasons behind a decision.
+func truncatedBody(body []byte) string {
+	if len(body) > maxLoggedBodySize {
+		body = body[:maxLoggedBodySize]
+	}
+	return string(body)
+}
+
 // newHTTPClient returns the client an endpoint asks its backend with, over
 // transport, or http.DefaultTransport when it is nil. It follows no redirect,
 // whatever the transport: a 3xx is the answer, which every endpoint reads as

@@ -224,12 +224,8 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 
 	// Non-2xx responses are treated as internal errors.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		const maxLoggedBodySize = 1024
-		logBody := respBody
-		if len(logBody) > maxLoggedBodySize {
-			logBody = logBody[:maxLoggedBodySize]
-		}
-		e.logger.Error("error response from OPA", "status", resp.StatusCode, "body", string(logBody), "x-request-id", requestID)
+		e.logger.Error("error response from OPA", "status", resp.StatusCode, "x-request-id", requestID)
+		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
 		return fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode)
 	}
 

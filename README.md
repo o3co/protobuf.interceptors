@@ -377,9 +377,9 @@ deny `code` in `Decision.Code`.
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The
 caller still gets `PermissionDenied: access denied`, and no error this library
-returns carries a decision in its message. The endpoint does not log response
-bodies at its default level either — the error line names the status and the
-code, and the body is at `Debug`.
+returns carries a decision in its message. No endpoint logs response
+bodies at its default level either — the error line names the status, the
+request ID and (o3co) the code, and the body is at `Debug`.
 
 **What each rule reported.** A policy-backed rule's outcome carries an
 `Evaluation`, but only when the verifier sets

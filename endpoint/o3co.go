@@ -366,12 +366,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 		code = wire.Code
 	}
 	e.logger.Error("error response from authorization server", "status", resp.StatusCode, "code", code, "x-request-id", requestID)
-	const maxLoggedBodySize = 1024
-	logBody := respBody
-	if len(logBody) > maxLoggedBodySize {
-		logBody = logBody[:maxLoggedBodySize]
-	}
-	e.logger.Debug("error response body", "body", string(logBody), "x-request-id", requestID)
+	e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
 
 	if resp.StatusCode == http.StatusForbidden {
 		decision := wire.toDecision(requestID)
