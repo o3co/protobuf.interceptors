@@ -29,15 +29,18 @@ type DeniedError struct {
 	Decision *Decision
 }
 
+// Error returns Reason.
 func (e *DeniedError) Error() string { return e.Reason }
 
 // UnauthenticatedError indicates that the request lacks valid authentication.
 // The framework interceptors tell the RPC caller only Unauthenticated with a
 // fixed message, never Reason.
 type UnauthenticatedError struct {
+	// Reason describes why the credential was refused, for the service.
 	Reason string
 }
 
+// Error returns Reason.
 func (e *UnauthenticatedError) Error() string { return e.Reason }
 
 // UnconfirmedRevisionError reports an allow that was not accepted because it
@@ -53,6 +56,8 @@ type UnconfirmedRevisionError struct {
 	Decision *Decision
 }
 
+// Error returns a fixed message that names neither the decision nor the
+// requirement.
 func (e *UnconfirmedRevisionError) Error() string {
 	return "authorization decision could not be accepted"
 }
@@ -77,6 +82,7 @@ type ResourceValueError struct {
 	Reason string
 }
 
+// Error names the placeholder and the reason, never the refused value.
 func (e *ResourceValueError) Error() string {
 	return "resource placeholder <" + e.Placeholder + ">: " + e.Reason
 }
