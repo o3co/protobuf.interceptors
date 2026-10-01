@@ -414,7 +414,8 @@ nothing.
 An allow takes both the status and the body: a `200` whose body is a whole
 decision envelope with `decision: "allow"`. A body that is empty, not JSON,
 missing a key the verifier's contract requires, null or mistyped anywhere it
-types a value, larger than `WithO3coMaxResponseBodySize`, or cut off while
+types a value, an allow carrying a deny's `code` or `message` (even as null),
+larger than `WithO3coMaxResponseBodySize`, or cut off while
 reading is not a decision and reports nothing. On a `200` that makes the answer
 an error, not an allow, and so does any other `2xx` and a `200` carrying a
 whole deny (which is still reported to the observer). The interceptors map that

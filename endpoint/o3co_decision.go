@@ -98,17 +98,6 @@ func present(obj map[string]any, keys ...string) bool {
 	return true
 }
 
-// optionalString reads obj[key] where the contract may leave it out: absent
-// or null is "", and anything but a string is not the contract's.
-func optionalString(obj map[string]any, key string) (string, bool) {
-	v, has := obj[key]
-	if !has || v == nil {
-		return "", true
-	}
-	s, ok := v.(string)
-	return s, ok
-}
-
 func readError(obj map[string]any) (*wireDecision, bool) {
 	decision, ok1 := obj["decision"].(string)
 	code, ok2 := obj["code"].(string)
@@ -132,17 +121,21 @@ func readDecision(obj map[string]any) (*wireDecision, bool) {
 	w.Decision, _ = obj["decision"].(string)
 	switch w.Decision {
 	case "allow":
+		// An allow never carries code or message, not even as null: those
+		// are a deny's.
+		_, hasCode := obj["code"]
+		_, hasMessage := obj["message"]
+		if hasCode || hasMessage {
+			return nil, false
+		}
 	case "deny":
-		if !present(obj, "code", "message") {
+		var okCode, okMessage bool
+		w.Code, okCode = obj["code"].(string)
+		w.Message, okMessage = obj["message"].(string)
+		if !okCode || !okMessage {
 			return nil, false
 		}
 	default:
-		return nil, false
-	}
-	var okCode, okMessage bool
-	w.Code, okCode = optionalString(obj, "code")
-	w.Message, okMessage = optionalString(obj, "message")
-	if !okCode || !okMessage {
 		return nil, false
 	}
 	reason, ok := obj["reason"].(map[string]any)
