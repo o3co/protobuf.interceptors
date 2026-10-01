@@ -92,7 +92,7 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 
 		policy, err := getPolicyFromSpec(req.Spec())
 		if err != nil {
-			return nil, toConnectError(fmt.Errorf("failed to look up method policy: %w", err))
+			return nil, toConnectError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
 		}
 		if policy == nil {
 			// No policy defined — pass through.
@@ -118,7 +118,7 @@ func (p *policyOptionInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 		// a denial rather than a server fault. Anything else still maps to
 		// Internal — an unmapped error must never let the handler run.
 		if err != nil {
-			return nil, toConnectError(fmt.Errorf("failed to resolve resource: %w", err))
+			return nil, toConnectError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -137,7 +137,7 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 
 		policy, err := getPolicyFromSpec(conn.Spec())
 		if err != nil {
-			return toConnectError(fmt.Errorf("failed to look up method policy: %w", err))
+			return toConnectError(ctx, fmt.Errorf("failed to look up method policy: %w", err))
 		}
 		if policy == nil {
 			return next(ctx, conn)
@@ -151,7 +151,7 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 		if err != nil {
 			// See WrapUnary: a refused placeholder value is a denial,
 			// everything else is Internal.
-			return toConnectError(fmt.Errorf("failed to resolve resource: %w", err))
+			return toConnectError(ctx, fmt.Errorf("failed to resolve resource: %w", err))
 		}
 
 		ctx = interceptors.WithPolicy(ctx, resource, action)
@@ -240,7 +240,7 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 
 		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return nil, toConnectError(err)
+			return nil, toConnectError(ctx, err)
 		}
 
 		return next(ctx, req)
@@ -269,7 +269,7 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 
 		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
-			return toConnectError(err)
+			return toConnectError(ctx, err)
 		}
 
 		return next(ctx, &authStreamingHandlerConn{
@@ -307,7 +307,7 @@ func (c *authStreamingHandlerConn) Receive(msg any) error {
 		if m, ok := msg.(proto.Message); ok {
 			proto.Reset(m)
 		}
-		return toConnectError(err)
+		return toConnectError(c.ctx, err)
 	}
 	return nil
 }
