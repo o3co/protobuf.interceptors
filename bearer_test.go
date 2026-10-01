@@ -48,16 +48,21 @@ func TestInboundBearerToken_SchemeIsCaseInsensitive(t *testing.T) {
 // never read as an anonymous request.
 func TestInboundBearerToken_NotOneBearerCredential_IsUnauthenticated(t *testing.T) {
 	for name, values := range map[string][]string{
-		"several values":        {"Bearer a", "Bearer b"},
-		"several, one empty":    {"Bearer a", ""},
-		"empty value":           {""},
-		"scheme only":           {"Bearer"},
-		"scheme and space":      {"Bearer "},
-		"another scheme":        {"Basic dXNlcjpwYXNz"},
-		"scheme as prefix":      {"Bearerx tok"},
-		"token with space":      {"Bearer a b"},
-		"token with tab":        {"Bearer a\tb"},
-		"no space after scheme": {"Bearer\ttok"},
+		"several values":               {"Bearer a", "Bearer b"},
+		"several, one empty":           {"Bearer a", ""},
+		"empty value":                  {""},
+		"scheme only":                  {"Bearer"},
+		"scheme and space":             {"Bearer "},
+		"another scheme":               {"Basic dXNlcjpwYXNz"},
+		"scheme as prefix":             {"Bearerx tok"},
+		"token with space":             {"Bearer a b"},
+		"token with tab":               {"Bearer a\tb"},
+		"no space after scheme":        {"Bearer\ttok"},
+		"token with newline":           {"Bearer a\nb"},
+		"token with CR":                {"Bearer a\rb"},
+		"token with VT":                {"Bearer a\vb"},
+		"token with NBSP":              {"Bearer a\u00a0b"},
+		"token with ideographic space": {"Bearer a\u3000b"},
 	} {
 		token, err := interceptors.InboundBearerToken(values)
 		var unauth *interceptors.UnauthenticatedError
