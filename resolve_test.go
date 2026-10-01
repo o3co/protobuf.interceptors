@@ -8,6 +8,7 @@ import (
 	interceptors "github.com/o3co/protobuf.interceptors"
 	pb "github.com/o3co/protobuf.interceptors/schema"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestResolveResource_NoFieldMappings(t *testing.T) {
@@ -418,22 +419,75 @@ func TestResolveResource_SubstitutionIsSinglePass(t *testing.T) {
 	}
 }
 
-// TestResolveResource_UnknownPlaceholderIsLeftIntact pins that a template
-// placeholder with no mapping stays literal.
-func TestResolveResource_UnknownPlaceholderIsLeftIntact(t *testing.T) {
+// A placeholder left in the template after substitution would reach the
+// backend as literal text, naming a resource the policy never meant, so
+// resolution fails closed. It is a server fault, not a denial: the policy is
+// wrong, not the request.
+func TestResolveResource_PlaceholderLeftInTheTemplate_IsAnError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		policy *pb.Policy
+		msg    proto.Message
+	}{
+		"unmapped placeholder": {
+			policy: &pb.Policy{
+				Resource: "items/<id>/<unmapped>",
+				Action:   "read",
+				FieldMappings: []*pb.FieldMapping{
+					{Placeholder: "id", RequestField: "resource"},
+				},
+			},
+			msg: &pb.Policy{Resource: "7"},
+		},
+		"misspelled placeholder": {
+			policy: &pb.Policy{
+				Resource: "items/<idd>",
+				Action:   "read",
+				FieldMappings: []*pb.FieldMapping{
+					{Placeholder: "id", RequestField: "resource"},
+				},
+			},
+			msg: &pb.Policy{Resource: "7"},
+		},
+		"no field_mappings at all": {
+			policy: &pb.Policy{Resource: "items/<id>", Action: "read"},
+		},
+	} {
+		resource, _, err := interceptors.ResolveResource(tc.policy, tc.msg)
+		if err == nil {
+			t.Errorf("%s: resolved to %q, want an error", name, resource)
+			continue
+		}
+		var denied *interceptors.DeniedError
+		if errors.As(err, &denied) {
+			t.Errorf("%s: error %v is a denial, want a server fault", name, err)
+		}
+	}
+}
+
+// A bytes field is always hex-encoded, so two different values never resolve
+// to the same resource: 0xff and the two bytes "ff" are distinct.
+func TestResolveResource_BytesFieldIsHexEncoded(t *testing.T) {
 	policy := &pb.Policy{
-		Resource: "items/<id>/<unmapped>",
+		Resource: "blobs/<b>",
 		Action:   "read",
 		FieldMappings: []*pb.FieldMapping{
-			{Placeholder: "id", RequestField: "resource"},
+			{Placeholder: "b", RequestField: "value"},
 		},
 	}
-	resource, _, err := interceptors.ResolveResource(policy, &pb.Policy{Resource: "7"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resource != "items/7/<unmapped>" {
-		t.Errorf("resource = %q, want %q", resource, "items/7/<unmapped>")
+	for _, tc := range []struct {
+		value []byte
+		want  string
+	}{
+		{[]byte{0xff}, "blobs/ff"},
+		{[]byte("ff"), "blobs/6666"},
+	} {
+		resource, _, err := interceptors.ResolveResource(policy, wrapperspb.Bytes(tc.value))
+		if err != nil {
+			t.Fatalf("value %x: unexpected error: %v", tc.value, err)
+		}
+		if resource != tc.want {
+			t.Errorf("value %x: resource = %q, want %q", tc.value, resource, tc.want)
+		}
 	}
 }
 
