@@ -646,3 +646,66 @@ func TestVerifyWithDecision_DecisionVerifierReportsItsDecision(t *testing.T) {
 		t.Errorf("VerifyWithDecision = (%+v, %v)", d, err)
 	}
 }
+
+// --- Key case ---------------------------------------------------------------------
+//
+// The wire contract's keys are case-sensitive. A key in another case is one
+// the contract does not define, which a client ignores: it must not stand in
+// for the key it resembles.
+
+func TestO3coVerify_ADecisionKeyInAnotherCase_DoesNotGrant(t *testing.T) {
+	body := strings.Replace(denyWithEvaluation, `"decision": "deny",`, `"decision": "deny", "Decision": "allow",`, 1)
+	e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err == nil {
+		t.Fatal("expected an error: a 200 whose decision is deny is not an allow")
+	}
+	if d == nil || d.Code != "cedar_deny" {
+		t.Errorf("decision = %+v, want the deny", d)
+	}
+}
+
+func TestO3coRequireConfirmedRevision_KeysInAnotherCase_DoNotConfirm(t *testing.T) {
+	const confirmed = `{"code": "c", "message": "m", "passed": true, "evaluation": {"status": "completed", "revision": "` + testDigest + `"}}`
+	envelope := func(group string) string {
+		return `{"decision": "allow", "resource": "r", "action": "a", "reason": {"groups": [` + group + `]}}`
+	}
+	cases := map[string]string{
+		"a failing group that says Passed and SatisfiedBy": envelope(`{"ruleType": "cedar", "passed": false, "evaluated": [` + confirmed + `],
+			"Passed": true, "SatisfiedBy": ` + confirmed + `}`),
+		"a null revision beside a Revision": envelope(`{"ruleType": "cedar", "passed": true, "evaluated": [],
+			"satisfiedBy": {"code": "c", "message": "m", "passed": true,
+				"evaluation": {"status": "completed", "revision": null, "Revision": "` + testDigest + `"}}}`),
+		"a failed status beside a Status": envelope(`{"ruleType": "cedar", "passed": true, "evaluated": [],
+			"satisfiedBy": {"code": "c", "message": "m", "passed": true,
+				"evaluation": {"status": "failed", "revision": "` + testDigest + `", "Status": "completed"}}}`),
+		"a satisfying rule without an evaluation beside an Evaluation": envelope(`{"ruleType": "cedar", "passed": true, "evaluated": [],
+			"satisfiedBy": {"code": "c", "message": "m", "passed": true,
+				"Evaluation": {"status": "completed", "revision": "` + testDigest + `"}}}`),
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL, WithO3coRequireConfirmedRevision())
+			d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+			var unconfirmed *interceptors.UnconfirmedRevisionError
+			if !errors.As(err, &unconfirmed) {
+				t.Fatalf("expected *UnconfirmedRevisionError, got %T: %v (decision %+v)", err, err, d)
+			}
+		})
+	}
+}
+
+// The group reads as the exact keys say: failing, with no satisfying rule.
+func TestO3coVerifyDecision_PassedAndSatisfiedByInAnotherCase_AreIgnored(t *testing.T) {
+	body := `{"decision": "deny", "code": "c", "message": "m", "resource": "r", "action": "a", "reason": {"groups": [
+		{"ruleType": "cedar", "passed": false, "evaluated": [{"code": "c", "message": "m", "passed": false}],
+		 "Passed": true, "SatisfiedBy": {"code": "c", "message": "m", "passed": true}}]}}`
+	e := newTestEndpoint(t, serve(t, http.StatusForbidden, body).URL)
+	d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if d == nil || len(d.Groups) != 1 {
+		t.Fatalf("decision = %+v", d)
+	}
+	if g := d.Groups[0]; g.Passed || g.SatisfiedBy != nil {
+		t.Errorf("group = %+v, want failing with no satisfying rule", g)
+	}
+}
