@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	pb "github.com/o3co/protobuf.interceptors/schema"
 	"google.golang.org/protobuf/proto"
@@ -35,6 +34,9 @@ import (
 // ResolveResource, which discards them, and on both frameworks a streaming RPC
 // whose policy carries field_mappings is refused before resolution. See
 // README, "Extracted field forwarding".
+//
+// Every "<name>" in the resource template must have a field mapping, or
+// resolution fails. A bytes field resolves to its lowercase hex encoding.
 func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, action string, fields map[string]string, err error) {
 	if policy.Resource == "" {
 		return "", "", nil, fmt.Errorf("policy resource must not be empty")
@@ -77,7 +79,8 @@ func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, 
 
 // substituteResource replaces each "<name>" in template with values[name], in a
 // single left-to-right pass: substituted text is never rescanned, so a value is
-// only ever data. A "<name>" with no mapping is left as written.
+// only ever data. A "<name>" with no value is an error: left as written, it
+// would reach the backend as literal text naming a resource no policy meant.
 //
 // Every substituted value is validated first (see validateResourceValue).
 // Values the template does not use never enter the resource string, so they are
@@ -117,7 +120,7 @@ func substituteResource(template string, values map[string]string) (string, erro
 			}
 			b.WriteString(value)
 		} else {
-			b.WriteString(template[open : end+1])
+			return "", fmt.Errorf("resource placeholder <%s> has no field mapping", name)
 		}
 
 		i = end + 1
@@ -211,11 +214,9 @@ func extractField(msg proto.Message, fieldName string) (string, error) {
 	case protoreflect.StringKind:
 		return val.String(), nil
 	case protoreflect.BytesKind:
-		b := val.Bytes()
-		if utf8.Valid(b) {
-			return string(b), nil
-		}
-		return hex.EncodeToString(b), nil
+		// Always hex, so two different values never resolve to the same
+		// string: the byte 0xff and the two bytes "ff" stay distinct.
+		return hex.EncodeToString(val.Bytes()), nil
 	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind,
 		protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
 		return fmt.Sprintf("%d", val.Int()), nil
