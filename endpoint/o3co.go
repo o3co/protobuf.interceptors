@@ -254,13 +254,14 @@ func (e *o3coEndpoint) Verify(ctx context.Context, resource, action string) erro
 
 // VerifyDecision is Verify, and also returns the decision the verifier sent.
 //
-// The HTTP status decides; the body only adds to it. A 2xx is an allow and a
-// 403 a deny whatever the body holds, except that a 2xx whose decision member
-// is anything but allow fails closed — returning the decision when the body
-// is a whole one. A body that is empty, not a whole envelope as the wire
-// contract defines it, or past the size bound reports nothing: the decision
-// is nil and the verdict is the status's alone. On a deny the decision is also
-// on the *interceptors.DeniedError.
+// An allow takes both the status and the body: a 200 whose body is a whole
+// decision envelope, as the wire contract defines it, with decision "allow".
+// Any other 2xx, and a 200 whose body is empty, not a whole envelope, past the
+// size bound, cut off while reading or a whole deny, is an error, never an
+// allow. A 403 is a deny whatever its body holds. A body that is not a whole
+// envelope reports nothing, so the decision is then nil; a whole one is
+// returned with any verdict. On a deny the decision is also on the
+// *interceptors.DeniedError.
 func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action string) (*interceptors.Decision, error) {
 	// --- Retrieve bearer token from context -----------------------------------
 	token, err := getBearerToken(ctx)
@@ -324,15 +325,11 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 		respBody = nil
 	}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
-	var (
-		obj  map[string]any
-		wire *wireDecision
-	)
+	var wire *wireDecision
 	if int64(len(respBody)) > e.maxResponseBodySize {
 		respBody = respBody[:e.maxResponseBodySize]
 		e.logger.Debug("response body exceeds the size bound; not read as a decision", "status", resp.StatusCode, "x-request-id", requestID)
-	} else if o, ok := decodeObject(respBody); ok {
-		obj = o
+	} else if obj, ok := decodeObject(respBody); ok {
 		kind := errorEnvelope
 		if success || resp.StatusCode == http.StatusForbidden {
 			kind = decisionEnvelope
@@ -344,7 +341,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 
 	// --- Evaluate based on status code ----------------------------------------
 	if success {
-		return e.acceptAllow(obj, wire, resp.StatusCode, requestID)
+		return e.acceptAllow(wire, resp.StatusCode, requestID)
 	}
 
 	// The body — reason, evaluations, policy ids — stays off the default
@@ -378,16 +375,15 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	return nil, fmt.Errorf("authorization service error: %d", resp.StatusCode)
 }
 
-// acceptAllow decides what a 2xx answer amounts to. obj is its body decoded,
-// nil when the body is not a JSON object within the size bound, and wire the
-// envelope read from it, nil when it is not a whole one.
-func (e *o3coEndpoint) acceptAllow(obj map[string]any, wire *wireDecision, status int, requestID string) (*interceptors.Decision, error) {
+// acceptAllow decides what a 2xx answer amounts to. wire is the envelope read
+// from its body, nil when the body is not a whole one.
+func (e *o3coEndpoint) acceptAllow(wire *wireDecision, status int, requestID string) (*interceptors.Decision, error) {
 	decision := wire.toDecision(requestID)
-	// Read from obj rather than wire: a body too malformed to be an envelope
-	// still refuses when its verdict is anything but allow.
-	if verdict, claimed := obj["decision"]; claimed && verdict != "allow" {
-		e.logger.Error("authorization server answered a success status with a decision other than allow", "status", status, "x-request-id", requestID)
-		return decision, fmt.Errorf("authorization service error: %d with a decision other than allow", status)
+	// The body is not logged at the default level: it may carry the
+	// decision's reasons, evaluations and policy ids.
+	if status != http.StatusOK || wire == nil || wire.Decision != "allow" {
+		e.logger.Error("authorization server answered a success status without a whole allow", "status", status, "x-request-id", requestID)
+		return decision, fmt.Errorf("authorization service error: %d without a whole allow", status)
 	}
 	if e.requireConfirmedRevision && !decision.RevisionConfirmed() {
 		if !carriesEvaluation(decision) {
