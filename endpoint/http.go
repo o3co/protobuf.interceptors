@@ -59,6 +59,45 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// endpointControlledHeaders are the headers an endpoint sets from its own
+// state, which neither the request-ID header nor a static header may name.
+var endpointControlledHeaders = []string{"Content-Type", "Accept", "Authorization"}
+
+// mustBeRequestIDHeaderKey panics unless key is empty, which disables
+// forwarding, or an RFC 7230 token that is not one of
+// endpointControlledHeaders: a request ID sent under Authorization would
+// replace the bearer token.
+func mustBeRequestIDHeaderKey(key string) {
+	if key == "" {
+		return
+	}
+	if !validHeaderName(key) {
+		panic(fmt.Sprintf("request-ID header key %q is not an RFC 7230 token", key))
+	}
+	for _, name := range endpointControlledHeaders {
+		if strings.EqualFold(key, name) {
+			panic(fmt.Sprintf("request-ID header key %q is set by the endpoint", key))
+		}
+	}
+}
+
+// validHeaderName reports whether name is a non-empty RFC 7230 field-name.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // maxLoggedBodySize bounds how much of a response body is logged, at Debug.
 const maxLoggedBodySize = 1024
 

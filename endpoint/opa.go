@@ -71,7 +71,10 @@ func WithOPALogLevel(level slog.Level) OPAOption {
 
 // WithOPARequestIDHeaderKey sets the HTTP header key for forwarding the request ID to OPA.
 // Default is "x-request-id". Set to empty string to disable forwarding.
+// Panics if key is not an RFC 7230 token, or is Authorization, Content-Type
+// or Accept.
 func WithOPARequestIDHeaderKey(key string) OPAOption {
+	mustBeRequestIDHeaderKey(key)
 	return func(c *opaBuildConfig) {
 		c.requestIDHeaderKey = key
 	}

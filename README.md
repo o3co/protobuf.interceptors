@@ -283,7 +283,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | `WithO3coTimeout(d)` | HTTP client timeout. Default `10s`. |
 | `WithO3coMaxResponseBodySize(n)` | Cap on bytes read from the response body. Default 1 MiB. |
 | `WithO3coLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
-| `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. |
+| `WithO3coRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`; a key a `WithO3coHeaders` header also names makes `NewO3coEndpoint` return an error. The OPA and Cedar options check the same. |
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 | `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |

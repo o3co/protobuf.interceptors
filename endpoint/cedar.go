@@ -76,7 +76,10 @@ func WithCedarLogLevel(level slog.Level) CedarOption {
 
 // WithCedarRequestIDHeaderKey sets the HTTP header key for forwarding the request ID
 // to the Cedar agent. Default is "x-request-id". Set to empty string to disable forwarding.
+// Panics if key is not an RFC 7230 token, or is Authorization, Content-Type
+// or Accept.
 func WithCedarRequestIDHeaderKey(key string) CedarOption {
+	mustBeRequestIDHeaderKey(key)
 	return func(c *cedarBuildConfig) {
 		c.requestIDHeaderKey = key
 	}

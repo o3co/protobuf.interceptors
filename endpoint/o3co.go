@@ -76,7 +76,10 @@ func WithO3coLogLevel(level slog.Level) O3coOption {
 
 // WithO3coRequestIDHeaderKey sets the HTTP header key for forwarding the request ID.
 // Default is "x-request-id". Set to empty string to disable forwarding.
+// Panics if key is not an RFC 7230 token, or is Authorization, Content-Type
+// or Accept.
 func WithO3coRequestIDHeaderKey(key string) O3coOption {
+	mustBeRequestIDHeaderKey(key)
 	return func(c *o3coBuildConfig) {
 		c.requestIDHeaderKey = key
 	}
@@ -150,11 +153,6 @@ func WithO3coAllowInsecure() O3coOption {
 	}
 }
 
-// endpointControlledHeaders are the headers Verify sets from its own state, and
-// which a static header therefore must not overwrite. The request-ID header is
-// added to this set at construction, since its name is configurable.
-var endpointControlledHeaders = []string{"Content-Type", "Accept", "Authorization"}
-
 // validateStaticHeaders refuses a static header that would override one of the
 // endpoint's own, or that is not a well-formed header at all. Rejecting CR, LF
 // and NUL in a value here means a bad value fails at construction rather than
@@ -186,23 +184,6 @@ func validateStaticHeaders(headers http.Header, requestIDHeaderKey string) error
 		}
 	}
 	return nil
-}
-
-// validHeaderName reports whether name is a non-empty RFC 7230 field-name.
-func validHeaderName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // o3coEndpoint implements DecisionVerifier by calling the o3co auth.policy-verifier REST API.
