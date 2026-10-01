@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // contextServerStream wraps grpc.ServerStream and overrides Context() to
@@ -36,16 +37,18 @@ type contextServerStream struct {
 
 func (s *contextServerStream) Context() context.Context { return s.ctx }
 
-// authServerStream wraps grpc.ServerStream and re-checks authorization on each
-// RecvMsg before delegating to the underlying stream.
+// authServerStream wraps grpc.ServerStream and re-checks authorization on
+// each message RecvMsg returns, before handing it over.
 //
 // The stream is already authorized before the handler is invoked (see
-// VerificationStreamInterceptor). The re-check covers what the handler
-// receives: the resource and action are fixed, so re-asking the verifier on
-// each RecvMsg is what stops a stream that keeps receiving once a grant is
-// revoked or a token expires. Sends are not re-checked, so a server-streaming
-// RPC is checked before the handler runs and again when its generated handler
-// reads the one request, and never after that.
+// VerificationStreamInterceptor). The resource and action are fixed, so
+// re-asking the verifier per message is what stops a stream that keeps
+// receiving once a grant is revoked or a token expires. The check follows the
+// receive, so a message that arrives after revocation is cleared and never
+// handed over; a receive that fails has no message and is not checked. Sends
+// are not re-checked, so a server-streaming RPC is checked before the handler
+// runs and again when its generated handler reads the one request, and never
+// after that.
 type authServerStream struct {
 	grpc.ServerStream
 	ctx      context.Context
@@ -58,8 +61,14 @@ type authServerStream struct {
 
 func (s *authServerStream) Context() context.Context { return s.ctx }
 
-func (s *authServerStream) RecvMsg(m interface{}) error {
+func (s *authServerStream) RecvMsg(m any) error {
+	if err := s.ServerStream.RecvMsg(m); err != nil {
+		return err
+	}
 	if _, err := s.cfg.verify(s.ctx, s.verifier, s.resource, s.action, nil); err != nil {
+		if msg, ok := m.(proto.Message); ok {
+			proto.Reset(msg)
+		}
 		s.log.Error("authorization re-check failed on RecvMsg",
 			"resource", s.resource,
 			"action", s.action,
@@ -67,7 +76,7 @@ func (s *authServerStream) RecvMsg(m interface{}) error {
 		)
 		return toGRPCError(err)
 	}
-	return s.ServerStream.RecvMsg(m)
+	return nil
 }
 
 // PolicyOptionStreamInterceptor returns a gRPC StreamServerInterceptor that
@@ -119,7 +128,7 @@ func PolicyOptionStreamInterceptor(opts ...Option) grpc.StreamServerInterceptor 
 
 // VerificationStreamInterceptor returns a gRPC StreamServerInterceptor that
 // reads Policy from the stream context and authorizes the stream before the
-// handler is invoked, then re-checks on each RecvMsg.
+// handler is invoked, then re-checks each message RecvMsg returns.
 //
 // As with VerificationInterceptor, the decision that opened the stream is on
 // the handler's context, and WithDecisionObserver receives the opening check
