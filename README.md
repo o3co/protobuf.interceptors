@@ -303,6 +303,9 @@ if d, ok := interceptors.DecisionFromContext(ctx); ok {
 }
 ```
 
+A group whose `Restricts` is set narrowed the allow and granted nothing: leave
+it out where the record says what granted it.
+
 **For every check, denials included.** A denied RPC's handler never runs, so
 the verification interceptors also take an observer. It sees every check — on
 gRPC streams, the opening check and each `RecvMsg` re-check — with the
@@ -363,16 +366,20 @@ it is, and a whole deny sent that way is still reported to the observer.
 
 `WithO3coRequireConfirmedRevision()` refuses an allow unless it is established
 against confirmed revisions (`Decision.RevisionConfirmed()`). That means every
-group passed, and the rule that satisfied each group — its `satisfiedBy` —
-reports a completed evaluation with a well-formed revision. Alternatives tried
-before the satisfying rule are not consulted. A refused allow returns
+group passed, at least one of them grants, and the rule that satisfied each
+granting group — its `satisfiedBy` — reports a completed evaluation with a
+well-formed revision. Alternatives tried before the satisfying rule are not
+consulted. A restricting group (`RuleGroup.Restricts`, the verifier's
+`restricts: true` — a delegated token's range, for one) narrows what the
+granting groups allow and grants nothing, so what satisfied it is not
+consulted either, and an allow whose groups all restrict is refused. A refused allow returns
 `*interceptors.UnconfirmedRevisionError`, which the interceptors map to
 `Internal`: the verifier allowed, and the service could not establish what that
 rests on. Denials are unaffected.
 
 Against a verifier that has not set `evaluationInResponse = "include"`, this
-refuses **every** allow. It also refuses any allow that a rule without a policy
-source satisfied, so it suits deployments whose every rule group is
+refuses **every** allow. It also refuses any allow whose granting group a rule
+without a policy source satisfied, so it suits deployments whose every rule group is
 policy-backed. The verifier cannot say which it is before a decision is
 requested, so this is not checked at construction. Instead, the first refused
 allow whose response carried no evaluation at all logs one error naming the
