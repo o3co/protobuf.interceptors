@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -63,12 +64,23 @@ func (s *authServerStream) RecvMsg(m any) error {
 		return err
 	}
 	if _, err := s.cfg.verify(s.ctx, s.verifier, s.resource, s.action, nil); err != nil {
-		if msg, ok := m.(proto.Message); ok {
-			proto.Reset(msg)
-		}
+		clearMessage(m)
 		return toGRPCError(s.ctx, err)
 	}
 	return nil
+}
+
+// clearMessage zeroes a received message that must not be handed over: a
+// proto message is reset, and any other pointer, as a non-proto codec decodes
+// into, has its target set to the zero value.
+func clearMessage(m any) {
+	if msg, ok := m.(proto.Message); ok {
+		proto.Reset(msg)
+		return
+	}
+	if rv := reflect.ValueOf(m); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		rv.Elem().SetZero()
+	}
 }
 
 // PolicyOptionStreamInterceptor returns a gRPC StreamServerInterceptor that
