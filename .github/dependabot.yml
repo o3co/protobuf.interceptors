@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # One entry for the three modules: the core at the root, and the gRPC and
+  # ConnectRPC modules, each with a go.mod of its own.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/"
+      - "/grpc"
+      - "/connectrpc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Routine minor/patch churn in few pull requests; majors stay ungrouped so
+    # each remains a deliberate review.
+    groups:
+      minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # The gRPC and ConnectRPC modules require the core module and build
+      # against the checkout's own copy (replace => ../). The require is
+      # raised by the release process, in the pull request that follows a core
+      # release (see AGENTS.md, "Release process"), not by a weekly bump.
+      - dependency-name: "github.com/o3co/protobuf.interceptors"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
