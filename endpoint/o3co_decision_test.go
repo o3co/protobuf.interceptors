@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -299,7 +300,10 @@ func TestO3coVerify_ResponseWithoutEvaluation_BehavesAsBefore(t *testing.T) {
 	}
 }
 
-func TestO3coVerify_BodyThatIsNotADecision_LeavesTheStatusToDecide(t *testing.T) {
+// An allow is a 200 carrying a whole allow. A 200 whose body is anything
+// less is not one, and is not a deny either: the verifier did not say what it
+// decided. A 403 stays a deny whatever its body holds.
+func TestO3coVerify_BodyThatIsNotAWholeDecision(t *testing.T) {
 	cases := []struct {
 		name   string
 		status int
@@ -323,8 +327,8 @@ func TestO3coVerify_BodyThatIsNotADecision_LeavesTheStatusToDecide(t *testing.T)
 			var denied *interceptors.DeniedError
 			switch tc.status {
 			case http.StatusOK:
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
+				if err == nil || errors.As(err, &denied) {
+					t.Errorf("got %T: %v, want an error that is not a denial", err, err)
 				}
 			case http.StatusForbidden:
 				if !errors.As(err, &denied) {
@@ -335,8 +339,58 @@ func TestO3coVerify_BodyThatIsNotADecision_LeavesTheStatusToDecide(t *testing.T)
 	}
 }
 
+// Only 200 is the allow status: any other 2xx is an error, even with a whole
+// allow in its body.
+func TestO3coVerify_2xxOtherThan200_IsAnError(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo, http.StatusNoContent, http.StatusPartialContent, 299} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, status, allowWithEvaluation).URL)
+			_, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+			var denied *interceptors.DeniedError
+			if err == nil || errors.As(err, &denied) {
+				t.Errorf("status %d: got %T: %v, want an error that is not a denial", status, err, err)
+			}
+		})
+	}
+}
+
+// A 200 whose body breaks off is not an allow, even when what arrived is one.
+func TestO3coVerify_200WhoseBodyFailsToRead_IsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(allowWithEvaluation)+100))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(allowWithEvaluation))
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newTestEndpoint(t, srv.URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err == nil || d != nil {
+		t.Errorf("VerifyDecision = (%+v, %v), want (nil, an error)", d, err)
+	}
+}
+
+// A 200 that is not an allow is logged at the default level, by status and
+// request ID, and without its body.
+func TestO3coVerify_200ThatIsNotAWholeAllow_IsLoggedWithoutTheBody(t *testing.T) {
+	e := newTestEndpoint(t, serve(t, http.StatusOK, `{"decision": "allow", "secret": "leak-me"}`).URL)
+	logs := captureLogs(e)
+
+	_ = e.Verify(ctxWithTokenAndRequestID("tok", "req-1"), "r", "a")
+	out := logs.String()
+	if strings.Contains(out, "leak-me") {
+		t.Errorf("default-level log carries the body:\n%s", out)
+	}
+	for _, want := range []string{"level=ERROR", "status=200", "req-1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default-level log lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 // Past the size bound the body is not read as a decision at all — a deny
-// stays a deny, an allow stays an allow with nothing reported.
+// stays a deny, and an allow is not one.
 func TestO3coVerify_OversizedBody_IsNotADecision(t *testing.T) {
 	limit := WithO3coMaxResponseBodySize(64)
 
@@ -349,8 +403,8 @@ func TestO3coVerify_OversizedBody_IsNotADecision(t *testing.T) {
 
 	allow := newTestEndpoint(t, serve(t, http.StatusOK, allowWithEvaluation).URL, limit)
 	d, err = allow.VerifyDecision(ctxWithToken("tok"), "r", "a")
-	if err != nil || d != nil {
-		t.Errorf("oversized allow = (%+v, %v), want (nil, nil)", d, err)
+	if err == nil || errors.As(err, &denied) || d != nil {
+		t.Errorf("oversized allow = (%+v, %v), want (nil, an error that is not a denial)", d, err)
 	}
 }
 
@@ -391,7 +445,8 @@ func TestO3coVerify_2xxWhoseDecisionIsNotAllow_FailsClosed(t *testing.T) {
 }
 
 // Every key the wire contract requires must be there, and not null, or the
-// body reports nothing — never part of a decision.
+// body reports nothing — never part of a decision — and a 200 carrying it is
+// not an allow.
 func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testing.T) {
 	const ev = `"evaluation": {"status": "completed", "revision": "` + testDigest + `"}`
 	const outcome = `{"code": "c", "message": "m", "passed": true, ` + ev + `}`
@@ -425,8 +480,8 @@ func TestO3coVerifyDecision_EnvelopeMissingARequiredKey_IsNotADecision(t *testin
 		t.Run(name, func(t *testing.T) {
 			e := newTestEndpoint(t, serve(t, http.StatusOK, body).URL)
 			d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if err == nil {
+				t.Error("expected an error: a 200 without a whole allow is not an allow")
 			}
 			if d != nil {
 				t.Errorf("decision = %+v, want nil", d)
@@ -505,10 +560,8 @@ func TestO3coRequireConfirmedRevision_AcceptsAConfirmedAllow(t *testing.T) {
 
 func TestO3coRequireConfirmedRevision_RefusesAnUnconfirmedAllow(t *testing.T) {
 	cases := map[string]string{
-		"no evaluation":  allowWithoutEvaluation,
-		"null revision":  strings.ReplaceAll(allowWithEvaluation, `"revision": "`+testDigest+`"`, `"revision": null`),
-		"no decision":    "",
-		"not a decision": `{"ok": true}`,
+		"no evaluation": allowWithoutEvaluation,
+		"null revision": strings.ReplaceAll(allowWithEvaluation, `"revision": "`+testDigest+`"`, `"revision": null`),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

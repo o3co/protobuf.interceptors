@@ -39,11 +39,8 @@ func TestNewO3coEndpoint_ValidURL_AppendsVerifyPath(t *testing.T) {
 	}
 }
 
-func TestO3coVerify_200_ReturnsNil(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+func TestO3coVerify_200WithAWholeAllow_ReturnsNil(t *testing.T) {
+	srv := serve(t, http.StatusOK, allowWithoutEvaluation)
 
 	ep, _ := NewO3coEndpoint(srv.URL)
 	err := ep.Verify(ctxWithToken("valid-token"), "resource", "read")
@@ -216,7 +213,7 @@ func TestO3coVerify_WithStaticHeaders_ForwardsThem(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callerToken = r.Header.Get("x-caller-token")
 		subjectAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(allowWithoutEvaluation))
 	}))
 	defer srv.Close()
 
@@ -241,7 +238,7 @@ func TestWithO3coHeaders_MergesAcrossCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		first = r.Header.Get("x-caller-token")
 		second = r.Header.Get("x-tenant")
-		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(allowWithoutEvaluation))
 	}))
 	defer srv.Close()
 

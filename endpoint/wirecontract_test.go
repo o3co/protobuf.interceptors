@@ -77,8 +77,17 @@ func TestWireContract_StatusesMeanWhatTheVerifierMeans(t *testing.T) {
 	isDenied := func(err error) bool { var d *interceptors.DeniedError; return errors.As(err, &d) }
 	isUnauth := func(err error) bool { var u *interceptors.UnauthenticatedError; return errors.As(err, &u) }
 
-	check("allow", c.Status["allow"], "", func(err error) bool { return err == nil })
+	allow := mustJSON(t, fill(t, "an allow", c.Decision.Required, map[string]any{
+		"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{}},
+	}))
+	check("allow", c.Status["allow"], allow, func(err error) bool { return err == nil })
+	check("allow status without a decision", c.Status["allow"], "", func(err error) bool {
+		return err != nil && !isDenied(err) && !isUnauth(err)
+	})
 	check("deny", c.Status["deny"], "", isDenied)
+	if status := c.Status["allow"]; status != http.StatusOK {
+		t.Errorf("the contract's allow status is %d; this endpoint reads an allow only from 200", status)
+	}
 	for _, code := range []string{c.Codes["missingToken"], c.Codes["invalidToken"], c.Codes["unsupportedScheme"]} {
 		check("unauthenticated/"+code, c.Status["unauthenticated"], errorEnvelope(code), isUnauth)
 	}
@@ -299,9 +308,12 @@ func TestWireContract_AnEnvelopeMissingARequiredKeyIsNotADecision(t *testing.T) 
 							target[key] = nil
 						}
 						e := newTestEndpoint(t, serve(t, status, mustJSON(t, env)).URL)
-						d, _ := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+						d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
 						if d != nil {
 							t.Errorf("decision = %+v, want nil", d)
+						}
+						if err == nil {
+							t.Error("expected an error: an envelope that is not whole neither allows nor is silent")
 						}
 					})
 				}
