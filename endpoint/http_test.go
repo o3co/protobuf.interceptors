@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 )
@@ -203,5 +204,143 @@ func TestHTTPEndpoints_RefusePlaintextToAnotherHostUnlessAllowed(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// transported builds each HTTP endpoint over rt, with the given timeout.
+var transported = []struct {
+	name   string
+	build  func(baseURL string, rt http.RoundTripper, timeout time.Duration) (VerifierEndpoint, error)
+	allow  string
+	nilOpt func()
+}{
+	{
+		name: "o3co",
+		build: func(baseURL string, rt http.RoundTripper, timeout time.Duration) (VerifierEndpoint, error) {
+			return NewO3coEndpoint(baseURL, WithO3coTransport(rt), WithO3coTimeout(timeout))
+		},
+		allow:  allowWithoutEvaluation,
+		nilOpt: func() { WithO3coTransport(nil) },
+	},
+	{
+		name: "opa",
+		build: func(baseURL string, rt http.RoundTripper, timeout time.Duration) (VerifierEndpoint, error) {
+			return NewOPAEndpoint(baseURL, "authz/allow", WithOPATransport(rt), WithOPATimeout(timeout))
+		},
+		allow:  `{"result": true}`,
+		nilOpt: func() { WithOPATransport(nil) },
+	},
+	{
+		name: "cedar",
+		build: func(baseURL string, rt http.RoundTripper, timeout time.Duration) (VerifierEndpoint, error) {
+			return NewCedarEndpoint(baseURL, WithCedarTransport(rt), WithCedarTimeout(timeout))
+		},
+		allow:  `{"decision": "Allow"}`,
+		nilOpt: func() { WithCedarTransport(nil) },
+	},
+}
+
+// countingTransport counts the requests it carries, and hands them to next.
+type countingTransport struct {
+	calls atomic.Int32
+	next  http.RoundTripper
+}
+
+func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.calls.Add(1)
+	return c.next.RoundTrip(req)
+}
+
+func TestHTTPEndpoints_Transport_CarriesTheRequests(t *testing.T) {
+	for _, b := range transported {
+		t.Run(b.name, func(t *testing.T) {
+			rt := &countingTransport{next: http.DefaultTransport}
+			ep, err := b.build(serve(t, http.StatusOK, b.allow).URL, rt, time.Second)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := ep.Verify(ctxWithToken("tok"), "r", "a"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if n := rt.calls.Load(); n != 1 {
+				t.Errorf("the transport carried %d requests, want 1", n)
+			}
+		})
+	}
+}
+
+// The endpoint, not the transport, decides that a redirect is not followed.
+func TestHTTPEndpoints_Transport_DoesNotFollowRedirects(t *testing.T) {
+	for _, b := range transported {
+		t.Run(b.name, func(t *testing.T) {
+			var reached atomic.Int32
+			elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached.Add(1)
+				_, _ = w.Write([]byte(b.allow))
+			}))
+			t.Cleanup(elsewhere.Close)
+			redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+			}))
+			t.Cleanup(redirecting.Close)
+
+			rt := &countingTransport{next: http.DefaultTransport}
+			ep, err := b.build(redirecting.URL, rt, time.Second)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := ep.Verify(ctxWithToken("tok"), "r", "a"); err == nil {
+				t.Error("expected an error for a redirect")
+			}
+			if n := reached.Load(); n != 0 {
+				t.Errorf("the redirect target was asked %d times, want never", n)
+			}
+			if n := rt.calls.Load(); n != 1 {
+				t.Errorf("the transport carried %d requests, want 1", n)
+			}
+		})
+	}
+}
+
+// stallingTransport answers nothing until the request is abandoned.
+type stallingTransport struct{}
+
+func (stallingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// The endpoint's timeout bounds a request over a transport of the caller's.
+func TestHTTPEndpoints_Transport_KeepsTheTimeout(t *testing.T) {
+	for _, b := range transported {
+		t.Run(b.name, func(t *testing.T) {
+			ep, err := b.build("http://localhost:1", stallingTransport{}, 50*time.Millisecond)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- ep.Verify(ctxWithToken("tok"), "r", "a") }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Error("expected an error for a request that timed out")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the timeout was not enforced")
+			}
+		})
+	}
+}
+
+func TestHTTPEndpoints_NilTransport_Panics(t *testing.T) {
+	for _, b := range transported {
+		t.Run(b.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("expected a panic for a nil transport")
+				}
+			}()
+			b.nilOpt()
+		})
 	}
 }
