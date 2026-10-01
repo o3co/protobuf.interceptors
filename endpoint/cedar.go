@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -290,8 +289,7 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	}
 	defer resp.Body.Close()
 
-	// Read the response body up to maxResponseBodySize bytes.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize))
+	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
 	if err != nil {
 		if ctx.Err() != nil {
 			return requestError(ctx, "reading the Cedar agent response failed", err)
@@ -309,11 +307,16 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 		return fmt.Errorf("the Cedar agent returned non-2xx status: %d", resp.StatusCode)
 	}
 
+	if oversized {
+		e.logger.Error("Cedar agent response body exceeds the size bound", "status", resp.StatusCode, "x-request-id", requestID)
+		return errors.New("the Cedar agent response body exceeds the size bound")
+	}
+
 	// Only the exact key decision, holding "Allow", allows: the agent's keys
 	// are case-sensitive, and a key in another case is not the decision.
 	obj, ok := decodeObject(respBody)
 	if !ok {
-		return fmt.Errorf("failed to parse Cedar agent response: not a JSON object")
+		return errors.New("failed to parse Cedar agent response: not a JSON object")
 	}
 	if obj["decision"] == "Allow" {
 		return nil

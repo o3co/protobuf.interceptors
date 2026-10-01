@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -109,6 +111,22 @@ func requestError(ctx context.Context, what string, err error) error {
 		return fmt.Errorf("%s: %w", what, ctxErr)
 	}
 	return fmt.Errorf("%s: %v", what, err)
+}
+
+// readBounded reads body up to max bytes, and reports whether it held more.
+// It reads one byte past max to tell a body at the bound from one past it:
+// a body cut at the bound is not read as a decision, since the part of it
+// within the bound can be one.
+func readBounded(body io.Reader, max int64) (data []byte, oversized bool, err error) {
+	limit := max
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	data, err = io.ReadAll(io.LimitReader(body, limit))
+	if int64(len(data)) > max {
+		return data[:max], true, err
+	}
+	return data, false, err
 }
 
 // maxLoggedBodySize bounds how much of a response body is logged, at Debug.

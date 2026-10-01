@@ -19,9 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -308,14 +306,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	}
 	defer resp.Body.Close()
 
-	// Read response body up to maxResponseBodySize bytes (memory protection).
-	// One byte more tells a body at the bound from one past it, which is not
-	// read as a decision: a truncated decision would be part of one.
-	limit := e.maxResponseBodySize
-	if limit < math.MaxInt64 {
-		limit++
-	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, requestError(ctx, "reading the response failed", err)
@@ -325,8 +316,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
 	var wire *wireDecision
-	if int64(len(respBody)) > e.maxResponseBodySize {
-		respBody = respBody[:e.maxResponseBodySize]
+	if oversized {
 		e.logger.Debug("response body exceeds the size bound; not read as a decision", "status", resp.StatusCode, "x-request-id", requestID)
 	} else if obj, ok := decodeObject(respBody); ok {
 		kind := errorEnvelope

@@ -18,8 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -210,8 +210,7 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 	}
 	defer resp.Body.Close()
 
-	// Read the response body up to maxResponseBodySize bytes.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, e.maxResponseBodySize))
+	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
 	if err != nil {
 		if ctx.Err() != nil {
 			return requestError(ctx, "reading the OPA response failed", err)
@@ -229,11 +228,16 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 		return fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode)
 	}
 
+	if oversized {
+		e.logger.Error("OPA response body exceeds the size bound", "status", resp.StatusCode, "x-request-id", requestID)
+		return errors.New("OPA response body exceeds the size bound")
+	}
+
 	// Only the exact key result, holding JSON true, allows: OPA's keys are
 	// case-sensitive, and a key in another case is not the decision.
 	obj, ok := decodeObject(respBody)
 	if !ok {
-		return fmt.Errorf("failed to parse OPA response: not a JSON object")
+		return errors.New("failed to parse OPA response: not a JSON object")
 	}
 	switch result := obj["result"].(type) {
 	case nil:
@@ -243,7 +247,7 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 			return nil
 		}
 	default:
-		return fmt.Errorf("failed to parse OPA response: result is not a boolean")
+		return errors.New("failed to parse OPA response: result is not a boolean")
 	}
 	return &interceptors.DeniedError{Reason: "access denied by policy"}
 }
