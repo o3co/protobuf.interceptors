@@ -458,3 +458,22 @@ func TestStreamChain_RevokedAfterOpen_NextMessageIsNotDelivered(t *testing.T) {
 		t.Errorf("observer saw %d checks, want the opening one and one per message", len(events))
 	}
 }
+
+// A message decoded by a codec other than protobuf is cleared too.
+func TestVerificationStreamInterceptor_RefusedNonProtoMessage_IsCleared(t *testing.T) {
+	interceptor := policygrpc.VerificationStreamInterceptor(revokedAfter(1))
+	stream := &fakeServerStream{ctx: policyStreamCtx(), recv: func(m any) error {
+		*m.(*string) = "arrived after revocation"
+		return nil
+	}}
+	msg := new(string)
+	err := interceptor(nil, stream, streamInfo(), func(_ any, ss grpc.ServerStream) error {
+		return ss.RecvMsg(msg)
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+	if *msg != "" {
+		t.Errorf("the refused message reached the handler: %q", *msg)
+	}
+}
