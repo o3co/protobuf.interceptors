@@ -44,7 +44,7 @@ The repository holds three Go modules:
 | `github.com/o3co/protobuf.interceptors/connectrpc` | `connectrpc/` | the ConnectRPC interceptors |
 
 - **Dependencies point one way**: the framework modules depend on the core; the core never imports them. Inside the core, `endpoint` depends on the root package, never the reverse. What the two framework modules share — resolution, credential parsing, the error types — lives in the core, so the two cannot drift; what is framework-specific stays in its module.
-- **The framework modules build against the checkout's core.** Each `go.mod` has `replace github.com/o3co/protobuf.interceptors => ../`, so a change to the core and its use in a framework module land in one pull request and are tested together. Its `require` names a **published** core version, and that is what a consumer gets: a `replace` applies only in the module where it is written. So the `require` must name a core version that has every API the module uses. Between a core change and the next core release it does not; `release.yml` refuses to release a framework module until it does (see [Release Process](#release-process)).
+- **The framework modules build against the checkout's core.** Each `go.mod` has `replace github.com/o3co/protobuf.interceptors => ../`, so a change to the core and its use in a framework module land in one pull request and are tested together. Its `require` names a **published** core version, and that is what a consumer gets: a `replace` applies only in the module where it is written. So the `require` must name a core version that has every API the module uses. Between a core change and the next core release it does not; `release.yml` fails the run, and creates no GitHub Release, for a framework tag whose `require` lags (see [Release Process](#release-process)).
 - **`testproto/` is in the core module** so the core and both framework modules test against one service. That is why the core's `go.mod` requires `google.golang.org/grpc` and `connectrpc.com/connect`; no other core package imports either, so a consumer that imports only the core compiles neither.
 
 ## Wire Contract with auth.policy-verifier
@@ -104,7 +104,8 @@ The interceptors refuse rather than guess. Each rule holds on both frameworks:
 - **`field_mappings` on a streaming method are refused** (`Internal`): no single request message exists when the stream opens.
 - **A stream is checked before its handler runs, and re-checked after each message it receives.** A message that fails the re-check is cleared and never handed to the handler. A failed receive has no message and is not re-checked; sends are not re-checked.
 - **A malformed credential is refused** with `Unauthenticated` before any backend is asked: several `authorization` values, another scheme, an empty token, or whitespace in the token. A method with no policy is not checked, so it is not refused there.
-- **The HTTP endpoints** send plaintext only to loopback unless the `With…AllowInsecure` option is given, follow no redirect, and read at most the configured body size. An option given invalid input panics at the call (a programmer error); a constructor given an unusable URL or configuration returns an error.
+- **The HTTP endpoints** send plaintext only to loopback unless the `With…AllowInsecure` option is given and follow no redirect. `With…MaxResponseBodySize(n)` accepts up to `n` bytes; one more byte is read to detect a larger body, which is never read as an answer (an error on OPA and Cedar; on o3co no decision, so a `200` fails).
+- **An option whose argument is invalid on its own** — a non-positive timeout or body size, a nil transport or principal resolver, a request-ID header name that is not an RFC 7230 token or is one the endpoint sets — panics at the call (a programmer error). **The constructor returns an error** for what it can only judge as a whole: an unusable base URL (empty, unparsable, not `http`/`https`, no host, or `http` to a host other than loopback without `With…AllowInsecure`), a static header that is malformed or collides with one the endpoint sets, a missing Cedar principal resolver, an empty OPA policy path.
 
 ## Release Process
 
@@ -126,16 +127,21 @@ A release that changes the core takes two stages, because the framework modules'
 
 A framework module released without a core change skips stages 1 and 2, as long as it already requires the newest core release.
 
-`.github/workflows/release.yml` runs on each tag. It reads the module and version from the tag, refuses a version that is not `v` + SemVer without build metadata or whose major would need a `/vN` module path, and vets and tests the module. For a framework module it also refuses a `go.mod` that does not require the newest core release (the newest full release for a full release), then drops the `replace` and builds, vets and tests against the published core — what a consumer gets. It then creates the GitHub Release with generated notes (a prerelease for a version with a `-` suffix) and asks `proxy.golang.org` for the version.
+`.github/workflows/release.yml` runs on each tag, in two jobs. `validate`, with read-only access, reads the module and version from the tag; refuses a version that is not `v` + SemVer without build metadata or whose major would need a `/vN` module path; refuses a tag whose commit is not on `develop`; and vets and tests the module. For a framework module it also refuses a `go.mod` that does not require the newest valid core tag — the newest full release for a full release, the newest version, prereleases included, for a prerelease — then drops the `replace` and builds, vets and tests against the published core, which is what a consumer gets. Only when `validate` passes does `publish`, the one job that may write, create the GitHub Release with `gh release create`: notes generated from the module's previous full release, a prerelease for a version with a `-` suffix, and marked latest only for the newest full core release. It then asks `proxy.golang.org` for the version.
 
 ### Rules
 
 - **There is no CHANGELOG.** The GitHub Release notes are the record. Pull request titles follow Conventional Commits, with `!` on a breaking change, so the generated notes show it.
 - **While the major version is `0`, a breaking change bumps the minor** (`v0.4.x` → `v0.5.0`), never the patch; a feature bumps the minor; a fix alone bumps the patch.
-- **A published version is permanent**: the module proxy serves it once fetched, whatever happens to the tag. A broken one is not deleted but retracted, with a `retract` directive and a rationale comment in that module's `go.mod`; the retraction takes effect when the module's next version is published.
+- **A published version is permanent**: the module proxy serves it once fetched, whatever happens to the tag. A broken one is not deleted but retracted, with a `retract` directive and a rationale comment in that module's `go.mod`; the retraction takes effect when the module's next release (not a prerelease) is published, and that release's notes call the retraction out.
+- **A failed release run creates no GitHub Release, but the tag is already a version**: the module proxy fetches a tag on first request, whatever the run said. Delete a refused tag at once (`git push origin :refs/tags/<tag>`), fix the cause and tag again; a tag that may already have been fetched is not reused — retract it and release the next patch.
 - **Agents never push a tag without the user's explicit approval.** Propose the tag commands, and after a tag is pushed, watch the run (`gh run list --workflow=release.yml`, `gh run watch`).
 
 ## Tooling
+
+### Dependency updates
+
+Dependabot (`.github/dependabot.yml`) opens weekly updates for the three modules and the workflow actions. Minor and patch updates are grouped; majors and security updates arrive one directory at a time. A dependency bumped in the core alone can make the framework modules' `go mod tidy -diff` fail, since they build the core through the `replace`: run `go mod tidy` in all three modules on such a pull request. The tool versions pinned inside the workflows — staticcheck in `ci.yml`, govulncheck in `govulncheck.yml` — are not tracked by Dependabot; staticcheck's pin must move when the `go` directive passes 1.25, the newest Go that staticcheck 2025.1.1 supports.
 
 ### Tests and checks
 
