@@ -392,3 +392,36 @@ func TestOPAAndCedar_ErrorResponseBody_IsLoggedOnlyAtDebug(t *testing.T) {
 		})
 	}
 }
+
+var requestIDHeaderKeyOptions = map[string]func(key string){
+	"o3co":  func(key string) { WithO3coRequestIDHeaderKey(key) },
+	"opa":   func(key string) { WithOPARequestIDHeaderKey(key) },
+	"cedar": func(key string) { WithCedarRequestIDHeaderKey(key) },
+}
+
+// The request-ID header is an RFC 7230 token, and not one of the headers the
+// endpoint sets from its own state.
+func TestRequestIDHeaderKey_ThatIsNotATokenOrIsControlled_Panics(t *testing.T) {
+	for name, option := range requestIDHeaderKeyOptions {
+		for _, key := range []string{"bad header", "x-request-id\r\nx-injected", "x:id", "Authorization", "authorization", "Content-Type", "ACCEPT"} {
+			t.Run(name+"/"+key, func(t *testing.T) {
+				defer func() {
+					if recover() == nil {
+						t.Errorf("expected a panic for request-ID header %q", key)
+					}
+				}()
+				option(key)
+			})
+		}
+	}
+}
+
+func TestRequestIDHeaderKey_TokenOrEmpty_IsAccepted(t *testing.T) {
+	for name, option := range requestIDHeaderKeyOptions {
+		for _, key := range []string{"", "x-request-id", "X-Correlation-ID", "traceparent"} {
+			t.Run(name+"/"+key, func(t *testing.T) {
+				option(key)
+			})
+		}
+	}
+}
