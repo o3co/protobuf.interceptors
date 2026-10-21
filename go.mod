@@ -1,6 +1,6 @@
 module github.com/o3co/protobuf.interceptors
 
-go 1.25.5
+go 1.26.0
 
 require (
 	connectrpc.com/connect v1.21.0
@@ -9,8 +9,8 @@ require (
 )
 
 require (
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260831171406-18b4a7587f8a // indirect
 )
