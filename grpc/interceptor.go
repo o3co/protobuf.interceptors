@@ -23,6 +23,7 @@ import (
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
+	"github.com/o3co/protobuf.interceptors/internal/methodset"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -35,6 +36,46 @@ type config struct {
 	observer        interceptors.DecisionObserver
 	recheckInterval time.Duration
 	now             func() time.Time
+	requirePolicy   bool
+	exempt          methodset.Set
+}
+
+// WithRequirePolicy has a verification interceptor refuse an RPC whose method
+// declares no policy option, except a method exempt names, instead of letting
+// it through unchecked. The refusal is Internal, before the handler runs, and
+// wraps interceptors.ErrNoPolicy; no backend is asked and the observer is not
+// called. A method with a policy is checked as before.
+//
+// An exempt entry is a full method name, "/package.Service/Method", or a
+// service, "/package.Service/", which exempts each of its methods. Nothing is
+// exempt unless listed, the grpc-go health and reflection services included:
+// "/grpc.health.v1.Health/", "/grpc.reflection.v1.ServerReflection/" and
+// "/grpc.reflection.v1alpha.ServerReflection/". An exemption admits only a
+// method with no policy; a method with a policy is always checked. Later
+// calls add to the exemptions of earlier ones.
+//
+// Each interceptor applies the option to the RPCs it sees, so give it to both
+// VerificationInterceptor and VerificationStreamInterceptor.
+//
+// Panics if an entry is not of either form.
+func WithRequirePolicy(exempt ...string) Option {
+	set, err := methodset.Parse(exempt)
+	if err != nil {
+		panic("WithRequirePolicy: " + err.Error())
+	}
+	return func(c *config) {
+		c.requirePolicy = true
+		c.exempt = c.exempt.Union(set)
+	}
+}
+
+// checkUnannotated decides an RPC to fullMethod, which declares no policy: an
+// error when a policy is required and the method is not exempt.
+func (c *config) checkUnannotated(fullMethod string) error {
+	if !c.requirePolicy || c.exempt.Contains(fullMethod) {
+		return nil
+	}
+	return fmt.Errorf("method %s: %w", fullMethod, interceptors.ErrNoPolicy)
 }
 
 // WithStreamRecheckInterval has VerificationStreamInterceptor re-check a
@@ -120,11 +161,12 @@ func withInbound(ctx context.Context) (context.Context, error) {
 // PolicyOptionInterceptor returns a gRPC UnaryServerInterceptor that reads
 // proto method options and injects the resolved Policy into context.
 //
-// It resolves with interceptors.ResolveResource, so extracted field_mappings
-// values fill the resource template and are then discarded, unlike
-// connectrpc.PolicyOptionInterceptor, which forwards them. A field mapping
-// whose placeholder the template does not use therefore never reaches the
-// verifier. See README, "Extracted field forwarding".
+// It resolves with interceptors.ResolveResourceWithFields and attaches the
+// extracted values with interceptors.WithExtractedFields, as
+// connectrpc.PolicyOptionInterceptor does, so a field mapping whose
+// placeholder is absent from the resource template still reaches an endpoint
+// that reads them (in package endpoint, the o3co and OPA endpoints). See
+// README, "Extracted field forwarding".
 func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 	var cache sync.Map
 
@@ -149,7 +191,11 @@ func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 			if !ok {
 				return nil, toGRPCError(ctx, errors.New("request does not implement proto.Message"))
 			}
-			resource, action, err = interceptors.ResolveResource(policy, msg)
+			var fields map[string]string
+			resource, action, fields, err = interceptors.ResolveResourceWithFields(policy, msg)
+			if err == nil && len(fields) > 0 {
+				ctx = interceptors.WithExtractedFields(ctx, fields)
+			}
 		} else {
 			resource, action, err = interceptors.ResolveResource(policy, nil)
 		}
@@ -189,9 +235,13 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 			return nil, toGRPCError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
-		// Get the policy from context; if none, pass through (no policy = no enforcement).
+		// No policy in context means the method declares none: it passes
+		// through unchecked, unless WithRequirePolicy refuses it.
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
+			if err := cfg.checkUnannotated(info.FullMethod); err != nil {
+				return nil, toGRPCError(ctx, err)
+			}
 			return handler(ctx, req)
 		}
 

@@ -57,7 +57,7 @@ service PostService {
     };
   }
 
-  // No policy option = no authorization check
+  // No policy option = no authorization check, unless WithRequirePolicy is given
   rpc HealthCheck(Empty) returns (Status);
 }
 ```
@@ -91,10 +91,28 @@ RPC request
 ポリシーは protobuf レジストリにあるメソッドのディスクリプターから読む:
 
 - **ディスクリプターがあり、ポリシーオプションが設定されている** — RPC は検査される。
-- **ディスクリプターがあり、ポリシーオプションが無い** — RPC は検査されずに通過する。grpc-go では、ヘルスサービスとリフレクションサービス（`google.golang.org/grpc/health`、`google.golang.org/grpc/reflection`）がこれにあたる。
+- **ディスクリプターがあり、ポリシーオプションが無い** — RPC は検査されずに通過する。ただし検証インターセプターがポリシーを要求する場合は別である（[ポリシーの要求](#ポリシーの要求)を参照）。grpc-go では、ヘルスサービスとリフレクションサービス（`google.golang.org/grpc/health`、`google.golang.org/grpc/reflection`）がこれにあたる。
 - **ディスクリプターが無い** — ポリシーが分からないので、RPC はハンドラーの実行前に `Internal` で**拒否**される。gRPC では `protoregistry.GlobalFiles` に無いメソッドがこれにあたる: `grpc.UnknownServiceHandler` が扱うもの、`.proto` が登録されていない手書きの `ServiceDesc` が扱うもの、そしてディスクリプターが `GlobalFiles` ではなく gogo のレジストリに登録される gogo/protobuf 生成のサービス。ConnectRPC では `connect.WithSchema` なしで作ったハンドラーがこれにあたる: 手組みのハンドラー、`connect.WithSchema` を出力しない古い protoc-gen-connect-go のコード、そしてスキーマを設定しない ConnectRPC 自身の `connectrpc.com/grpchealth` と `connectrpc.com/grpcreflect` のハンドラー。これらはインターセプターなしでマウントすること（[ConnectRPC](#connectrpc)を参照）。
 
 サーバーリフレクションはメソッドオプションを公開するので、リフレクションサービスに到達できるクライアントは、すべてのメソッドのポリシーオプション — リソーステンプレート、アクション、フィールドマッピング — を読める。
+
+### ポリシーの要求
+
+デフォルトでは、ポリシーオプションの無いメソッドは通過するので、注釈を書き忘れるとそのメソッドは開いたままになる。検証インターセプターに `WithRequirePolicy` を与えると、grpc-go の `authz` パッケージや Envoy の RBAC フィルターと同じく、これが逆になる: ディスクリプターにポリシーオプションの無いメソッドは、ハンドラーの実行前に `Internal` で拒否される — ディスクリプターが無い場合と同じく、書き忘れはサービスの不備である。どのバックエンドにも問い合わせず、オブザーバーも呼ばない。インターセプターが返すエラーは `interceptors.ErrNoPolicy` に unwrap できる。
+
+```go
+policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
+    "/grpc.health.v1.Health/",
+    "/grpc.reflection.v1.ServerReflection/",
+    "/grpc.reflection.v1alpha.ServerReflection/",
+    "/foo.v1.FooService/Ping",
+))
+```
+
+- **除外の指定**は、メソッド `/package.Service/Method` か、サービス全体 `/package.Service/` である。それ以外の形の指定は、オプションの呼び出しで panic する: 指定はプログラムの定数だからである。除外が通すのはポリシーの無いメソッドだけで、ポリシーのあるメソッドは常に検査される。
+- **列挙しない限り何も除外されない。** grpc-go では、ヘルスサービスとリフレクションサービスはポリシーの無いメソッドなので、到達できるようにするには上のように列挙すること。
+- **ConnectRPC では** `policyconnect.VerificationInterceptor` に与え、指定は procedure を名指す。ConnectRPC の `grpchealth` と `grpcreflect` のハンドラーはスキーマを持たないので、このオプションが働く前に `PolicyOptionInterceptor` が拒否し、除外しても通らない: インターセプターなしでマウントすること（[ConnectRPC](#connectrpc)を参照）。
+- gRPC では、`VerificationInterceptor` と `VerificationStreamInterceptor` の両方に与えること。それぞれが自分の扱う RPC に適用する。
 
 ### プレースホルダーの値
 
@@ -112,7 +130,7 @@ RPC request
 - **id の構文に合わせて書いた `ResourceParser` を verifier に設定し**、呼び出し側でその構文にエンコードする。これには auth.policy-verifier（o3co エンドポイント）が必要である。
 - **問題の値がリソースに代入されないようにポリシーを組み替える。** リソース文字列で DID を名指しする代わりに、RPC が実際に持つ型を守り（`resource: "subscriptions"`、`action: "read"`）、Bearer トークンからすでに持っているアイデンティティに対してバックエンドに判定させる。verifier、OPA、Cedar はトークンを見られるが、static エンドポイントはリソースとアクションしか照合しないので、この判定はできない。
 
-4 つ目の道 — フィールドマッピングは残し、そのプレースホルダーをリソーステンプレートから外して、値をリクエストコンテキストとして運ぶ — は**移植性が無い**: ConnectRPC と o3co エンドポイントの組み合わせでしか機能しない。頼る前に[抽出フィールドの転送](#抽出フィールドの転送)を読むこと。
+4 つ目の道 — フィールドマッピングは残し、そのプレースホルダーをリソーステンプレートから外して、値をリクエストコンテキストとして運ぶ — は、どちらのフレームワークでも unary RPC で o3co か OPA エンドポイントを使う場合に機能し、Cedar と static エンドポイントでは機能せず、ストリームでも機能しない。頼る前に[抽出フィールドの転送](#抽出フィールドの転送)を読むこと。
 
 代入はテンプレートに対する 1 回の走査である: それ自体が `<some-placeholder>` と綴られた値はデータのまま残り、別のマッピングによって書き換えられることはない。
 
@@ -120,7 +138,7 @@ RPC request
 
 ### プレースホルダーが読めるリクエストフィールド
 
-`request_field` はリクエストメッセージの**トップレベル**のフィールドを `.proto` のフィールド名で指す。ネストしたメッセージへのドット区切りのパスは読まない。フィールドは次のいずれかの種類の単一値（`repeated` でも `map` でもない）でなければならない:
+`request_field` はリクエストメッセージのフィールドを `.proto` のフィールド名で指すか、ネストしたメッセージへたどるフィールド名を `.` でつないだパスで指す: `post.author.id` はリクエストの `post` の `author` の `id` を読む。フィールド名は `.` を含めないので、パスが指すフィールドは高々 1 つである。最後以外の各セグメントは単一のメッセージフィールドでなければならない。最後のセグメント（リーフ）は次のいずれかの種類の単一値（`repeated` でも `map` でもない）でなければならない:
 
 | 種類 | 代入される形 |
 |---|---|
@@ -130,7 +148,13 @@ RPC request
 | `bool` | `true` または `false` |
 | `bytes` | 小文字の 16 進数 |
 
-それ以外の種類 — `enum`、`float`、`double`、メッセージ — と、メッセージに無いフィールドは `Internal` で解決に失敗する。リクエストが設定しなかったフィールドはデフォルト値（proto3 ではゼロ値）に解決される: `0` と `false` はプレースホルダーを埋めるが、空の `string` と `bytes` は空として拒否される。
+それ以外の種類 — `enum`、`float`、`double`、メッセージ — と、メッセージに無いフィールドは `Internal` で解決に失敗する。リクエストが設定しなかったリーフはデフォルト値（proto3 ではゼロ値）に解決される: `0` と `false` はプレースホルダーを埋めるが、空の `string` と `bytes` は空として拒否される。パスのリーフはトップレベルのフィールドとまったく同じに読まれ、その値は同じく[セグメントの文法](#プレースホルダーの値)で検査される。
+
+リーフに至る途中では:
+
+- **リクエストが設定しなかったメッセージは拒否される。** `*interceptors.ResourceValueError` となり、どのバックエンドにも問い合わせずに `PermissionDenied` になる — テンプレートがプレースホルダーを使わないマッピングでも同じである。設定するかどうかは呼び出し元が選べるので、デフォルト値に解決することはない。
+- **`repeated` や `map` のフィールド、スカラー、メッセージに無い名前**は `Internal` で解決に失敗する: ポリシーが、リクエストの型には存在し得ないパスを指している。パス全体をまず型に対して検査するので、途中のメッセージをリクエストが設定したかどうかによらない。
+- **ストリーミングのメソッド**は、パスを含め、引き続き `field_mappings` をそのまま拒否する（[ストリーミング](#ストリーミング)を参照）。
 
 `bytes` フィールドは常に小文字の 16 進エンコードとして代入される: バイト `0xff` は `ff` に、2 バイトの `"ff"` は `6666` に解決されるので、異なる 2 つの値が同じリソースを指すことはない。
 
@@ -140,16 +164,25 @@ RPC request
 
 | 経路 | 抽出される | コンテキストに置かれる | 判定に届く |
 |---|---|---|---|
-| ConnectRPC unary | はい | はい | **o3co** エンドポイント経由でのみ |
+| ConnectRPC unary | はい | はい | **o3co** と **OPA** エンドポイント経由で |
 | ConnectRPC streaming | — | — | いいえ — `field_mappings` は `Internal` で拒否 |
-| gRPC unary | はい | **いいえ、破棄される** | **いいえ** |
+| gRPC unary | はい | はい | **o3co** と **OPA** エンドポイント経由で |
 | gRPC streaming | — | — | いいえ — `field_mappings` は `Internal` で拒否 |
 
-`ResolveResourceWithFields` で解決し、その結果を `interceptors.WithExtractedFields` で付けるのは `connectrpc.PolicyOptionInterceptor` だけである。gRPC の unary インターセプターはフィールドを捨てる `ResolveResource` で解決し、両方のストリームインターセプターは `field_mappings` を持つポリシーを何も解決する前に拒否する（[ストリーミング](#ストリーミング)を参照）。そして 4 つのバックエンドのうち、コンテキストを読み出すのは `endpoint.NewO3coEndpoint` だけで、それを `POST /verify` の `context` オブジェクトとして送る — OPA、Cedar、static エンドポイントは見ない。
+unary のポリシーインターセプター `policygrpc.PolicyOptionInterceptor` と `policyconnect.PolicyOptionInterceptor` は、どちらも `ResolveResourceWithFields` で解決し、値が 1 つ以上あれば、プレースホルダー名をキーとして `interceptors.WithExtractedFields` で付ける。両方のストリームインターセプターは、`field_mappings` を持つポリシーを何も解決する前に拒否する（[ストリーミング](#ストリーミング)を参照）。4 つのバックエンドのそれぞれの扱い:
 
-**したがって gRPC unary では、プレースホルダーをリソーステンプレートから外しても、その値が判定に使えるようにはならない — 値が消えるだけである**: 解決はもう値を拒否しないが、verifier はその値なしで判定する。以前より情報の少ない問いであり、拒否よりも悪い。（ポリシーにマッピングを残した gRPC ストリームは引き続き `Internal` で失敗する。[ストリーミング](#ストリーミング)を参照。）バックエンドが対応する上記の対処のいずれかを使うこと。
+| エンドポイント | 値をどうするか |
+|---|---|
+| o3co | `POST /verify` の `context` オブジェクトとして送る。verifier の `RequestContextAttributeCollector` が昇格させるのは運用者が宣言したキーだけで、それ以外のキーは無視される。 |
+| OPA | 文字列のオブジェクト `input.context` として送る。値が無ければ `input` に `context` キーは無い。 |
+| Cedar | 送らない: リクエストのコンテキストは空である。スキーマに対してリクエストを検証する Cedar エージェントは、スキーマが宣言しないコンテキスト属性を拒否するので、送るとそうした構成が動かなくなる。 |
+| static | リソースとアクションだけを照合する。 |
 
-gRPC unary の経路は、ConnectRPC のように値を転送しない。ストリームインターセプターが `field_mappings` を拒否するのは、どちらのフレームワークでも別個の制限である: ポリシーインターセプターはハンドラーがリクエストメッセージを読む前に動き、クライアントストリームや双方向ストリームには単一のリクエストメッセージが無い。
+**値は主張である。** 値は呼び出し元が書くリクエストメッセージから来ており、Bearer トークンと照合されたものではない。ポリシーはそれを呼び出し元の主張として — たとえばトークンのサブジェクトと突き合わせて — 扱い、確定した事実として扱ってはならない。
+
+**o3co では、verifier が受け付ける `context` に上限がある**: `maxContextEntries`（既定 64。すべてのプロパティを数える）と `maxContextValueLength`（既定 1024。任意の文字列の文字数で、キー名を含む）で、超えると `400` が返る。ボディ全体には `maxBodyBytes`（既定 65536 バイト）の上限があり、超えると `413` が返る。3 つとも verifier の設定で決まり、インターセプターはどちらの応答も `Internal` に変換する: RPC は拒否され、値なしで判定されることはない。マッピングの数と、それが運びうる値の長さは verifier の上限に収めること。
+
+ストリームインターセプターが `field_mappings` を拒否するのは、どちらのフレームワークでも同じである: ポリシーインターセプターはハンドラーがリクエストメッセージを読む前に動き、クライアントストリームや双方向ストリームには単一のリクエストメッセージが無い。
 
 [auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
 
@@ -234,7 +267,7 @@ path, handler := foopbconnect.NewFooServiceHandler(
 mux.Handle(path, handler)
 ```
 
-`connectrpc.com/grpchealth` と `connectrpc.com/grpcreflect` はハンドラーを `connect.WithSchema` なしで作るので、これらのインターセプターの後ろでは、すべてのヘルスチェックとリフレクションのリクエストが `Internal` で拒否される。インターセプターは、すべてのハンドラーで共有する 1 つのオプションとしてではなく、自分のサービスのハンドラーにだけ渡すこと:
+`connectrpc.com/grpchealth` と `connectrpc.com/grpcreflect` はハンドラーを `connect.WithSchema` なしで作るので、これらのインターセプターの後ろでは、`WithRequirePolicy` で何を除外しても、すべてのヘルスチェックとリフレクションのリクエストが `Internal` で拒否される。インターセプターは、すべてのハンドラーで共有する 1 つのオプションとしてではなく、自分のサービスのハンドラーにだけ渡すこと:
 
 ```go
 // The service is checked.
@@ -271,7 +304,7 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | `*interceptors.UnauthenticatedError`（読み取れないクレデンシャルを含む） | `Unauthenticated` | `unauthenticated` |
 | RPC 自身のコンテキストがキャンセルされたときの `context.Canceled` | `Canceled` | `request canceled` |
 | RPC 自身のデッドラインが過ぎたときの `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
-| それ以外すべて — バックエンドの失敗（RPC が生きている間にエンドポイント自身の HTTP タイムアウトが発火した場合を含む）、ディスクリプターの無いメソッド、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| それ以外すべて — バックエンドの失敗（RPC が生きている間にエンドポイント自身の HTTP タイムアウトが発火した場合を含む）、ディスクリプターの無いメソッド、`WithRequirePolicy` の下でのポリシーの無いメソッド（`interceptors.ErrNoPolicy`）、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
 完全なエラーは、すべての検査について `WithDecisionObserver` のオブザーバーに渡る（[判定の記録](#判定の記録)を参照）。インターセプターが返すエラーもそれに unwrap できるので、これらより外側に置いたインターセプターは `errors.As` / `errors.Is` で取り出せる — オブザーバーが見ないポリシー参照や解決の失敗は、そこでログできる。インターセプターは自らはログを書かない。
 
@@ -355,7 +388,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### OPA エンドポイント
 
-`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` — トークンは送られたまま — で問い合わせるので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
+`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` と、RPC に抽出された `field_mappings` の値があればそれを `"context"` として問い合わせる（[抽出フィールドの転送](#抽出フィールドの転送)を参照）。トークンは送られたままなので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
 
 | オプション | 効果 |
 |---|---|
@@ -369,7 +402,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### Cedar エンドポイント
 
-`NewCedarEndpoint(baseURL, opts...)` は `POST {baseURL}/v1/is_authorized` に、リゾルバーが返した principal、アクション、リソースを、それぞれ Cedar のエンティティ UID（デフォルトのプレフィックスでは `User::"alice"`、`Action::"read"`、`Resource::"posts/1"`）として、空のコンテキストとともに問い合わせる。許可するのは、レスポンスの `decision` キー（この綴りの大文字小文字どおり）が `"Allow"` のときだけである。それ以外の decision は deny、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。`WithCedarPrincipalResolver` が無ければコンストラクターはエラーを返す。
+`NewCedarEndpoint(baseURL, opts...)` は `POST {baseURL}/v1/is_authorized` に、リゾルバーが返した principal、アクション、リソースを、それぞれ Cedar のエンティティ UID（デフォルトのプレフィックスでは `User::"alice"`、`Action::"read"`、`Resource::"posts/1"`）として、空のコンテキストとともに問い合わせる — 抽出された `field_mappings` の値は送らない（[抽出フィールドの転送](#抽出フィールドの転送)を参照）。許可するのは、レスポンスの `decision` キー（この綴りの大文字小文字どおり）が `"Allow"` のときだけである。それ以外の decision は deny、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。`WithCedarPrincipalResolver` が無ければコンストラクターはエラーを返す。
 
 | オプション | 効果 |
 |---|---|
@@ -395,7 +428,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 Bearer トークンとリクエスト ID は `context.Context` で渡され、フレームワーク別の `VerificationInterceptor` が設定する（[Bearer トークンとリクエスト ID](#bearer-トークンとリクエスト-id)を参照）。
 
-インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。抽出された `field_mappings` の値を読むのは o3co エンドポイントだけで、フレームワークがそれをコンテキストに置いていれば `POST /verify` の `context` オブジェクトとして転送する。OPA はリソース、アクション、トークンで、Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
+インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。o3co と OPA のエンドポイントは抽出された `field_mappings` の値も読み、それぞれ `POST /verify` の `context` オブジェクト、`input.context` として送る。Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
 
 ## 判定の記録
 
@@ -465,6 +498,7 @@ allow にはステータスとボディの両方が必要である: `decision: "
 - **送信はメッセージが出ていく前に検査する**ので、拒否されたメッセージは送信されない。
 - **受信はメッセージが届いた後に検査する**ので、取り消し後に届いたメッセージは消去されてハンドラーには渡らない。どのコーデックがデコードしたかは問わない。失敗した受信 — クライアントが自分の側を閉じた、ストリームが壊れた — にはメッセージが無く、再検査しない。
 - **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、verifier の失敗なら `Internal`（[エラー](#エラー)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
+- **完了しなかった再検査もストリームを終わらせる。** 再検査の中でオブザーバーまたはエンドポイントが panic すると、その panic は再検査を行った送信または受信を通じてハンドラーに届く。その送信が運ぶはずだったメッセージは送信されず、その受信が検査したメッセージはハンドラーが panic を recover しても消去される。panic を recover して続けるハンドラーには、以後の送信と受信がすべて拒否され、ストリームは `Internal` で終わる。ハンドラーが recover しない panic はインターセプターの外に出る。
 
 再検査 1 回につき verifier の呼び出しが 1 回かかり、送信や受信はそれを待つ。多くのメッセージを運ぶストリームでこれを抑えるには、どちらのフレームワークでも検証インターセプターに `WithStreamRecheckInterval(d)` を与える:
 

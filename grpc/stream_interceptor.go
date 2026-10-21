@@ -47,7 +47,10 @@ func (s *contextServerStream) Context() context.Context { return s.ctx }
 // checked before the message goes out, so a refused message is never sent. A
 // receive is checked after the message arrives, so a refused message is
 // cleared and never handed over; a receive that fails has no message and is
-// not checked. The gate decides which messages are checked and makes the
+// not checked. A check that does not return — the observer or the endpoint
+// panicked — is a failure: a send it guarded is not sent, a message it checked
+// is cleared even when the handler recovers the panic, and the stream fails
+// with Internal. The gate decides which messages are checked and makes the
 // first failure final: every later send or receive returns it without asking
 // the verifier or using the transport.
 type authServerStream struct {
@@ -62,23 +65,39 @@ func (s *authServerStream) Context() context.Context { return s.ctx }
 
 func (s *authServerStream) SendMsg(m any) error {
 	if err := s.gate.Check(func() error { return s.check(interceptors.CheckSend) }); err != nil {
-		return err
+		return gateError(s.ctx, err)
 	}
 	return s.ServerStream.SendMsg(m)
 }
 
 func (s *authServerStream) RecvMsg(m any) error {
 	if err := s.gate.Err(); err != nil {
-		return err
+		return gateError(s.ctx, err)
 	}
 	if err := s.ServerStream.RecvMsg(m); err != nil {
 		return err
 	}
+	allowed := false
+	defer func() {
+		if !allowed {
+			clearMessage(m)
+		}
+	}()
 	if err := s.gate.Check(func() error { return s.check(interceptors.CheckReceive) }); err != nil {
-		clearMessage(m)
-		return err
+		return gateError(s.ctx, err)
 	}
+	allowed = true
 	return nil
+}
+
+// gateError is the stream's failure as the caller is told it. A check that
+// returned an error mapped it already; one that did not return left
+// streamcheck.ErrCheckIncomplete, which is mapped here.
+func gateError(ctx context.Context, err error) error {
+	if errors.Is(err, streamcheck.ErrCheckIncomplete) {
+		return toGRPCError(ctx, err)
+	}
+	return err
 }
 
 // clearMessage zeroes a received message that must not be handed over: a
@@ -168,7 +187,10 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
-			// No policy — pass through.
+			// No policy — pass through, unless WithRequirePolicy refuses it.
+			if err := cfg.checkUnannotated(info.FullMethod); err != nil {
+				return toGRPCError(ctx, err)
+			}
 			wrapped := &contextServerStream{ServerStream: ss, ctx: ctx}
 			return handler(srv, wrapped)
 		}
@@ -207,8 +229,8 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			},
 		}
 		err = handler(srv, wrapped)
-		if denied := gate.Err(); denied != nil {
-			return denied
+		if failed := gate.Err(); failed != nil {
+			return gateError(hctx, failed)
 		}
 		return err
 	}
