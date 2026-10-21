@@ -38,8 +38,7 @@ type o3coBuildConfig struct {
 	requestIDHeaderKey       string
 	headers                  http.Header
 	requireConfirmedRevision bool
-	allowInsecure            bool
-	transport                http.RoundTripper
+	reach                    reachConfig
 }
 
 // O3coOption configures the o3co endpoint.
@@ -139,17 +138,54 @@ func WithO3coTransport(rt http.RoundTripper) O3coOption {
 		panic("transport must not be nil")
 	}
 	return func(c *o3coBuildConfig) {
-		c.transport = rt
+		c.reach.transport = rt
 	}
 }
 
 // WithO3coAllowInsecure permits a plaintext http base URL to a host other
 // than loopback. Every verify request carries the subject's bearer token, and
 // over plaintext anyone on the path can read and replay it, so
-// NewO3coEndpoint refuses such a URL without this option.
+// NewO3coEndpoint refuses such a URL without this option or
+// WithO3coAllowPlainInternal.
+//
+// A base URL listed with WithO3coAllowPlainInternal is still reached only at
+// private addresses.
 func WithO3coAllowInsecure() O3coOption {
 	return func(c *o3coBuildConfig) {
-		c.allowInsecure = true
+		c.reach.allowInsecure = true
+	}
+}
+
+// WithO3coAllowPlainInternal permits a plaintext http base URL whose host
+// and port are among hostPorts, and reaches it only at private addresses:
+// 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 and fc00::/7,
+// never a cloud metadata address. An entry is written "pdp:8181" or
+// "[fd00::5]:8181". A host name matches in any case and with or without one
+// trailing dot, an address in any spelling of it, and a base URL without a
+// port has port 80. A base URL whose host name is not ASCII matches none.
+//
+// The addresses are checked as each connection is made: the host is
+// resolved, and unless every address it resolves to is private none is
+// connected to, so a name that comes to resolve elsewhere is refused. The
+// addresses are tried in turn within the endpoint's timeout, each but the
+// last with a share of it, and the connection goes straight to a checked
+// address, through no proxy.
+// Every request still carries the subject's bearer token in the clear
+// on that network: list only backends on a network trusted against reading and
+// changing what crosses it.
+//
+// A listed base URL is checked so even under WithO3coAllowInsecure, and
+// NewO3coEndpoint returns an error for one given WithO3coTransport, which the
+// check cannot run in. Later calls add to earlier ones, and a call with no
+// entry lists nothing. Panics if an entry is not a host and port, its port
+// is not a number from 1 to 65535 written without a leading zero, or its host
+// is neither an address on a private network nor an ASCII host name of
+// letters, digits, hyphens and underscores whose last label is not all
+// digits.
+func WithO3coAllowPlainInternal(hostPorts ...string) O3coOption {
+	pairs := mustBePlainInternalPairs(hostPorts)
+	return func(c *o3coBuildConfig) {
+		c.reach.addPlainInternal(pairs)
 	}
 }
 
@@ -204,7 +240,9 @@ type o3coEndpoint struct {
 
 // NewO3coEndpoint constructs an o3coEndpoint that calls POST {baseURL}/verify.
 // It returns an error unless baseURL names http or https and a host, and
-// refuses http to a host other than loopback without WithO3coAllowInsecure.
+// refuses http to a host other than loopback unless WithO3coAllowPlainInternal
+// lists its host and port or WithO3coAllowInsecure is given. It returns an
+// error for a listed base URL given WithO3coTransport.
 //
 // The endpoint it returns is also a DecisionVerifier.
 func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, error) {
@@ -218,7 +256,7 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 		opt(cfg)
 	}
 
-	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithO3coAllowInsecure")
+	base, client, err := cfg.reach.client(baseURL, cfg.timeout, "O3co")
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +269,7 @@ func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, erro
 	}
 
 	return &o3coEndpoint{
-		httpClient:               newHTTPClient(cfg.timeout, cfg.transport),
+		httpClient:               client,
 		verifyURL:                base.String(),
 		maxResponseBodySize:      cfg.maxResponseBodySize,
 		logger:                   cfg.logger,

@@ -34,8 +34,9 @@ backend and carries out its answer.
   sends or receives — and refusing the RPC unless it allows;
 - telling the caller the outcome as a status code with a fixed message, and
   handing the service the full error and the decision behind it;
-- the HTTP clients for the built-in backends: plaintext only to loopback, no
-  redirects, bounded reads, and a strict reading of each backend's answer.
+- the HTTP clients for the built-in backends: plaintext only to loopback or
+  to listed hosts at private addresses, no redirects, bounded reads, and a
+  strict reading of each backend's answer.
 
 **It does not:**
 
@@ -438,6 +439,47 @@ or as `::1` (an IPv4-mapped `::ffff:127.x.y.z` included), so `localhost.`,
 `foo.localhost`, `127.1`, `2130706433`, `0.0.0.0` and a zoned `::1%lo0` are
 not loopback.
 
+A backend reached by name on a private network — a PDP on a private container
+network, say — can take plaintext without `With…AllowInsecure()`:
+`WithO3coAllowPlainInternal(hostPorts...)`, `WithOPAAllowPlainInternal(...)` or
+`WithCedarAllowPlainInternal(...)` permits `http://` to the listed `host:port`
+pairs alone, and reaches them at private addresses alone — `10.0.0.0/8`,
+`100.64.0.0/10`, `172.16.0.0/12`, `192.168.0.0/16` and `fc00::/7`, never a cloud
+metadata address (`100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`). This is
+the line auth.provider's `outbound.plain-internal` draws.
+
+```go
+verifier, err := endpoint.NewO3coEndpoint(
+    "http://policy-verifier:3001",
+    endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+)
+```
+
+- **Checked as each connection is made.** The host is resolved, and unless
+  every address it resolves to is private none is connected to, so a name that
+  comes to resolve to a public address is refused rather than sent the token.
+  The addresses are tried in turn within the endpoint's timeout, each but the
+  last with a share of it, and the connection goes to a checked address
+  directly, through no proxy the environment names. An IPv4 address mapped
+  into IPv6 counts as the IPv4 address; no other IPv6 form that carries one
+  does.
+- **Matched as written.** A base URL's host and port must be listed; a URL
+  without a port has port 80. A host name matches in any case and with or
+  without one trailing dot, an address in any spelling of it. A host name that
+  is not ASCII matches no entry: `net/http` asks for its IDNA form, another
+  name. Loopback and `https://` are as they are without the option.
+- **An entry that could never be reached panics at the option**: one that is
+  not a `host:port`, whose port is outside 1–65535 or written with a leading
+  zero, or whose host is neither an ASCII host name of letters, digits,
+  hyphens and underscores (its last label not all digits, which a resolver may
+  read as an address) nor an address on a private network.
+- **A listed pair is always checked.** It is checked under `With…AllowInsecure()`
+  too, and the constructor returns an error for one given `With…Transport(rt)`,
+  since the check runs in the endpoint's own transport.
+
+What the requests carry is still in the clear on that network: list only
+backends on a network trusted against reading and changing it.
+
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
 the bearer token on it reach only the backend that was configured.
 
@@ -476,6 +518,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 | `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithO3coAllowPlainInternal(hostPorts...)` | Permit an `http://` base URL to the listed `host:port` pairs, reached only at private addresses; see above. Adds across calls. Panics on an entry that could never be reached. |
 | `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
@@ -524,6 +567,7 @@ empty `policyPath` is refused at construction.
 | `WithOPALogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithOPARequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`. |
 | `WithOPAAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithOPAAllowPlainInternal(hostPorts...)` | As `WithO3coAllowPlainInternal`. |
 | `WithOPATransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
 
 ### Cedar endpoint
@@ -548,6 +592,7 @@ size bound, and any non-`2xx` status are errors. Without
 | `WithCedarLogLevel(level)` | Level for the endpoint's internal logger. Default `slog.LevelError`. |
 | `WithCedarRequestIDHeaderKey(key)` | Header the request ID is forwarded in. Default `x-request-id`; `""` disables forwarding. Panics unless `key` is an RFC 7230 token other than `Authorization`, `Content-Type` and `Accept`. |
 | `WithCedarAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
+| `WithCedarAllowPlainInternal(hostPorts...)` | As `WithO3coAllowPlainInternal`. |
 | `WithCedarTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
 
 ### Static endpoint

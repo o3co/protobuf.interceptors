@@ -57,6 +57,21 @@ func ExampleWithO3coTransport() {
 	_ = verifier
 }
 
+// A verifier reached by name on a private container network takes plaintext
+// once its host and port are listed; it is reached only while every address
+// the name resolves to is private. The OPA and Cedar endpoints take the same
+// with WithOPAAllowPlainInternal and WithCedarAllowPlainInternal.
+func ExampleWithO3coAllowPlainInternal() {
+	verifier, err := endpoint.NewO3coEndpoint(
+		"http://policy-verifier:3001",
+		endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_ = verifier
+}
+
 // The OPA endpoint asks POST {baseURL}/v1/data/{policyPath} and allows when the
 // result is true.
 func ExampleNewOPAEndpoint() {
