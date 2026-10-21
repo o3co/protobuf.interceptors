@@ -115,8 +115,8 @@ func TestPlainInternal_InvalidEntry_Panics(t *testing.T) {
 	invalid := []string{
 		"", "pdp", "pdp:", ":8181", "[]:8181",
 		"pdp:0", "pdp:65536", "pdp:08181", "pdp:+80", "pdp:http", "pdp:80:80",
-		"pdp_internal:80", "pdp.:80", ".pdp:80", "a..b:80", "-pdp:80", "pdp-:80",
-		"bücher.example:80", "pdp internal:80", "*.internal:80",
+		"pdp..:80", ".pdp:80", "a..b:80", "-pdp:80", "pdp-:80", "pdp.-x:80",
+		"bücher.example:80", "İdp:80", "\u212Adp:80", "pdp internal:80", "*.internal:80",
 		strings.Repeat("a", 64) + ":80",
 		strings.Repeat(strings.Repeat("a", 63)+".", 4) + "a:80",
 		// A numeric spelling some resolvers read as an address.
@@ -145,6 +145,8 @@ func TestPlainInternal_ValidEntry_IsAccepted(t *testing.T) {
 		"policy-verifier:3001", "PDP.Internal:8181", "pdp:1", "pdp:65535",
 		"10.0.0.5:8181", "[fd00::5]:8181", "[::ffff:10.0.0.5]:80",
 		strings.Repeat("a", 63) + ":80", "1password:80", "a1.b2:80",
+		// A Compose service name, and a name written absolute.
+		"policy_verifier:3001", "_pdp:80", "pdp.ns.svc.cluster.local.:80",
 	}
 	for _, k := range plainInternalKinds {
 		t.Run(k.name, func(t *testing.T) {
@@ -162,7 +164,7 @@ func TestPlainInternal_ValidEntry_IsAccepted(t *testing.T) {
 // Only the listed host and port take plaintext; the scheme's default port
 // counts as written. Loopback and https are as they are without the option.
 func TestPlainInternal_AcceptsAListedPairAndNoOther(t *testing.T) {
-	pairs := []string{"policy-verifier:3001", "10.0.0.5:8181", "[fd00::5]:8181", "pdp:80", "PDP.Internal:8181"}
+	pairs := []string{"policy-verifier:3001", "10.0.0.5:8181", "[fd00::5]:8181", "pdp:80", "PDP.Internal:8181", "idp:80", "policy_verifier:3001", "abs.internal.:80"}
 	accepted := []string{
 		"http://policy-verifier:3001",
 		"http://POLICY-VERIFIER:3001/base/",
@@ -173,14 +175,23 @@ func TestPlainInternal_AcceptsAListedPairAndNoOther(t *testing.T) {
 		"http://pdp",
 		"http://pdp:80",
 		"http://pdp.internal:8181",
+		// One trailing dot is the same name, on either side.
+		"http://policy-verifier.:3001",
+		"http://abs.internal",
+		"http://abs.internal.",
+		"http://policy_verifier:3001",
 		"http://localhost:3000",
 		"https://policy-verifier.example",
 	}
 	refused := []string{
 		"http://policy-verifier:3002",
 		"http://policy-verifier",
-		"http://policy-verifier.:3001",
+		"http://policy-verifier..:3001",
 		"http://other:3001",
+		// A name that only folds to a listed one: net/http asks for its
+		// IDNA form, another host.
+		"http://İdp",
+		"http://\u212Adp:80",
 		"http://10.0.0.6:8181",
 		"http://pdp:080",
 		"http://[fd00::5%25eth0]:8181",

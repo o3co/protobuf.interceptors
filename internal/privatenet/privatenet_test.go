@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestContains(t *testing.T) {
@@ -239,5 +240,49 @@ func TestDialer_RefusesAnAddressWithoutAPort(t *testing.T) {
 	d := &recordingDial{}
 	if _, err := (&Dialer{Resolver: &fakeResolver{}, Dial: d.dial}).DialContext(context.Background(), "tcp", "pdp"); err == nil {
 		t.Error("expected an error for an address without a port")
+	}
+}
+
+// deadlineDial records the deadline each attempt is given, and fails every one.
+type deadlineDial struct {
+	deadlines []time.Time
+}
+
+func (d *deadlineDial) dial(ctx context.Context, _, _ string) (net.Conn, error) {
+	deadline, _ := ctx.Deadline()
+	d.deadlines = append(d.deadlines, deadline)
+	return nil, errors.New("connection timed out")
+}
+
+// An address that does not answer leaves time for the next: each attempt has
+// a share of what remains of the deadline, as net.Dialer gives one.
+func TestDialer_SharesTheDeadlineAmongTheAddresses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	overall, _ := ctx.Deadline()
+	r := &fakeResolver{addrs: addrs("fd00::7", "10.0.0.7")}
+	d := &deadlineDial{}
+	if _, err := (&Dialer{Resolver: r, Dial: d.dial}).DialContext(ctx, "tcp", "pdp:80"); err == nil {
+		t.Fatal("expected an error")
+	}
+	if len(d.deadlines) != 2 {
+		t.Fatalf("dialed %d times, want 2", len(d.deadlines))
+	}
+	if first := d.deadlines[0]; first.IsZero() || !first.Before(overall.Add(-4*time.Second)) {
+		t.Errorf("the first attempt's deadline is %v, want about half of the %v left", time.Until(first), time.Until(overall))
+	}
+	if last := d.deadlines[1]; !last.Equal(overall) {
+		t.Errorf("the last attempt's deadline is %v, want the whole of it, %v", last, overall)
+	}
+}
+
+// With no Resolver or Dial, the system's are used; both honour the context.
+func TestDialer_Defaults_HonourTheContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, address := range []string{"10.0.0.1:80", "pdp.invalid:80"} {
+		if _, err := (&Dialer{}).DialContext(ctx, "tcp", address); !errors.Is(err, context.Canceled) {
+			t.Errorf("%s: got %v, want context.Canceled", address, err)
+		}
 	}
 }

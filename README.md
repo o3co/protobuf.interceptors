@@ -35,7 +35,8 @@ backend and carries out its answer.
 - telling the caller the outcome as a status code with a fixed message, and
   handing the service the full error and the decision behind it;
 - the HTTP clients for the built-in backends: plaintext only to loopback or
-  to listed hosts at private addresses, no redirects, bounded reads, and a strict reading of each backend's answer.
+  to listed hosts at private addresses, no redirects, bounded reads, and a
+  strict reading of each backend's answer.
 
 **It does not:**
 
@@ -461,14 +462,15 @@ verifier, err := endpoint.NewO3coEndpoint(
   environment names. An IPv4 address mapped into IPv6 counts as the IPv4
   address; no other IPv6 form that carries one does.
 - **Matched as written.** A base URL's host and port must be listed; a URL
-  without a port has port 80. A host name matches in any case, an address in
-  any spelling of it. Loopback and `https://` are as they are without the
-  option.
+  without a port has port 80. A host name matches in any case and with or
+  without one trailing dot, an address in any spelling of it. A host name that
+  is not ASCII matches no entry: `net/http` asks for its IDNA form, another
+  name. Loopback and `https://` are as they are without the option.
 - **An entry that could never be reached panics at the option**: one that is
   not a `host:port`, whose port is outside 1–65535 or written with a leading
-  zero, or whose host is neither an RFC 1123 host name (its last label not all
-  digits, which a resolver may read as an address) nor an address on a private
-  network.
+  zero, or whose host is neither an ASCII host name of letters, digits,
+  hyphens and underscores (its last label not all digits, which a resolver may
+  read as an address) nor an address on a private network.
 - **A listed pair is always checked.** It is checked under `With…AllowInsecure()`
   too, and the constructor returns an error for one given `With…Transport(rt)`,
   since the check runs in the endpoint's own transport.

@@ -71,7 +71,9 @@ func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*u
 	}
 	transport := r.transport
 	if u.Scheme == "http" && !isLoopback(u.Hostname()) {
-		_, listed := r.plainInternal[urlPair(u)]
+		pair, ok := urlPair(u)
+		_, listed := r.plainInternal[pair]
+		listed = listed && ok
 		switch {
 		case listed && r.transport != nil:
 			return nil, nil, fmt.Errorf("base URL %s is listed with With%sAllowPlainInternal, whose address check runs in the endpoint's own transport: it cannot be reached over With%sTransport", u.Redacted(), kind, kind)
@@ -112,13 +114,12 @@ func parseBaseURL(raw string) (*url.URL, error) {
 }
 
 // plainInternalPair returns entry, a host and port, spelled the one way a
-// base URL's are compared with it: a name in lower case, an address in its
-// canonical form, an IPv4 address mapped into IPv6 as the IPv4 address, and
-// the port as written. It refuses an entry that is not a host and port, whose
-// port is not a decimal from 1 to 65535 without a leading zero, whose name is
-// not one of RFC 1123 letters, digits and hyphens or ends in a numeric label,
-// or whose address is not on a private network: such an entry is never
-// reached.
+// base URL's are compared with it: a name in lower case without one trailing
+// dot, an address in its canonical form, an IPv4 address mapped into IPv6 as
+// the IPv4 address, and the port as written. It refuses an entry that is not
+// a host and port, whose port is not a decimal from 1 to 65535 without a
+// leading zero, whose name is not a host name (see validHostName), or whose
+// address is not on a private network: such an entry is never reached.
 func plainInternalPair(entry string) (string, error) {
 	host, port, err := net.SplitHostPort(entry)
 	if err != nil {
@@ -133,27 +134,47 @@ func plainInternalPair(entry string) (string, error) {
 		}
 		return net.JoinHostPort(addr.Unmap().String(), port), nil
 	}
-	name := strings.ToLower(host)
-	if !validHostName(name) {
+	name, ascii := asciiLower(strings.TrimSuffix(host, "."))
+	if !ascii || !validHostName(name) {
 		return "", fmt.Errorf("plain-internal entry %q: the host is neither an address nor a host name", entry)
 	}
 	return net.JoinHostPort(name, port), nil
 }
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
-// entry; a URL without a port has http's.
-func urlPair(u *url.URL) string {
+// entry; a URL without a port has http's. It reports false for a host name
+// that is not ASCII: net/http asks for its IDNA form, which no entry names,
+// and case folding could make it read as one that does.
+func urlPair(u *url.URL) (string, bool) {
 	host := u.Hostname()
 	if addr, err := netip.ParseAddr(host); err == nil {
 		host = addr.Unmap().String()
 	} else {
-		host = strings.ToLower(host)
+		var ascii bool
+		if host, ascii = asciiLower(strings.TrimSuffix(host, ".")); !ascii {
+			return "", false
+		}
 	}
 	port := u.Port()
 	if port == "" {
 		port = "80"
 	}
-	return net.JoinHostPort(host, port)
+	return net.JoinHostPort(host, port), true
+}
+
+// asciiLower returns s with its ASCII letters in lower case, and reports
+// whether s is all ASCII.
+func asciiLower(s string) (string, bool) {
+	b := []byte(s)
+	for i, c := range b {
+		switch {
+		case c >= 0x80:
+			return "", false
+		case c >= 'A' && c <= 'Z':
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b), true
 }
 
 // validPort reports whether port is a decimal from 1 to 65535 with no
@@ -173,10 +194,11 @@ func validPort(port string) bool {
 	return n <= 65535
 }
 
-// validHostName reports whether name, in lower case, is a host name of RFC 1123
-// labels — letters, digits and inner hyphens, 1 to 63 of them — at most 253
-// long, whose last label is not all digits: a resolver may read such a name
-// as an address.
+// validHostName reports whether name, in lower case, is a host name: labels
+// of 1 to 63 letters, digits, hyphens and underscores, none starting or
+// ending with a hyphen, at most 253 in all, the last not all digits, which a
+// resolver may read as an address. The underscore, outside RFC 1123, is in
+// service names container networks resolve, and Go's resolver takes it.
 func validHostName(name string) bool {
 	if name == "" || len(name) > 253 {
 		return false
@@ -188,7 +210,7 @@ func validHostName(name string) bool {
 		}
 		for i := 0; i < len(label); i++ {
 			c := label[i]
-			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 				return false
 			}
 		}
@@ -199,7 +221,8 @@ func validHostName(name string) bool {
 
 // privateTransport returns the transport a listed pair is reached over: it
 // connects through d, and uses no proxy, since a proxy would carry the
-// request on in plaintext and resolve the host itself.
+// request on in plaintext and resolve the host itself. Each endpoint has its
+// own, and so its own pool of idle connections.
 func privateTransport(d *privatenet.Dialer) *http.Transport {
 	return &http.Transport{
 		DialContext:           d.DialContext,

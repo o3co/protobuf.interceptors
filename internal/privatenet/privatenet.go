@@ -16,8 +16,7 @@
 // connects only to those.
 //
 // The private networks are 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12,
-// 192.168.0.0/16 and fc00::/7, the same line auth.provider's
-// outbound.plain-internal draws. The cloud metadata addresses inside them are
+// 192.168.0.0/16 and fc00::/7. The cloud metadata addresses inside them are
 // not private. An IPv4 address mapped into IPv6 is judged as the IPv4 address
 // a connection reaches; no other IPv6 form that carries an IPv4 address is.
 package privatenet
@@ -83,8 +82,10 @@ type Dialer struct {
 var defaultDialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 
 // DialContext connects to address, a host and port, at the first of the
-// host's addresses that answers. It refuses before connecting at all when
-// the host resolves to no address or to any address that is not private.
+// host's addresses that answers, trying them in turn; while more than one is
+// left to try, an attempt has its share of the time ctx leaves, as with a
+// net.Dialer. It refuses before connecting at all when the host resolves to
+// no address or to any address that is not private.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -118,8 +119,10 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		dial = defaultDialer.DialContext
 	}
 	var errs []error
-	for _, addr := range addrs {
-		conn, err := dial(ctx, network, net.JoinHostPort(addr.Unmap().String(), port))
+	for i, addr := range addrs {
+		attemptCtx, cancel := attemptContext(ctx, len(addrs)-i)
+		conn, err := dial(attemptCtx, network, net.JoinHostPort(addr.Unmap().String(), port))
+		cancel()
 		if err == nil {
 			return conn, nil
 		}
@@ -129,6 +132,27 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		}
 	}
 	return nil, errors.Join(errs...)
+}
+
+// minAttempt is the least time an attempt is given while others are left,
+// net.Dialer's own floor.
+const minAttempt = 2 * time.Second
+
+// attemptContext returns ctx bounded to the share of its deadline one of
+// remaining addresses has: what is left divided among them, at least
+// minAttempt, never past ctx's own. Without a deadline, or for the last
+// address, it is ctx.
+func attemptContext(ctx context.Context, remaining int) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok || remaining <= 1 {
+		return ctx, func() {}
+	}
+	left := time.Until(deadline)
+	share := max(left/time.Duration(remaining), minAttempt)
+	if share >= left {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, share)
 }
 
 // lookupNetwork is the address family a lookup for network asks for.

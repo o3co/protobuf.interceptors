@@ -156,8 +156,9 @@ func WithCedarAllowInsecure() CedarOption {
 // and port are among hostPorts, and reaches it only at private addresses:
 // 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 and fc00::/7,
 // never a cloud metadata address. An entry is written "pdp:8181" or
-// "[fd00::5]:8181". A host name matches in any case, an address in any
-// spelling of it, and a base URL without a port has port 80.
+// "[fd00::5]:8181". A host name matches in any case and with or without one
+// trailing dot, an address in any spelling of it, and a base URL without a
+// port has port 80. A base URL whose host name is not ASCII matches none.
 //
 // The addresses are checked as each connection is made: the host is
 // resolved, and unless every address it resolves to is private none is
@@ -172,8 +173,9 @@ func WithCedarAllowInsecure() CedarOption {
 // check cannot run in. Later calls add to earlier ones, and a call with no
 // entry lists nothing. Panics if an entry is not a host and port, its port
 // is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an RFC 1123 host name whose
-// last label is not all digits.
+// is neither an address on a private network nor an ASCII host name of
+// letters, digits, hyphens and underscores whose last label is not all
+// digits.
 func WithCedarAllowPlainInternal(hostPorts ...string) CedarOption {
 	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *cedarBuildConfig) {
