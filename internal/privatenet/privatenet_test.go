@@ -48,8 +48,9 @@ func TestContains(t *testing.T) {
 		"::10.0.0.1", "64:ff9b::a00:1", "2002:a00:1::",
 		// Cloud metadata addresses inside the private ranges.
 		"100.100.100.200", "::ffff:100.100.100.200", "fd00:ec2::254", "fd20:ce::254",
-		// A zoned address is never inside a range.
-		"fd00::1%eth0",
+		// A zoned address is never private, mapped or not: the zone names a
+		// link, and dropping it would reach another address.
+		"fd00::1%eth0", "::ffff:10.0.0.5%eth0", "::ffff:192.168.1.1%0",
 	}
 	for _, s := range inside {
 		if !Contains(netip.MustParseAddr(s)) {
@@ -166,6 +167,18 @@ func TestDialer_ConnectsOnlyWhenEveryAddressIsPrivate(t *testing.T) {
 			name:    "a private literal, without a lookup",
 			address: "[fd00::9]:8181",
 			dialed:  []string{"tcp [fd00::9]:8181"},
+		},
+		{
+			name:     "a zoned address among private ones",
+			address:  "pdp.internal:8181",
+			resolved: addrs("10.0.0.7", "::ffff:10.0.0.8%eth0"),
+			lookup:   true,
+			refused:  true,
+		},
+		{
+			name:    "a zoned literal mapping a private address",
+			address: "[::ffff:10.0.0.9%eth0]:8181",
+			refused: true,
 		},
 		{
 			name:    "a public literal",

@@ -145,12 +145,16 @@ func plainInternalPair(entry string) (string, error) {
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
 // entry; a URL without a port has http's. It reports false for a host that
-// no entry can name: a name that is not ASCII, since net/http asks for its
-// IDNA form and case folding could make it read as an entry, and a name that
+// no entry can name: an address privatenet.Contains refuses, a zoned one
+// included, a name that is not ASCII, since net/http asks for its IDNA form
+// and case folding could make it read as an entry, and a name that
 // validHostName refuses, such as an address with a trailing dot.
 func urlPair(u *url.URL) (string, bool) {
 	host := u.Hostname()
 	if addr, err := netip.ParseAddr(host); err == nil {
+		if !privatenet.Contains(addr) {
+			return "", false
+		}
 		host = addr.Unmap().String()
 	} else {
 		var ascii bool

@@ -49,8 +49,13 @@ var metadataAddresses = []netip.Addr{
 }
 
 // Contains reports whether addr is on a private network and is not a cloud
-// metadata address. A zoned address is not.
+// metadata address. A zoned address is not, an IPv4-mapped one included:
+// the zone names a link, and unmapping drops it, which would reach another
+// address than the one written.
 func Contains(addr netip.Addr) bool {
+	if addr.Zone() != "" {
+		return false
+	}
 	addr = addr.Unmap()
 	if slices.Contains(metadataAddresses, addr) {
 		return false

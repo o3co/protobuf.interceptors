@@ -134,7 +134,7 @@ func TestPlainInternal_InvalidEntry_Panics(t *testing.T) {
 		"10.1:80", "2130706433:80", "010.0.0.1:80",
 		// An address that is not on a private network.
 		"8.8.8.8:80", "127.0.0.1:80", "[::1]:80", "169.254.169.254:80",
-		"[::10.0.0.1]:80", "[fd00::1%eth0]:80",
+		"[::10.0.0.1]:80", "[fd00::1%eth0]:80", "[::ffff:10.0.0.5%eth0]:80",
 		"100.100.100.200:80", "[fd00:ec2::254]:80",
 	}
 	for _, k := range plainInternalKinds {
@@ -208,6 +208,7 @@ func TestPlainInternal_AcceptsAListedPairAndNoOther(t *testing.T) {
 		"http://10.0.0.6:8181",
 		"http://pdp:080",
 		"http://[fd00::5%25eth0]:8181",
+		"http://[::ffff:10.0.0.5%25eth0]:8181",
 		"http://policy-verifier.example:3001",
 	}
 	for _, k := range plainInternalKinds {
