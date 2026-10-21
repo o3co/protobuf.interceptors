@@ -109,7 +109,7 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 ))
 ```
 
-- **除外の指定**は、メソッド `/package.Service/Method` か、サービス全体 `/package.Service/` である。それ以外の形の指定は、オプションの呼び出しで panic する: 指定はプログラムの定数だからである。
+- **除外の指定**は、メソッド `/package.Service/Method` か、サービス全体 `/package.Service/` である。それ以外の形の指定は、オプションの呼び出しで panic する: 指定はプログラムの定数だからである。除外が通すのはポリシーの無いメソッドだけで、ポリシーのあるメソッドは常に検査される。
 - **列挙しない限り何も除外されない。** grpc-go では、ヘルスサービスとリフレクションサービスはポリシーの無いメソッドなので、到達できるようにするには上のように列挙すること。
 - **ConnectRPC では** `policyconnect.VerificationInterceptor` に与え、指定は procedure を名指す。ConnectRPC の `grpchealth` と `grpcreflect` のハンドラーはスキーマを持たないので、このオプションが働く前に `PolicyOptionInterceptor` が拒否し、除外しても通らない: インターセプターなしでマウントすること（[ConnectRPC](#connectrpc)を参照）。
 - gRPC では、`VerificationInterceptor` と `VerificationStreamInterceptor` の両方に与えること。それぞれが自分の扱う RPC に適用する。

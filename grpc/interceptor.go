@@ -50,8 +50,12 @@ type config struct {
 // service, "/package.Service/", which exempts each of its methods. Nothing is
 // exempt unless listed, the grpc-go health and reflection services included:
 // "/grpc.health.v1.Health/", "/grpc.reflection.v1.ServerReflection/" and
-// "/grpc.reflection.v1alpha.ServerReflection/". Later calls add to the
-// exemptions of earlier ones.
+// "/grpc.reflection.v1alpha.ServerReflection/". An exemption admits only a
+// method with no policy; a method with a policy is always checked. Later
+// calls add to the exemptions of earlier ones.
+//
+// Each interceptor applies the option to the RPCs it sees, so give it to both
+// VerificationInterceptor and VerificationStreamInterceptor.
 //
 // Panics if an entry is not of either form.
 func WithRequirePolicy(exempt ...string) Option {

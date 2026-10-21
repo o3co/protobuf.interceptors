@@ -117,29 +117,37 @@ func TestRequirePolicy_Unary(t *testing.T) {
 	})
 
 	t.Run("exemptions from several calls add up", func(t *testing.T) {
-		_, _, _, err := run(t, policygrpc.WithRequirePolicy(testService), policygrpc.WithRequirePolicy())
+		_, _, _, err := run(t, policygrpc.WithRequirePolicy(testService), policygrpc.WithRequirePolicy("/other.Svc/"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
-	t.Run("an annotated method is unaffected", func(t *testing.T) {
-		var verifies atomic.Int32
-		client, cleanup := startServer(t,
-			policygrpc.PolicyOptionInterceptor(),
-			policygrpc.VerificationInterceptor(endpointtest.Func(func(context.Context, string, string) error {
-				verifies.Add(1)
-				return nil
-			}), policygrpc.WithRequirePolicy()),
-		)
-		defer cleanup()
-		if _, err := client.GetResource(bearerCtx("tok"), &testpb.GetResourceRequest{Id: "1"}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if verifies.Load() != 1 {
-			t.Errorf("verifier asked %d times, want 1", verifies.Load())
-		}
-	})
+	// An exemption admits only a method with no policy: an annotated method
+	// of an exempt service is still checked.
+	for name, opt := range map[string]policygrpc.Option{
+		"an annotated method is unaffected":                   policygrpc.WithRequirePolicy(),
+		"an annotated method of an exempt service is checked": policygrpc.WithRequirePolicy(testService),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var verifies atomic.Int32
+			client, cleanup := startServer(t,
+				policygrpc.PolicyOptionInterceptor(),
+				policygrpc.VerificationInterceptor(endpointtest.Func(func(context.Context, string, string) error {
+					verifies.Add(1)
+					return &interceptors.DeniedError{Reason: "no"}
+				}), opt),
+			)
+			defer cleanup()
+			_, err := client.GetResource(bearerCtx("tok"), &testpb.GetResourceRequest{Id: "1"})
+			if status.Code(err) != codes.PermissionDenied {
+				t.Errorf("code = %v, want %v", status.Code(err), codes.PermissionDenied)
+			}
+			if verifies.Load() != 1 {
+				t.Errorf("verifier asked %d times, want 1", verifies.Load())
+			}
+		})
+	}
 }
 
 func TestRequirePolicy_Unary_ErrorUnwrapsToErrNoPolicy(t *testing.T) {

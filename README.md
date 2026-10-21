@@ -153,7 +153,8 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 
 - **An exempt entry** is a method, `/package.Service/Method`, or a whole
   service, `/package.Service/`. An entry of any other form panics at the
-  option: the entries are constants of the program.
+  option: the entries are constants of the program. An exemption admits only
+  a method with no policy; a method with a policy is always checked.
 - **Nothing is exempt unless listed.** On grpc-go, the health and reflection
   services are methods with no policy, so list them to keep them reachable, as
   above.

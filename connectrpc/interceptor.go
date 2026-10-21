@@ -199,7 +199,8 @@ func WithStreamRecheckInterval(d time.Duration) Option {
 //
 // An exempt entry is a procedure, "/package.Service/Method", or a service,
 // "/package.Service/", which exempts each of its procedures. Nothing is exempt
-// unless listed. An exemption does not admit a handler built without
+// unless listed. An exemption admits only a method with no policy; a method
+// with a policy is always checked. It does not admit a handler built without
 // connect.WithSchema, such as those of connectrpc.com/grpchealth and
 // connectrpc.com/grpcreflect: PolicyOptionInterceptor refuses it before this
 // option applies, so mount those handlers without these interceptors. Later

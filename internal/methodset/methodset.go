@@ -30,8 +30,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// Set is a set of RPC methods, each named as gRPC's full method name and
-// ConnectRPC's procedure name it: "/package.Service/Method". An entry
+// Set is a set of RPC methods, each named the way gRPC names a full method
+// and ConnectRPC a procedure: "/package.Service/Method". An entry
 // "/package.Service/" stands for every method of that service. The zero
 // value is the empty set.
 type Set struct {

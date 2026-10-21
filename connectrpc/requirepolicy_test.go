@@ -117,28 +117,39 @@ func TestConnectRequirePolicy_Unary(t *testing.T) {
 	})
 
 	t.Run("exemptions from several calls add up", func(t *testing.T) {
-		_, _, err := run(t, policyconnect.WithRequirePolicy(testService), policyconnect.WithRequirePolicy())
+		_, _, err := run(t, policyconnect.WithRequirePolicy(testService), policyconnect.WithRequirePolicy("/other.Svc/"))
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
 
-	t.Run("an annotated method is unaffected", func(t *testing.T) {
-		counter := &checkCounter{}
-		client, cleanup := startConnectServerWithImpl(t, &healthHandler{},
-			policyconnect.PolicyOptionInterceptor(),
-			counter.interceptor(policyconnect.WithRequirePolicy()),
-		)
-		defer cleanup()
-		req := connect.NewRequest(&testpb.GetResourceRequest{Id: "1"})
-		req.Header().Set("Authorization", "Bearer tok")
-		if _, err := client.GetResource(context.Background(), req); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if counter.verifies.Load() != 1 {
-			t.Errorf("verifier asked %d times, want 1", counter.verifies.Load())
-		}
-	})
+	// An exemption admits only a method with no policy: an annotated method
+	// of an exempt service is still checked.
+	for name, opt := range map[string]policyconnect.Option{
+		"an annotated method is unaffected":                   policyconnect.WithRequirePolicy(),
+		"an annotated method of an exempt service is checked": policyconnect.WithRequirePolicy(testService),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var verifies atomic.Int32
+			client, cleanup := startConnectServerWithImpl(t, &healthHandler{},
+				policyconnect.PolicyOptionInterceptor(),
+				policyconnect.VerificationInterceptor(endpointtest.Func(func(context.Context, string, string) error {
+					verifies.Add(1)
+					return &interceptors.DeniedError{Reason: "no"}
+				}), opt),
+			)
+			defer cleanup()
+			req := connect.NewRequest(&testpb.GetResourceRequest{Id: "1"})
+			req.Header().Set("Authorization", "Bearer tok")
+			_, err := client.GetResource(context.Background(), req)
+			if connect.CodeOf(err) != connect.CodePermissionDenied {
+				t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodePermissionDenied)
+			}
+			if verifies.Load() != 1 {
+				t.Errorf("verifier asked %d times, want 1", verifies.Load())
+			}
+		})
+	}
 
 	t.Run("the error unwraps to ErrNoPolicy", func(t *testing.T) {
 		var got error
