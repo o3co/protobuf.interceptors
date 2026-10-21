@@ -34,8 +34,7 @@ type opaBuildConfig struct {
 	maxResponseBodySize int64
 	logger              *slog.Logger
 	requestIDHeaderKey  string
-	allowInsecure       bool
-	transport           http.RoundTripper
+	reach               reachConfig
 }
 
 // OPAOption configures the OPA REST endpoint.
@@ -91,17 +90,49 @@ func WithOPATransport(rt http.RoundTripper) OPAOption {
 		panic("transport must not be nil")
 	}
 	return func(c *opaBuildConfig) {
-		c.transport = rt
+		c.reach.transport = rt
 	}
 }
 
 // WithOPAAllowInsecure permits a plaintext http base URL to a host other than
 // loopback. Every request to OPA carries the subject's bearer token, and over
 // plaintext anyone on the path can read and replay it, so NewOPAEndpoint
-// refuses such a URL without this option.
+// refuses such a URL without this option or WithOPAAllowPlainInternal.
+//
+// A base URL listed with WithOPAAllowPlainInternal is still reached only at
+// private addresses.
 func WithOPAAllowInsecure() OPAOption {
 	return func(c *opaBuildConfig) {
-		c.allowInsecure = true
+		c.reach.allowInsecure = true
+	}
+}
+
+// WithOPAAllowPlainInternal permits a plaintext http base URL whose host
+// and port are among hostPorts, and reaches it only at private addresses:
+// 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 and fc00::/7,
+// never a cloud metadata address. An entry is written "pdp:8181" or
+// "[fd00::5]:8181". A host name matches in any case, an address in any
+// spelling of it, and a base URL without a port has port 80.
+//
+// The addresses are checked as each connection is made: the host is
+// resolved, and unless every address it resolves to is private none is
+// connected to, so a name that comes to resolve elsewhere is refused. The
+// connection goes straight to a checked address, through no proxy.
+// Every request still carries the subject's bearer token in the clear
+// on that network: list only backends on a network trusted against reading and
+// changing what crosses it.
+//
+// A listed base URL is checked so even under WithOPAAllowInsecure, and
+// NewOPAEndpoint returns an error for one given WithOPATransport, which the
+// check cannot run in. Later calls add to earlier ones, and a call with no
+// entry lists nothing. Panics if an entry is not a host and port, its port
+// is not a number from 1 to 65535 written without a leading zero, or its host
+// is neither an address on a private network nor an RFC 1123 host name whose
+// last label is not all digits.
+func WithOPAAllowPlainInternal(hostPorts ...string) OPAOption {
+	pairs := mustBePlainInternalPairs(hostPorts)
+	return func(c *opaBuildConfig) {
+		c.reach.addPlainInternal(pairs)
 	}
 }
 
@@ -129,8 +160,9 @@ type opaInput struct {
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
 // The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
 // It returns an error if policyPath is empty or baseURL does not name http or
-// https and a host, and refuses http to a host other than loopback without
-// WithOPAAllowInsecure.
+// https and a host, and refuses http to a host other than loopback unless
+// WithOPAAllowPlainInternal lists its host and port or WithOPAAllowInsecure is
+// given. It returns an error for a listed base URL given WithOPATransport.
 func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndpoint, error) {
 	rawPath := strings.TrimSpace(policyPath)
 	if rawPath == "" {
@@ -147,7 +179,7 @@ func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndp
 		opt(cfg)
 	}
 
-	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithOPAAllowInsecure")
+	base, client, err := cfg.reach.client(baseURL, cfg.timeout, "OPA")
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +189,7 @@ func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndp
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/data/" + rawPath
 
 	return &opaEndpoint{
-		httpClient:          newHTTPClient(cfg.timeout, cfg.transport),
+		httpClient:          client,
 		evaluateURL:         base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,

@@ -1,6 +1,6 @@
 # protobuf.interceptors
 
-最終更新: 2026-10-01
+最終更新: 2026-10-21
 
 [English](README.md)
 
@@ -23,7 +23,7 @@ Go 向けの、フレームワーク非依存な protobuf メソッドオプシ�
 - リクエストから Bearer トークンとリクエスト ID を読み、不正な形のクレデンシャルを拒否し、両方をバックエンドに渡すこと
 - ハンドラーの実行前に — ストリームでは受信する各メッセージについても — バックエンドに問い合わせ、許可されない限り RPC を拒否すること
 - 結果を、固定メッセージ付きのステータスコードとして呼び出し元に伝え、完全なエラーとその背後の判定をサービスに渡すこと
-- 組み込みバックエンド用の HTTP クライアント: 平文はループバックにのみ送り、リダイレクトに追従せず、読み取り量を制限し、各バックエンドの答えを厳密に読む
+- 組み込みバックエンド用の HTTP クライアント: 平文はループバックか、列挙したホストのプライベートアドレスにのみ送り、リダイレクトに追従せず、読み取り量を制限し、各バックエンドの答えを厳密に読む
 
 **担わないもの:**
 
@@ -290,6 +290,22 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 
 ベース URL はスキーム（`http` または `https`）とホストを指定する。どちらかを欠くものは、推測されずに構築時に拒否される。o3co や OPA へのリクエストはサブジェクトの Bearer トークンを、Cedar へのリクエストはそこから解決した principal を運ぶので、`http://` はループバック — `localhost`、`127.0.0.0/8`、`::1` — にのみ許される。ただしエンドポイントに `WithO3coAllowInsecure()`、`WithOPAAllowInsecure()`、`WithCedarAllowInsecure()` を与えた場合は別である。それ以外では `https://` を使うこと。`localhost` は大文字小文字を問わず名前で受け付け、他のホストと同じく `/etc/hosts` と DNS で解決される。リテラルのアドレスは 127.0.0.0/8 内のもの、または `::1`（IPv4 射影の `::ffff:127.x.y.z` を含む）として書かれた場合にのみ受け付けるので、`localhost.`、`foo.localhost`、`127.1`、`2130706433`、`0.0.0.0`、ゾーン付きの `::1%lo0` はループバックではない。
 
+プライベートネットワーク上で名前で到達するバックエンド — たとえばプライベートなコンテナネットワーク上の PDP — は、`With…AllowInsecure()` なしで平文を使える: `WithO3coAllowPlainInternal(hostPorts...)`、`WithOPAAllowPlainInternal(...)`、`WithCedarAllowPlainInternal(...)` は、列挙した `host:port` の組にのみ `http://` を許し、しかもプライベートアドレス — `10.0.0.0/8`、`100.64.0.0/10`、`172.16.0.0/12`、`192.168.0.0/16`、`fc00::/7`。クラウドのメタデータアドレス（`100.100.100.200`、`fd00:ec2::254`、`fd20:ce::254`）は除く — でのみ到達する。auth.provider の `outbound.plain-internal` と同じ線引きである。
+
+```go
+verifier, err := endpoint.NewO3coEndpoint(
+    "http://policy-verifier:3001",
+    endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+)
+```
+
+- **接続のたびに検査する。** ホストを解決し、解決されたアドレスがすべてプライベートでなければどれにも接続しない。したがって後から公開アドレスに解決されるようになった名前は、トークンを送られずに拒否される。接続は検査したアドレスへ直接張り、環境が指定するプロキシは通さない。IPv6 に射影された IPv4 アドレスはその IPv4 アドレスとして扱い、IPv4 アドレスを含むそれ以外の IPv6 形式はそう扱わない。
+- **書かれたとおりに照合する。** ベース URL のホストとポートが列挙されていなければならず、ポートのない URL はポート 80 である。ホスト名は大文字小文字を問わず、アドレスはどの表記でも一致する。ループバックと `https://` はこのオプションがない場合と同じである。
+- **決して到達できないエントリはオプションの呼び出しで panic する**: `host:port` でないもの、ポートが 1〜65535 の外にあるか先頭に 0 を付けて書かれたもの、ホストが RFC 1123 のホスト名（最後のラベルがすべて数字ではない。すべて数字だとリゾルバがアドレスと読むことがある）でもプライベートネットワーク上のアドレスでもないもの。
+- **列挙した組は常に検査する。** `With…AllowInsecure()` を与えても検査し、`With…Transport(rt)` を与えるとコンストラクタはエラーを返す。検査はエンドポイント自身のトランスポートの中で行うからである。
+
+リクエストが運ぶものはそのネットワーク上では平文のままである。読み取りと改ざんに対して信頼できるネットワーク上のバックエンドだけを列挙すること。
+
 どの HTTP バックエンドもリダイレクトに追従しない: `3xx` はエラーであり、リクエストとそれに載る Bearer トークンは設定したバックエンドにしか届かない。
 
 呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない。
@@ -319,6 +335,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | `WithO3coHeaders(map[string]string)` | すべての verify リクエストに加える静的ヘッダー。複数回の呼び出しはマージされる。 |
 | `WithO3coRequireConfirmedRevision()` | 確認済みのポリシーリビジョンに基づくと確定できない allow を拒否する。デフォルトはオフ。[確認済みリビジョンの要求](#確認済みリビジョンの要求)を参照。 |
 | `WithO3coAllowInsecure()` | ループバック以外のホストへの `http://` ベース URL を許可する。 |
+| `WithO3coAllowPlainInternal(hostPorts...)` | 列挙した `host:port` の組への `http://` ベース URL を許可し、プライベートアドレスでのみ到達する。上記参照。呼び出しをまたいで追加される。決して到達できないエントリでは panic する。 |
 | `WithO3coTransport(rt)` | リクエストを送るトランスポート。相互 TLS など。デフォルト `http.DefaultTransport`。`rt` が nil なら panic する。 |
 
 `WithO3coHeaders` は、auth.policy-verifier の任意の `http.callerAuth` ゲートを有効にしたデプロイで必要になる。このゲートは専用のヘッダー（デフォルト `x-caller-token`）で共有クレデンシャルを期待し、サブジェクトの Bearer トークンとは別の問い — *どのサービスが*そもそも判定を求めてよいか — に答える。それを送る手段が無ければ、ゲートを有効にした時点で、すべての Go の実施ポイントが `401 caller_unauthenticated` で拒否される。
@@ -347,6 +364,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 | `WithOPALogLevel(level)` | エンドポイント内部のロガーのレベル。デフォルト `slog.LevelError`。 |
 | `WithOPARequestIDHeaderKey(key)` | リクエスト ID を転送するヘッダー。デフォルト `x-request-id`。`""` で転送しない。`key` が `Authorization`、`Content-Type`、`Accept` 以外の RFC 7230 トークンでなければ panic する。 |
 | `WithOPAAllowInsecure()` | ループバック以外のホストへの `http://` ベース URL を許可する。 |
+| `WithOPAAllowPlainInternal(hostPorts...)` | `WithO3coAllowPlainInternal` と同じ。 |
 | `WithOPATransport(rt)` | リクエストを送るトランスポート。相互 TLS など。デフォルト `http.DefaultTransport`。`rt` が nil なら panic する。 |
 
 ### Cedar エンドポイント
@@ -364,6 +382,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 | `WithCedarLogLevel(level)` | エンドポイント内部のロガーのレベル。デフォルト `slog.LevelError`。 |
 | `WithCedarRequestIDHeaderKey(key)` | リクエスト ID を転送するヘッダー。デフォルト `x-request-id`。`""` で転送しない。`key` が `Authorization`、`Content-Type`、`Accept` 以外の RFC 7230 トークンでなければ panic する。 |
 | `WithCedarAllowInsecure()` | ループバック以外のホストへの `http://` ベース URL を許可する。 |
+| `WithCedarAllowPlainInternal(hostPorts...)` | `WithO3coAllowPlainInternal` と同じ。 |
 | `WithCedarTransport(rt)` | リクエストを送るトランスポート。相互 TLS など。デフォルト `http.DefaultTransport`。`rt` が nil なら panic する。 |
 
 ### static エンドポイント

@@ -22,16 +22,72 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/o3co/protobuf.interceptors/internal/privatenet"
 )
 
+// reachConfig is what an HTTP endpoint's options say about how its backend is
+// reached: over which transport, and to which hosts in plaintext.
+type reachConfig struct {
+	allowInsecure bool
+	// plainInternal holds the listed host:port pairs, each as
+	// plainInternalPair spells it.
+	plainInternal map[string]struct{}
+	transport     http.RoundTripper
+	// privateDialer resolves and connects for a listed pair. Its zero value
+	// uses the system resolver and a net.Dialer.
+	privateDialer privatenet.Dialer
+}
+
+// addPlainInternal lists pairs, each already spelled by plainInternalPair.
+func (r *reachConfig) addPlainInternal(pairs []string) {
+	if r.plainInternal == nil {
+		r.plainInternal = make(map[string]struct{}, len(pairs))
+	}
+	for _, pair := range pairs {
+		r.plainInternal[pair] = struct{}{}
+	}
+}
+
+// client parses raw, the URL an endpoint asks its backend at, and returns it
+// with the client that asks it. kind names the endpoint's options:
+// With{kind}AllowInsecure, With{kind}AllowPlainInternal, With{kind}Transport.
+//
+// Every request carries the subject's bearer token or what was resolved from
+// it, so plaintext is refused unless the host is loopback, the host and port
+// are listed with With{kind}AllowPlainInternal, or With{kind}AllowInsecure is
+// given. A listed pair is reached over the endpoint's own transport, which
+// connects only when every address the host resolves to is private and uses
+// no proxy. That holds under With{kind}AllowInsecure too, and a listed pair
+// is refused over a caller's transport, which the check would not run in.
+func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*url.URL, *http.Client, error) {
+	u, err := parseBaseURL(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	transport := r.transport
+	if u.Scheme == "http" && !isLoopback(u.Hostname()) {
+		_, listed := r.plainInternal[urlPair(u)]
+		switch {
+		case listed && r.transport != nil:
+			return nil, nil, fmt.Errorf("base URL %s is listed with With%sAllowPlainInternal, whose address check runs in the endpoint's own transport: it cannot be reached over With%sTransport", u.Redacted(), kind, kind)
+		case listed:
+			dialer := r.privateDialer
+			transport = privateTransport(&dialer)
+		case !r.allowInsecure:
+			return nil, nil, fmt.Errorf("base URL %s sends the bearer token in plaintext to a host other than loopback: use https, list its host and port with With%sAllowPlainInternal for a host on a private network, or permit it with With%sAllowInsecure", u.Redacted(), kind, kind)
+		}
+	}
+	return u, newHTTPClient(timeout, transport), nil
+}
+
 // parseBaseURL parses the URL an endpoint asks its backend at. It must name
-// http or https and a host. Every request carries the subject's bearer token,
-// so plaintext is refused unless the host is loopback or allowInsecure is set;
-// insecureOption names the option that sets it.
-func parseBaseURL(raw string, allowInsecure bool, insecureOption string) (*url.URL, error) {
+// http or https and a host.
+func parseBaseURL(raw string) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("baseURL must not be empty")
@@ -52,10 +108,105 @@ func parseBaseURL(raw string, allowInsecure bool, insecureOption string) (*url.U
 	if u.Hostname() == "" {
 		return nil, errors.New("base URL must name a host")
 	}
-	if u.Scheme == "http" && !allowInsecure && !isLoopback(u.Hostname()) {
-		return nil, fmt.Errorf("base URL %s sends the bearer token in plaintext to a host other than loopback: use https, or %s to permit it", u.Redacted(), insecureOption)
-	}
 	return u, nil
+}
+
+// plainInternalPair returns entry, a host and port, spelled the one way a
+// base URL's are compared with it: a name in lower case, an address in its
+// canonical form, an IPv4 address mapped into IPv6 as the IPv4 address, and
+// the port as written. It refuses an entry that is not a host and port, whose
+// port is not a decimal from 1 to 65535 without a leading zero, whose name is
+// not one of RFC 1123 letters, digits and hyphens or ends in a numeric label,
+// or whose address is not on a private network: such an entry is never
+// reached.
+func plainInternalPair(entry string) (string, error) {
+	host, port, err := net.SplitHostPort(entry)
+	if err != nil {
+		return "", fmt.Errorf("plain-internal entry %q is not a host and port: %w", entry, err)
+	}
+	if !validPort(port) {
+		return "", fmt.Errorf("plain-internal entry %q: the port must be a number from 1 to 65535, written without a leading zero", entry)
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if !privatenet.Contains(addr) {
+			return "", fmt.Errorf("plain-internal entry %q: the address is not on a private network", entry)
+		}
+		return net.JoinHostPort(addr.Unmap().String(), port), nil
+	}
+	name := strings.ToLower(host)
+	if !validHostName(name) {
+		return "", fmt.Errorf("plain-internal entry %q: the host is neither an address nor a host name", entry)
+	}
+	return net.JoinHostPort(name, port), nil
+}
+
+// urlPair returns u's host and port spelled as plainInternalPair spells an
+// entry; a URL without a port has http's.
+func urlPair(u *url.URL) string {
+	host := u.Hostname()
+	if addr, err := netip.ParseAddr(host); err == nil {
+		host = addr.Unmap().String()
+	} else {
+		host = strings.ToLower(host)
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// validPort reports whether port is a decimal from 1 to 65535 with no
+// leading zero.
+func validPort(port string) bool {
+	if port == "" || len(port) > 5 || port[0] == '0' {
+		return false
+	}
+	n := 0
+	for i := 0; i < len(port); i++ {
+		c := port[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n <= 65535
+}
+
+// validHostName reports whether name, in lower case, is a host name of RFC 1123
+// labels — letters, digits and inner hyphens, 1 to 63 of them — at most 253
+// long, whose last label is not all digits: a resolver may read such a name
+// as an address.
+func validHostName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	labels := strings.Split(name, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	last := labels[len(labels)-1]
+	return strings.Trim(last, "0123456789") != ""
+}
+
+// privateTransport returns the transport a listed pair is reached over: it
+// connects through d, and uses no proxy, since a proxy would carry the
+// request on in plaintext and resolve the host itself.
+func privateTransport(d *privatenet.Dialer) *http.Transport {
+	return &http.Transport{
+		DialContext:           d.DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 }
 
 // isLoopback reports whether host is localhost, in any case, or a literal
@@ -166,4 +317,18 @@ func newHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Cli
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+// mustBePlainInternalPairs returns entries each spelled by plainInternalPair,
+// and panics on the first it refuses.
+func mustBePlainInternalPairs(entries []string) []string {
+	pairs := make([]string, len(entries))
+	for i, entry := range entries {
+		pair, err := plainInternalPair(entry)
+		if err != nil {
+			panic(err.Error())
+		}
+		pairs[i] = pair
+	}
+	return pairs
 }

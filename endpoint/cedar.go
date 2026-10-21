@@ -38,8 +38,7 @@ type cedarBuildConfig struct {
 	actionPrefix        string
 	resourcePrefix      string
 	principalResolver   func(ctx context.Context, token string) (string, error)
-	allowInsecure       bool
-	transport           http.RoundTripper
+	reach               reachConfig
 }
 
 // CedarOption configures the Cedar agent REST endpoint.
@@ -136,17 +135,49 @@ func WithCedarTransport(rt http.RoundTripper) CedarOption {
 		panic("transport must not be nil")
 	}
 	return func(c *cedarBuildConfig) {
-		c.transport = rt
+		c.reach.transport = rt
 	}
 }
 
 // WithCedarAllowInsecure permits a plaintext http base URL to a host other
 // than loopback. Over plaintext anyone on the path can read and alter what is
 // asked and what is answered, so NewCedarEndpoint refuses such a URL without
-// this option.
+// this option or WithCedarAllowPlainInternal.
+//
+// A base URL listed with WithCedarAllowPlainInternal is still reached only at
+// private addresses.
 func WithCedarAllowInsecure() CedarOption {
 	return func(c *cedarBuildConfig) {
-		c.allowInsecure = true
+		c.reach.allowInsecure = true
+	}
+}
+
+// WithCedarAllowPlainInternal permits a plaintext http base URL whose host
+// and port are among hostPorts, and reaches it only at private addresses:
+// 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 and fc00::/7,
+// never a cloud metadata address. An entry is written "pdp:8181" or
+// "[fd00::5]:8181". A host name matches in any case, an address in any
+// spelling of it, and a base URL without a port has port 80.
+//
+// The addresses are checked as each connection is made: the host is
+// resolved, and unless every address it resolves to is private none is
+// connected to, so a name that comes to resolve elsewhere is refused. The
+// connection goes straight to a checked address, through no proxy.
+// What is asked and what is answered still cross that network in the
+// clear: list only backends on a network trusted against reading and
+// changing what crosses it.
+//
+// A listed base URL is checked so even under WithCedarAllowInsecure, and
+// NewCedarEndpoint returns an error for one given WithCedarTransport, which the
+// check cannot run in. Later calls add to earlier ones, and a call with no
+// entry lists nothing. Panics if an entry is not a host and port, its port
+// is not a number from 1 to 65535 written without a leading zero, or its host
+// is neither an address on a private network nor an RFC 1123 host name whose
+// last label is not all digits.
+func WithCedarAllowPlainInternal(hostPorts ...string) CedarOption {
+	pairs := mustBePlainInternalPairs(hostPorts)
+	return func(c *cedarBuildConfig) {
+		c.reach.addPlainInternal(pairs)
 	}
 }
 
@@ -198,7 +229,9 @@ func formatEntityUID(entityType, id string) string {
 // The authorize URL is constructed as: {baseURL}/v1/is_authorized.
 // It returns an error without WithCedarPrincipalResolver, or unless baseURL
 // names http or https and a host, and refuses http to a host other than
-// loopback without WithCedarAllowInsecure.
+// loopback unless WithCedarAllowPlainInternal lists its host and port or
+// WithCedarAllowInsecure is given. It returns an error for a listed base URL
+// given WithCedarTransport.
 //
 // The endpoint does no authentication of its own: the principal it asks
 // about is the one the resolver returns.
@@ -220,14 +253,14 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 		return nil, errors.New("a principal resolver is required: WithCedarPrincipalResolver authenticates the bearer token and names the principal")
 	}
 
-	base, err := parseBaseURL(baseURL, cfg.allowInsecure, "WithCedarAllowInsecure")
+	base, client, err := cfg.reach.client(baseURL, cfg.timeout, "Cedar")
 	if err != nil {
 		return nil, err
 	}
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/is_authorized"
 
 	return &cedarEndpoint{
-		httpClient:          newHTTPClient(cfg.timeout, cfg.transport),
+		httpClient:          client,
 		authorizeURL:        base.String(),
 		maxResponseBodySize: cfg.maxResponseBodySize,
 		logger:              cfg.logger,
