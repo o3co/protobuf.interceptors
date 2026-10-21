@@ -121,8 +121,10 @@ var plainInternalKinds = []struct {
 }
 
 // A listed entry is a host and a port written one way. One that could never
-// be reached under the option is refused at the call.
-func TestPlainInternal_InvalidEntry_Panics(t *testing.T) {
+// be reached under the option makes the constructor return an error naming
+// it; the option itself does not panic, since entries come from deployment
+// configuration.
+func TestPlainInternal_InvalidEntry_IsAnError(t *testing.T) {
 	invalid := []string{
 		"", "pdp", "pdp:", ":8181", "[]:8181",
 		"pdp:0", "pdp:65536", "pdp:08181", "pdp:+80", "pdp:http", "pdp:80:80",
@@ -135,39 +137,96 @@ func TestPlainInternal_InvalidEntry_Panics(t *testing.T) {
 		// An address that is not on a private network.
 		"8.8.8.8:80", "127.0.0.1:80", "[::1]:80", "169.254.169.254:80",
 		"[::10.0.0.1]:80", "[fd00::1%eth0]:80", "[::ffff:10.0.0.5%eth0]:80",
-		"100.100.100.200:80", "[fd00:ec2::254]:80",
+		"100.100.100.200:80", "[fd00:ec2::254]:80", "[fd00:ec2::23]:80",
+		"[fd20:ce::254]:80", "[fd00:a9fe:a9fe::1]:80",
 	}
 	for _, k := range plainInternalKinds {
 		for _, entry := range invalid {
 			t.Run(k.name+"/"+entry, func(t *testing.T) {
-				defer func() {
-					if recover() == nil {
-						t.Errorf("%q was accepted", entry)
+				// Whatever the base URL: the entry is wrong on its own.
+				for _, baseURL := range []string{"https://verifier.internal:3000", "http://policy-verifier:3000"} {
+					_, err := k.build(baseURL, plainInternalSetup{pairs: []string{"policy-verifier:3000", entry}})
+					if err == nil {
+						t.Fatalf("%s: %q was accepted", baseURL, entry)
 					}
-				}()
-				k.option("policy-verifier:3001", entry)
+					if !strings.Contains(err.Error(), strconv.Quote(entry)) || !strings.Contains(err.Error(), "AllowPlainInternal") {
+						t.Errorf("%s: error %q names neither the entry %q nor the option", baseURL, err, entry)
+					}
+				}
 			})
 		}
 	}
 }
 
+// The option records a refused entry rather than panicking at the call, and
+// the constructor names every refused entry, not only the first.
+func TestPlainInternal_InvalidEntries_AreAllNamed(t *testing.T) {
+	for _, k := range plainInternalKinds {
+		t.Run(k.name, func(t *testing.T) {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("the option panicked: %v", r)
+					}
+				}()
+				k.option("", "pdp:0")
+			}()
+			_, err := k.build("https://verifier.internal:3000", plainInternalSetup{pairs: []string{"", "pdp:80", "pdp:0"}})
+			if err == nil {
+				t.Fatal("bad entries were accepted")
+			}
+			for _, entry := range []string{`""`, `"pdp:0"`} {
+				if !strings.Contains(err.Error(), entry) {
+					t.Errorf("error %q does not name %s", err, entry)
+				}
+			}
+			if strings.Contains(err.Error(), `"pdp:80"`) {
+				t.Errorf("error %q names the valid entry", err)
+			}
+		})
+	}
+}
+
 func TestPlainInternal_ValidEntry_IsAccepted(t *testing.T) {
 	valid := []string{
-		"policy-verifier:3001", "PDP.Internal:8181", "pdp:1", "pdp:65535",
+		"policy-verifier:3000", "PDP.Internal:8181", "pdp:1", "pdp:65535",
 		"10.0.0.5:8181", "[fd00::5]:8181", "[::ffff:10.0.0.5]:80",
 		strings.Repeat("a", 63) + ":80", "1password:80", "a1.b2:80",
 		// A Compose service name, and a name written absolute.
-		"policy_verifier:3001", "_pdp:80", "pdp.ns.svc.cluster.local.:80",
+		"policy_verifier:3000", "_pdp:80", "pdp.ns.svc.cluster.local.:80",
 	}
 	for _, k := range plainInternalKinds {
 		t.Run(k.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("unexpected panic: %v", r)
-				}
-			}()
-			k.option(valid...)
-			k.option()
+			if _, err := k.build("https://verifier.internal:3000", plainInternalSetup{pairs: valid}); err != nil {
+				t.Errorf("valid entries: %v", err)
+			}
+			// A call with no entry lists nothing and is no error.
+			if _, err := k.build("https://verifier.internal:3000", plainInternalSetup{}); err != nil {
+				t.Errorf("no entries: %v", err)
+			}
+		})
+	}
+}
+
+// A listed pair is reached over the endpoint's own transport, which talks to
+// that one host:port: its idle pool for the host is the whole pool, not
+// net/http's default of two, so concurrent checks — every stream message is
+// one — reuse connections.
+func TestPlainInternal_TransportKeepsAPoolForTheHost(t *testing.T) {
+	for _, k := range plainInternalKinds {
+		t.Run(k.name, func(t *testing.T) {
+			ep, err := k.build("http://pdp:8181", plainInternalSetup{pairs: []string{"pdp:8181"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr, ok := k.client(ep).Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport is %T, want *http.Transport", k.client(ep).Transport)
+			}
+			if tr.MaxIdleConnsPerHost != tr.MaxIdleConns || tr.MaxIdleConnsPerHost <= http.DefaultMaxIdleConnsPerHost {
+				t.Errorf("MaxIdleConnsPerHost = %d, MaxIdleConns = %d; want them equal and above %d",
+					tr.MaxIdleConnsPerHost, tr.MaxIdleConns, http.DefaultMaxIdleConnsPerHost)
+			}
 		})
 	}
 }

@@ -63,8 +63,8 @@ func ExampleWithO3coTransport() {
 // with WithOPAAllowPlainInternal and WithCedarAllowPlainInternal.
 func ExampleWithO3coAllowPlainInternal() {
 	verifier, err := endpoint.NewO3coEndpoint(
-		"http://policy-verifier:3001",
-		endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+		"http://policy-verifier:3000",
+		endpoint.WithO3coAllowPlainInternal("policy-verifier:3000"),
 	)
 	if err != nil {
 		log.Fatal(err)

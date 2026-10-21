@@ -445,13 +445,14 @@ network, say — can take plaintext without `With…AllowInsecure()`:
 `WithCedarAllowPlainInternal(...)` permits `http://` to the listed `host:port`
 pairs alone, and reaches them at private addresses alone — `10.0.0.0/8`,
 `100.64.0.0/10`, `172.16.0.0/12`, `192.168.0.0/16` and `fc00::/7`, never a cloud
-metadata address (`100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`). This is
+metadata or credential address (`100.100.100.200`, `fd00:ec2::254`,
+`fd00:ec2::23`, `fd20:ce::254`, `fd00:a9fe:a9fe::1`). This is
 the line auth.provider's `outbound.plain-internal` draws.
 
 ```go
 verifier, err := endpoint.NewO3coEndpoint(
-    "http://policy-verifier:3001",
-    endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+    "http://policy-verifier:3000",
+    endpoint.WithO3coAllowPlainInternal("policy-verifier:3000"),
 )
 ```
 
@@ -468,11 +469,16 @@ verifier, err := endpoint.NewO3coEndpoint(
   without one trailing dot, an address in any spelling of it. A host name that
   is not ASCII matches no entry: `net/http` asks for its IDNA form, another
   name. Loopback and `https://` are as they are without the option.
-- **An entry that could never be reached panics at the option**: one that is
+- **An entry that could never be reached makes the constructor return an
+  error** naming it, and every other such entry: one that is
   not a `host:port`, whose port is outside 1–65535 or written with a leading
   zero, or whose host is neither an ASCII host name of letters, digits,
   hyphens and underscores (its last label not all digits, which a resolver may
-  read as an address) nor an address on a private network.
+  read as an address) nor an address on a private network. An entry is
+  deployment configuration, so it is reported like a base URL rather than as a
+  panic: `WithO3coAllowPlainInternal(os.Getenv("PDP_ADDR"))` with the variable
+  unset passes `""`, which `NewO3coEndpoint` refuses. A call with no entry lists
+  nothing.
 - **A listed pair is always checked.** It is checked under `With…AllowInsecure()`
   too, and the constructor returns an error for one given `With…Transport(rt)`,
   since the check runs in the endpoint's own transport.
@@ -518,7 +524,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 | `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
-| `WithO3coAllowPlainInternal(hostPorts...)` | Permit an `http://` base URL to the listed `host:port` pairs, reached only at private addresses; see above. Adds across calls. Panics on an entry that could never be reached. |
+| `WithO3coAllowPlainInternal(hostPorts...)` | Permit an `http://` base URL to the listed `host:port` pairs, reached only at private addresses; see above. Adds across calls. `NewO3coEndpoint` returns an error for an entry that could never be reached. |
 | `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its

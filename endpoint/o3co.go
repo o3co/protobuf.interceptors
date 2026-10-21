@@ -177,15 +177,16 @@ func WithO3coAllowInsecure() O3coOption {
 // A listed base URL is checked so even under WithO3coAllowInsecure, and
 // NewO3coEndpoint returns an error for one given WithO3coTransport, which the
 // check cannot run in. Later calls add to earlier ones, and a call with no
-// entry lists nothing. Panics if an entry is not a host and port, its port
-// is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an ASCII host name of
-// letters, digits, hyphens and underscores whose last label is not all
-// digits.
+// entry lists nothing. NewO3coEndpoint returns an error naming every entry
+// that is not a host and port, whose port is not a number from 1 to 65535
+// written without a leading zero, or whose host is neither an address on a
+// private network nor an ASCII host name of letters, digits, hyphens and
+// underscores whose last label is not all digits: such an entry could never
+// be reached. An entry is a deployment value, so it is reported like a base
+// URL rather than at the call.
 func WithO3coAllowPlainInternal(hostPorts ...string) O3coOption {
-	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *o3coBuildConfig) {
-		c.reach.addPlainInternal(pairs)
+		c.reach.addPlainInternal(hostPorts)
 	}
 }
 
@@ -242,7 +243,8 @@ type o3coEndpoint struct {
 // It returns an error unless baseURL names http or https and a host, and
 // refuses http to a host other than loopback unless WithO3coAllowPlainInternal
 // lists its host and port or WithO3coAllowInsecure is given. It returns an
-// error for a listed base URL given WithO3coTransport.
+// error for a listed base URL given WithO3coTransport, and for an entry
+// WithO3coAllowPlainInternal refuses.
 //
 // The endpoint it returns is also a DecisionVerifier.
 func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, error) {

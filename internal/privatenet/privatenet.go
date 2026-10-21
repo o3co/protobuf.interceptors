@@ -39,13 +39,18 @@ var privateRanges = []netip.Prefix{
 	netip.MustParsePrefix("fc00::/7"),
 }
 
-// metadataAddresses are the cloud metadata services that sit inside
-// privateRanges: Alibaba Cloud's, AWS's over IPv6 and Google Cloud's over
-// IPv6. The others sit in link-local, which is not private.
+// metadataAddresses are the cloud metadata and credential services that sit
+// inside privateRanges, as each cloud documents them: Alibaba Cloud's
+// instance metadata; over IPv6, AWS's instance metadata and its EKS Pod
+// Identity Agent, Google Cloud's metadata server, and Akamai Cloud's
+// (Linode's) metadata service. The others sit in link-local, which is not
+// private.
 var metadataAddresses = []netip.Addr{
 	netip.MustParseAddr("100.100.100.200"),
 	netip.MustParseAddr("fd00:ec2::254"),
+	netip.MustParseAddr("fd00:ec2::23"),
 	netip.MustParseAddr("fd20:ce::254"),
+	netip.MustParseAddr("fd00:a9fe:a9fe::1"),
 }
 
 // Contains reports whether addr is on a private network and is not a cloud

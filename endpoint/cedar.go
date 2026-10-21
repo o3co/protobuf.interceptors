@@ -173,15 +173,16 @@ func WithCedarAllowInsecure() CedarOption {
 // A listed base URL is checked so even under WithCedarAllowInsecure, and
 // NewCedarEndpoint returns an error for one given WithCedarTransport, which the
 // check cannot run in. Later calls add to earlier ones, and a call with no
-// entry lists nothing. Panics if an entry is not a host and port, its port
-// is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an ASCII host name of
-// letters, digits, hyphens and underscores whose last label is not all
-// digits.
+// entry lists nothing. NewCedarEndpoint returns an error naming every entry
+// that is not a host and port, whose port is not a number from 1 to 65535
+// written without a leading zero, or whose host is neither an address on a
+// private network nor an ASCII host name of letters, digits, hyphens and
+// underscores whose last label is not all digits: such an entry could never
+// be reached. An entry is a deployment value, so it is reported like a base
+// URL rather than at the call.
 func WithCedarAllowPlainInternal(hostPorts ...string) CedarOption {
-	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *cedarBuildConfig) {
-		c.reach.addPlainInternal(pairs)
+		c.reach.addPlainInternal(hostPorts)
 	}
 }
 
@@ -235,7 +236,8 @@ func formatEntityUID(entityType, id string) string {
 // names http or https and a host, and refuses http to a host other than
 // loopback unless WithCedarAllowPlainInternal lists its host and port or
 // WithCedarAllowInsecure is given. It returns an error for a listed base URL
-// given WithCedarTransport.
+// given WithCedarTransport, and for an entry WithCedarAllowPlainInternal
+// refuses.
 //
 // The endpoint does no authentication of its own: the principal it asks
 // about is the one the resolver returns.

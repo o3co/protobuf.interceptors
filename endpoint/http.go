@@ -37,18 +37,27 @@ type reachConfig struct {
 	// plainInternal holds the listed host:port pairs, each as
 	// plainInternalPair spells it.
 	plainInternal map[string]struct{}
-	transport     http.RoundTripper
+	// refusedEntries holds why each entry plainInternalPair refused was
+	// refused; the constructor returns them.
+	refusedEntries []error
+	transport      http.RoundTripper
 	// privateDialer resolves and connects for a listed pair. Its zero value
 	// uses the system resolver and a net.Dialer.
 	privateDialer privatenet.Dialer
 }
 
-// addPlainInternal lists pairs, each already spelled by plainInternalPair.
-func (r *reachConfig) addPlainInternal(pairs []string) {
-	if r.plainInternal == nil {
-		r.plainInternal = make(map[string]struct{}, len(pairs))
-	}
-	for _, pair := range pairs {
+// addPlainInternal lists entries, each spelled by plainInternalPair, and
+// records why each one it refuses was refused.
+func (r *reachConfig) addPlainInternal(entries []string) {
+	for _, entry := range entries {
+		pair, err := plainInternalPair(entry)
+		if err != nil {
+			r.refusedEntries = append(r.refusedEntries, err)
+			continue
+		}
+		if r.plainInternal == nil {
+			r.plainInternal = make(map[string]struct{})
+		}
 		r.plainInternal[pair] = struct{}{}
 	}
 }
@@ -56,6 +65,8 @@ func (r *reachConfig) addPlainInternal(pairs []string) {
 // client parses raw, the URL an endpoint asks its backend at, and returns it
 // with the client that asks it. kind names the endpoint's options:
 // With{kind}AllowInsecure, With{kind}AllowPlainInternal, With{kind}Transport.
+// It returns an error naming every entry With{kind}AllowPlainInternal
+// refused, whatever raw is.
 //
 // Every request carries the subject's bearer token or what was resolved from
 // it, so plaintext is refused unless the host is loopback, the host and port
@@ -65,6 +76,9 @@ func (r *reachConfig) addPlainInternal(pairs []string) {
 // no proxy. That holds under With{kind}AllowInsecure too, and a listed pair
 // is refused over a caller's transport, which the check would not run in.
 func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*url.URL, *http.Client, error) {
+	if len(r.refusedEntries) > 0 {
+		return nil, nil, fmt.Errorf("With%sAllowPlainInternal: %w", kind, errors.Join(r.refusedEntries...))
+	}
 	u, err := parseBaseURL(raw)
 	if err != nil {
 		return nil, nil, err
@@ -229,15 +243,21 @@ func validHostName(name string) bool {
 // privateTransport returns the transport a listed pair is reached over: it
 // connects through d, and uses no proxy, since a proxy would carry the
 // request on in plaintext and resolve the host itself. Each endpoint has its
-// own, and so its own pool of idle connections.
+// own, and so its own pool of idle connections; it reaches one host and port,
+// so the whole pool is for that host.
 func privateTransport(d *privatenet.Dialer) *http.Transport {
 	return &http.Transport{
 		DialContext:           d.DialContext,
-		MaxIdleConns:          100,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConns,
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
 }
+
+// maxIdleConns bounds a private transport's idle connections, as
+// http.DefaultTransport bounds its own.
+const maxIdleConns = 100
 
 // isLoopback reports whether host is localhost, in any case, or a literal
 // address in 127.0.0.0/8 or ::1. localhost is taken by name, and resolves
@@ -347,18 +367,4 @@ func newHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Cli
 			return http.ErrUseLastResponse
 		},
 	}
-}
-
-// mustBePlainInternalPairs returns entries each spelled by plainInternalPair,
-// and panics on the first it refuses.
-func mustBePlainInternalPairs(entries []string) []string {
-	pairs := make([]string, len(entries))
-	for i, entry := range entries {
-		pair, err := plainInternalPair(entry)
-		if err != nil {
-			panic(err.Error())
-		}
-		pairs[i] = pair
-	}
-	return pairs
 }
