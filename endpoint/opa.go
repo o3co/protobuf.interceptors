@@ -128,15 +128,16 @@ func WithOPAAllowInsecure() OPAOption {
 // A listed base URL is checked so even under WithOPAAllowInsecure, and
 // NewOPAEndpoint returns an error for one given WithOPATransport, which the
 // check cannot run in. Later calls add to earlier ones, and a call with no
-// entry lists nothing. Panics if an entry is not a host and port, its port
-// is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an ASCII host name of
-// letters, digits, hyphens and underscores whose last label is not all
-// digits.
+// entry lists nothing. NewOPAEndpoint returns an error naming every entry
+// that is not a host and port, whose port is not a number from 1 to 65535
+// written without a leading zero, or whose host is neither an address on a
+// private network nor an ASCII host name of letters, digits, hyphens and
+// underscores whose last label is not all digits: such an entry could never
+// be reached. An entry is a deployment value, so it is reported like a base
+// URL rather than at the call.
 func WithOPAAllowPlainInternal(hostPorts ...string) OPAOption {
-	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *opaBuildConfig) {
-		c.reach.addPlainInternal(pairs)
+		c.reach.addPlainInternal(hostPorts)
 	}
 }
 
@@ -159,14 +160,22 @@ type opaInput struct {
 	Resource string `json:"resource"`
 	Action   string `json:"action"`
 	Token    string `json:"token"`
+	// Context holds the extracted field_mappings values on the context
+	// (interceptors.ExtractedFieldsFromContext), keyed by placeholder. They
+	// come from the request, so a policy reads them as the caller's claims.
+	Context map[string]string `json:"context,omitempty"`
 }
 
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
-// The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
+// The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}. The
+// input holds resource, action and token, and context, the extracted
+// field_mappings values (interceptors.ExtractedFieldsFromContext), when there
+// are any.
 // It returns an error if policyPath is empty or baseURL does not name http or
 // https and a host, and refuses http to a host other than loopback unless
 // WithOPAAllowPlainInternal lists its host and port or WithOPAAllowInsecure is
-// given. It returns an error for a listed base URL given WithOPATransport.
+// given. It returns an error for a listed base URL given WithOPATransport,
+// and for an entry WithOPAAllowPlainInternal refuses.
 func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndpoint, error) {
 	rawPath := strings.TrimSpace(policyPath)
 	if rawPath == "" {
@@ -218,6 +227,9 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 			Action:   action,
 			Token:    token,
 		},
+	}
+	if fields, ok := interceptors.ExtractedFieldsFromContext(ctx); ok && len(fields) > 0 {
+		reqBody.Input.Context = fields
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {

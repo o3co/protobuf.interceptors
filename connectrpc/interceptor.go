@@ -25,6 +25,7 @@ import (
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
+	"github.com/o3co/protobuf.interceptors/internal/methodset"
 	"github.com/o3co/protobuf.interceptors/internal/streamcheck"
 	pb "github.com/o3co/protobuf.interceptors/schema"
 	"google.golang.org/protobuf/proto"
@@ -76,8 +77,8 @@ type policyOptionInterceptor struct{}
 // For unary RPCs it resolves with interceptors.ResolveResourceWithFields and
 // attaches the extracted values with interceptors.WithExtractedFields, so a
 // field mapping whose placeholder is absent from the resource template still
-// reaches an endpoint that reads them (in package endpoint, only the o3co
-// endpoint does). The gRPC unary interceptor discards the fields. Streaming
+// reaches an endpoint that reads them (in package endpoint, the o3co and OPA
+// endpoints), as the gRPC unary interceptor does. Streaming
 // handlers refuse field_mappings outright, as gRPC's do.
 func PolicyOptionInterceptor() connect.Interceptor {
 	return &policyOptionInterceptor{}
@@ -166,8 +167,9 @@ type Option func(*verificationInterceptor)
 
 // WithDecisionObserver has VerificationInterceptor hand every authorization
 // check it makes to fn, allowed or not (see interceptors.DecisionObserver). A
-// stream's re-check calls fn on the send or receive that made it, which waits
-// for fn to return.
+// stream's re-check calls fn inside the Send or Receive that made it, while
+// the stream's checks are serialized, so a slow fn stalls the stream in both
+// directions: keep it cheap and non-blocking.
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(v *verificationInterceptor) {
 		v.observer = fn
@@ -190,12 +192,50 @@ func WithStreamRecheckInterval(d time.Duration) Option {
 	}
 }
 
+// WithRequirePolicy has VerificationInterceptor refuse an RPC whose method
+// declares no policy option, except a procedure exempt names, instead of
+// letting it through unchecked. The refusal is Internal, before the handler
+// runs, and wraps interceptors.ErrNoPolicy; no backend is asked and the
+// observer is not called. A method with a policy is checked as before.
+//
+// An exempt entry is a procedure, "/package.Service/Method", or a service,
+// "/package.Service/", which exempts each of its procedures. Nothing is exempt
+// unless listed. An exemption admits only a method with no policy; a method
+// with a policy is always checked. It does not admit a handler built without
+// connect.WithSchema, such as those of connectrpc.com/grpchealth and
+// connectrpc.com/grpcreflect: PolicyOptionInterceptor refuses it before this
+// option applies, so mount those handlers without these interceptors. Later
+// calls add to the exemptions of earlier ones.
+//
+// Panics if an entry is not of either form.
+func WithRequirePolicy(exempt ...string) Option {
+	set, err := methodset.Parse(exempt)
+	if err != nil {
+		panic("WithRequirePolicy: " + err.Error())
+	}
+	return func(v *verificationInterceptor) {
+		v.requirePolicy = true
+		v.exempt = v.exempt.Union(set)
+	}
+}
+
 // verificationInterceptor implements connect.Interceptor for VerificationInterceptor.
 type verificationInterceptor struct {
 	verifier        endpoint.VerifierEndpoint
 	observer        interceptors.DecisionObserver
 	recheckInterval time.Duration
 	now             func() time.Time
+	requirePolicy   bool
+	exempt          methodset.Set
+}
+
+// checkUnannotated decides an RPC to procedure, which declares no policy: an
+// error when a policy is required and the procedure is not exempt.
+func (v *verificationInterceptor) checkUnannotated(procedure string) error {
+	if !v.requirePolicy || v.exempt.Contains(procedure) {
+		return nil
+	}
+	return fmt.Errorf("procedure %s: %w", procedure, interceptors.ErrNoPolicy)
 }
 
 // VerificationInterceptor returns a ConnectRPC Interceptor that reads Policy
@@ -215,24 +255,33 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 	if verifier == nil {
 		panic("VerificationInterceptor: verifier must not be nil")
 	}
-	v := &verificationInterceptor{verifier: verifier}
+	v := &verificationInterceptor{verifier: verifier, now: time.Now}
 	for _, opt := range opts {
 		opt(v)
 	}
 	return v
 }
 
-// verify runs one authorization check, hands it to the observer, if any, and
-// returns the context the handler runs with. A credential the interceptor
-// could not read (credErr) refuses the check without asking the verifier.
-func (v *verificationInterceptor) verify(ctx context.Context, resource, action string, credErr error) (context.Context, error) {
-	var decision *interceptors.Decision
+// verify runs one authorization check of procedure, made at phase, hands it
+// to the observer, if any, and returns the context the handler runs with. A
+// credential the interceptor could not read (credErr) refuses the check
+// without asking the verifier.
+func (v *verificationInterceptor) verify(ctx context.Context, procedure string, phase interceptors.CheckPhase, resource, action string, credErr error) (context.Context, error) {
+	var (
+		decision *interceptors.Decision
+		took     time.Duration
+	)
 	err := credErr
 	if err == nil {
+		start := v.now()
 		decision, err = endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+		took = v.now().Sub(start)
 	}
 	if v.observer != nil {
-		v.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
+		v.observer(ctx, interceptors.DecisionEvent{
+			Procedure: procedure, Phase: phase, Duration: took,
+			Resource: resource, Action: action, Decision: decision, Err: err,
+		})
 	}
 	if err != nil {
 		return ctx, err
@@ -257,13 +306,17 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			return nil, toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
-		// No policy in context means the method has no policy — pass through.
+		// No policy in context means the method declares none: it passes
+		// through unchecked, unless WithRequirePolicy refuses it.
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
+			if err := v.checkUnannotated(req.Spec().Procedure); err != nil {
+				return nil, toConnectError(ctx, err)
+			}
 			return next(ctx, req)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
+		ctx, err := v.verify(ctx, req.Spec().Procedure, interceptors.CheckOpen, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return nil, toConnectError(ctx, err)
 		}
@@ -286,9 +339,13 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
-		// No policy in context means the method has no policy — pass through.
+		// No policy in context means the method declares none: it passes
+		// through unchecked, unless WithRequirePolicy refuses it.
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
+			if err := v.checkUnannotated(conn.Spec().Procedure); err != nil {
+				return toConnectError(ctx, err)
+			}
 			return next(ctx, conn)
 		}
 
@@ -296,12 +353,13 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 		// inner interceptors, and every check of the stream must ask about the
 		// target it opened for.
 		resource, action := policyData.Resource, policyData.Action
+		procedure := conn.Spec().Procedure
 
 		// The opening check is the gate's first, so an interval runs from it.
 		gate := streamcheck.New(v.recheckInterval, v.now)
 		err := gate.Check(func() error {
 			var err error
-			ctx, err = v.verify(ctx, resource, action, credErr)
+			ctx, err = v.verify(ctx, procedure, interceptors.CheckOpen, resource, action, credErr)
 			return err
 		})
 		if err != nil {
@@ -310,16 +368,17 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 
 		err = next(ctx, &authStreamingHandlerConn{
 			StreamingHandlerConn: conn,
+			ctx:                  ctx,
 			gate:                 gate,
-			check: func() error {
-				if _, err := v.verify(ctx, resource, action, nil); err != nil {
+			check: func(phase interceptors.CheckPhase) error {
+				if _, err := v.verify(ctx, procedure, phase, resource, action, nil); err != nil {
 					return toConnectError(ctx, err)
 				}
 				return nil
 			},
 		})
-		if denied := gate.Err(); denied != nil {
-			return denied
+		if failed := gate.Err(); failed != nil {
+			return gateError(ctx, failed)
 		}
 		return err
 	}
@@ -334,34 +393,55 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 // messages flow. A send is checked before the message goes out, so a refused
 // message is never sent. A receive is checked after the message arrives, so a
 // refused message is cleared and never handed over; a receive that fails has
-// no message and is not checked. The gate decides which messages are checked
-// and makes the first failure final: every later send or receive returns it
-// without asking the verifier or using the transport.
+// no message and is not checked. A check that does not return — the observer
+// or the endpoint panicked — is a failure: a send it guarded is not sent, a
+// message it checked is cleared even when the handler recovers the panic, and
+// the stream fails with Internal. The gate decides which messages are checked and makes the
+// first failure final: every later send or receive returns it without asking
+// the verifier or using the transport.
 type authStreamingHandlerConn struct {
 	connect.StreamingHandlerConn
-	gate  *streamcheck.Gate
-	check func() error
+	ctx  context.Context
+	gate *streamcheck.Gate
+	// check re-checks the stream, made at phase.
+	check func(phase interceptors.CheckPhase) error
 }
 
 func (c *authStreamingHandlerConn) Send(msg any) error {
-	if err := c.gate.Check(c.check); err != nil {
-		return err
+	if err := c.gate.Check(func() error { return c.check(interceptors.CheckSend) }); err != nil {
+		return gateError(c.ctx, err)
 	}
 	return c.StreamingHandlerConn.Send(msg)
 }
 
 func (c *authStreamingHandlerConn) Receive(msg any) error {
 	if err := c.gate.Err(); err != nil {
-		return err
+		return gateError(c.ctx, err)
 	}
 	if err := c.StreamingHandlerConn.Receive(msg); err != nil {
 		return err
 	}
-	if err := c.gate.Check(c.check); err != nil {
-		clearMessage(msg)
-		return err
+	allowed := false
+	defer func() {
+		if !allowed {
+			clearMessage(msg)
+		}
+	}()
+	if err := c.gate.Check(func() error { return c.check(interceptors.CheckReceive) }); err != nil {
+		return gateError(c.ctx, err)
 	}
+	allowed = true
 	return nil
+}
+
+// gateError is the stream's failure as the caller is told it. A check that
+// returned an error mapped it already; one that did not return left
+// streamcheck.ErrCheckIncomplete, which is mapped here.
+func gateError(ctx context.Context, err error) error {
+	if errors.Is(err, streamcheck.ErrCheckIncomplete) {
+		return toConnectError(ctx, err)
+	}
+	return err
 }
 
 // clearMessage zeroes a received message that must not be handed over: a
