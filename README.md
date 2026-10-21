@@ -191,9 +191,12 @@ naming a resource no policy meant.
 
 ### Request fields a placeholder can read
 
-`request_field` names a **top-level** field of the request message by its
-`.proto` field name; a dotted path into a nested message is not read. The field
-must be a single value (not `repeated`, not a `map`) of one of these kinds:
+`request_field` names a field of the request message by its `.proto` field
+name, or a path of field names joined by `.` that walks into nested messages:
+`post.author.id` reads `id` of the request's `post`'s `author`. Field names
+cannot contain `.`, so a path names one field at most. Every segment but the
+last must be a singular message field; the last, the leaf, must be a single
+value (not `repeated`, not a `map`) of one of these kinds:
 
 | Kind | Substituted as |
 |---|---|
@@ -204,9 +207,23 @@ must be a single value (not `repeated`, not a `map`) of one of these kinds:
 | `bytes` | lowercase hex |
 
 Any other kind — `enum`, `float`, `double`, a message — and a field the message
-does not have fail resolution with `Internal`. A field the request did not set
+does not have fail resolution with `Internal`. A leaf the request did not set
 resolves to its default value, in proto3 the zero value: `0` and `false` fill
-the placeholder, while an empty `string` or `bytes` is refused as empty.
+the placeholder, while an empty `string` or `bytes` is refused as empty. The
+leaf of a path is read exactly as a top-level field is, and its value is
+checked against the [segment grammar](#placeholder-values) the same way.
+
+On the way to the leaf:
+
+- **A message the request did not set is refused**, as
+  `*interceptors.ResourceValueError`, so `PermissionDenied` with no backend
+  asked — even for a mapping whose placeholder the template does not use.
+  Whether it is set is the caller's choice, so it never resolves to a default.
+- **A `repeated` or `map` field, a scalar, or a name the message does not
+  have** fails resolution with `Internal`: the policy names a path the request
+  type cannot have.
+- **A streaming method** still refuses `field_mappings` outright (see
+  [Streaming](#streaming)), paths included.
 
 A `bytes` field is substituted as its lowercase hex encoding, always: the byte
 `0xff` resolves to `ff` and the two bytes `"ff"` to `6666`, so two different
