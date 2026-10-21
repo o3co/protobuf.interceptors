@@ -14,6 +14,15 @@
 
 package interceptors
 
+import "errors"
+
+// ErrNoPolicy reports an RPC refused because its method declares no policy
+// option while the verification interceptor was built to require one (the
+// framework modules' WithRequirePolicy). The omission is the service's, not
+// the caller's, so the framework interceptors map it to Internal, as they do
+// a method with no descriptor. The error they return wraps it.
+var ErrNoPolicy = errors.New("method declares no policy")
+
 // DeniedError indicates that the authorization check denied the request.
 //
 // The framework interceptors tell the RPC caller only PermissionDenied with

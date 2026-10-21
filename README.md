@@ -77,7 +77,7 @@ service PostService {
     };
   }
 
-  // No policy option = no authorization check
+  // No policy option = no authorization check, unless WithRequirePolicy is given
   rpc HealthCheck(Empty) returns (Status);
 }
 ```
@@ -112,9 +112,10 @@ The policy is read from the method's descriptor in the protobuf registry:
 
 - **Descriptor found, policy option set** — the RPC is checked.
 - **Descriptor found, no policy option** — the RPC is not checked and passes
-  through. On grpc-go, the health and reflection services
-  (`google.golang.org/grpc/health`, `google.golang.org/grpc/reflection`) are
-  such methods.
+  through, unless the verification interceptor requires a policy (see
+  [Requiring a policy](#requiring-a-policy)). On grpc-go, the health and
+  reflection services (`google.golang.org/grpc/health`,
+  `google.golang.org/grpc/reflection`) are such methods.
 - **No descriptor** — the RPC is **refused** with `Internal` before its handler
   runs, since its policy cannot be known. On gRPC that is a method missing from
   `protoregistry.GlobalFiles`: one served by `grpc.UnknownServiceHandler`, by a
@@ -130,6 +131,40 @@ The policy is read from the method's descriptor in the protobuf registry:
 Server reflection publishes method options, so a client that can reach the
 reflection service can read every method's policy option: its resource
 template, action and field mappings.
+
+### Requiring a policy
+
+By default a method without a policy option passes, so a forgotten annotation
+leaves the method open. `WithRequirePolicy` on the verification interceptor
+turns that around, as grpc-go's `authz` package and Envoy's RBAC filter do: a
+method whose descriptor carries no policy option is refused with `Internal`
+before its handler runs — the omission is the service's, like a missing
+descriptor. No backend is asked and the observer is not called. The error the
+interceptor returns unwraps to `interceptors.ErrNoPolicy`.
+
+```go
+policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
+    "/grpc.health.v1.Health/",
+    "/grpc.reflection.v1.ServerReflection/",
+    "/grpc.reflection.v1alpha.ServerReflection/",
+    "/foo.v1.FooService/Ping",
+))
+```
+
+- **An exempt entry** is a method, `/package.Service/Method`, or a whole
+  service, `/package.Service/`. An entry of any other form panics at the
+  option: the entries are constants of the program. An exemption admits only
+  a method with no policy; a method with a policy is always checked.
+- **Nothing is exempt unless listed.** On grpc-go, the health and reflection
+  services are methods with no policy, so list them to keep them reachable, as
+  above.
+- **On ConnectRPC** the option applies to `policyconnect.VerificationInterceptor`
+  and an entry names a procedure. ConnectRPC's `grpchealth` and `grpcreflect`
+  handlers carry no schema, so `PolicyOptionInterceptor` refuses them before
+  this option applies and an exemption does not admit them: mount them without
+  the interceptors (see [ConnectRPC](#connectrpc)).
+- On gRPC, give the option to both `VerificationInterceptor` and
+  `VerificationStreamInterceptor`; each applies it to the RPCs it sees.
 
 ### Placeholder values
 
@@ -347,7 +382,8 @@ mux.Handle(path, handler)
 
 `connectrpc.com/grpchealth` and `connectrpc.com/grpcreflect` build their
 handlers without `connect.WithSchema`, so behind these interceptors every
-health check and reflection request is refused with `Internal`. Pass the
+health check and reflection request is refused with `Internal`, whatever
+`WithRequirePolicy` exempts. Pass the
 interceptors to your service handlers only, not as one option shared by every
 handler:
 
@@ -405,7 +441,7 @@ called, or why a token was refused, so none of its text reaches the caller:
 | `*interceptors.UnauthenticatedError`, including an unreadable credential | `Unauthenticated` | `unauthenticated` |
 | `context.Canceled`, when the RPC's own context was canceled | `Canceled` | `request canceled` |
 | `context.DeadlineExceeded`, when the RPC's own deadline passed | `DeadlineExceeded` | `deadline exceeded` |
-| anything else — a backend failure (including the endpoint's own HTTP timeout while the RPC is live), a method with no descriptor, a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| anything else — a backend failure (including the endpoint's own HTTP timeout while the RPC is live), a method with no descriptor, a method with no policy under `WithRequirePolicy` (`interceptors.ErrNoPolicy`), a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
 The full error goes to the `WithDecisionObserver` observer for every check
 (see [Recording the decision](#recording-the-decision)). The error an

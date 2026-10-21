@@ -57,7 +57,7 @@ service PostService {
     };
   }
 
-  // No policy option = no authorization check
+  // No policy option = no authorization check, unless WithRequirePolicy is given
   rpc HealthCheck(Empty) returns (Status);
 }
 ```
@@ -91,10 +91,28 @@ RPC request
 ポリシーは protobuf レジストリにあるメソッドのディスクリプターから読む:
 
 - **ディスクリプターがあり、ポリシーオプションが設定されている** — RPC は検査される。
-- **ディスクリプターがあり、ポリシーオプションが無い** — RPC は検査されずに通過する。grpc-go では、ヘルスサービスとリフレクションサービス（`google.golang.org/grpc/health`、`google.golang.org/grpc/reflection`）がこれにあたる。
+- **ディスクリプターがあり、ポリシーオプションが無い** — RPC は検査されずに通過する。ただし検証インターセプターがポリシーを要求する場合は別である（[ポリシーの要求](#ポリシーの要求)を参照）。grpc-go では、ヘルスサービスとリフレクションサービス（`google.golang.org/grpc/health`、`google.golang.org/grpc/reflection`）がこれにあたる。
 - **ディスクリプターが無い** — ポリシーが分からないので、RPC はハンドラーの実行前に `Internal` で**拒否**される。gRPC では `protoregistry.GlobalFiles` に無いメソッドがこれにあたる: `grpc.UnknownServiceHandler` が扱うもの、`.proto` が登録されていない手書きの `ServiceDesc` が扱うもの、そしてディスクリプターが `GlobalFiles` ではなく gogo のレジストリに登録される gogo/protobuf 生成のサービス。ConnectRPC では `connect.WithSchema` なしで作ったハンドラーがこれにあたる: 手組みのハンドラー、`connect.WithSchema` を出力しない古い protoc-gen-connect-go のコード、そしてスキーマを設定しない ConnectRPC 自身の `connectrpc.com/grpchealth` と `connectrpc.com/grpcreflect` のハンドラー。これらはインターセプターなしでマウントすること（[ConnectRPC](#connectrpc)を参照）。
 
 サーバーリフレクションはメソッドオプションを公開するので、リフレクションサービスに到達できるクライアントは、すべてのメソッドのポリシーオプション — リソーステンプレート、アクション、フィールドマッピング — を読める。
+
+### ポリシーの要求
+
+デフォルトでは、ポリシーオプションの無いメソッドは通過するので、注釈を書き忘れるとそのメソッドは開いたままになる。検証インターセプターに `WithRequirePolicy` を与えると、grpc-go の `authz` パッケージや Envoy の RBAC フィルターと同じく、これが逆になる: ディスクリプターにポリシーオプションの無いメソッドは、ハンドラーの実行前に `Internal` で拒否される — ディスクリプターが無い場合と同じく、書き忘れはサービスの不備である。どのバックエンドにも問い合わせず、オブザーバーも呼ばない。インターセプターが返すエラーは `interceptors.ErrNoPolicy` に unwrap できる。
+
+```go
+policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
+    "/grpc.health.v1.Health/",
+    "/grpc.reflection.v1.ServerReflection/",
+    "/grpc.reflection.v1alpha.ServerReflection/",
+    "/foo.v1.FooService/Ping",
+))
+```
+
+- **除外の指定**は、メソッド `/package.Service/Method` か、サービス全体 `/package.Service/` である。それ以外の形の指定は、オプションの呼び出しで panic する: 指定はプログラムの定数だからである。除外が通すのはポリシーの無いメソッドだけで、ポリシーのあるメソッドは常に検査される。
+- **列挙しない限り何も除外されない。** grpc-go では、ヘルスサービスとリフレクションサービスはポリシーの無いメソッドなので、到達できるようにするには上のように列挙すること。
+- **ConnectRPC では** `policyconnect.VerificationInterceptor` に与え、指定は procedure を名指す。ConnectRPC の `grpchealth` と `grpcreflect` のハンドラーはスキーマを持たないので、このオプションが働く前に `PolicyOptionInterceptor` が拒否し、除外しても通らない: インターセプターなしでマウントすること（[ConnectRPC](#connectrpc)を参照）。
+- gRPC では、`VerificationInterceptor` と `VerificationStreamInterceptor` の両方に与えること。それぞれが自分の扱う RPC に適用する。
 
 ### プレースホルダーの値
 
@@ -238,7 +256,7 @@ path, handler := foopbconnect.NewFooServiceHandler(
 mux.Handle(path, handler)
 ```
 
-`connectrpc.com/grpchealth` と `connectrpc.com/grpcreflect` はハンドラーを `connect.WithSchema` なしで作るので、これらのインターセプターの後ろでは、すべてのヘルスチェックとリフレクションのリクエストが `Internal` で拒否される。インターセプターは、すべてのハンドラーで共有する 1 つのオプションとしてではなく、自分のサービスのハンドラーにだけ渡すこと:
+`connectrpc.com/grpchealth` と `connectrpc.com/grpcreflect` はハンドラーを `connect.WithSchema` なしで作るので、これらのインターセプターの後ろでは、`WithRequirePolicy` で何を除外しても、すべてのヘルスチェックとリフレクションのリクエストが `Internal` で拒否される。インターセプターは、すべてのハンドラーで共有する 1 つのオプションとしてではなく、自分のサービスのハンドラーにだけ渡すこと:
 
 ```go
 // The service is checked.
@@ -275,7 +293,7 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | `*interceptors.UnauthenticatedError`（読み取れないクレデンシャルを含む） | `Unauthenticated` | `unauthenticated` |
 | RPC 自身のコンテキストがキャンセルされたときの `context.Canceled` | `Canceled` | `request canceled` |
 | RPC 自身のデッドラインが過ぎたときの `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
-| それ以外すべて — バックエンドの失敗（RPC が生きている間にエンドポイント自身の HTTP タイムアウトが発火した場合を含む）、ディスクリプターの無いメソッド、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| それ以外すべて — バックエンドの失敗（RPC が生きている間にエンドポイント自身の HTTP タイムアウトが発火した場合を含む）、ディスクリプターの無いメソッド、`WithRequirePolicy` の下でのポリシーの無いメソッド（`interceptors.ErrNoPolicy`）、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
 完全なエラーは、すべての検査について `WithDecisionObserver` のオブザーバーに渡る（[判定の記録](#判定の記録)を参照）。インターセプターが返すエラーもそれに unwrap できるので、これらより外側に置いたインターセプターは `errors.As` / `errors.Is` で取り出せる — オブザーバーが見ないポリシー参照や解決の失敗は、そこでログできる。インターセプターは自らはログを書かない。
 
