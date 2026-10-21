@@ -446,8 +446,7 @@ network, say — can take plaintext without `With…AllowInsecure()`:
 pairs alone, and reaches them at private addresses alone — `10.0.0.0/8`,
 `100.64.0.0/10`, `172.16.0.0/12`, `192.168.0.0/16` and `fc00::/7`, never a cloud
 metadata or credential address (`100.100.100.200`, `fd00:ec2::254`,
-`fd00:ec2::23`, `fd20:ce::254`, `fd00:a9fe:a9fe::1`). This is
-the line auth.provider's `outbound.plain-internal` draws.
+`fd00:ec2::23`, `fd20:ce::254`, `fd00:a9fe:a9fe::1`).
 
 ```go
 verifier, err := endpoint.NewO3coEndpoint(
@@ -478,7 +477,9 @@ verifier, err := endpoint.NewO3coEndpoint(
   deployment configuration, so it is reported like a base URL rather than as a
   panic: `WithO3coAllowPlainInternal(os.Getenv("PDP_ADDR"))` with the variable
   unset passes `""`, which `NewO3coEndpoint` refuses. A call with no entry lists
-  nothing.
+  nothing. An entry that holds a user, a path, a query or a fragment — a URL
+  given in place of a host and port — is named without them, since they can
+  carry a credential.
 - **A listed pair is always checked.** It is checked under `With…AllowInsecure()`
   too, and the constructor returns an error for one given `With…Transport(rt)`,
   since the check runs in the endpoint's own transport.

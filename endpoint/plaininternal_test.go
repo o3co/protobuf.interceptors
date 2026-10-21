@@ -187,6 +187,49 @@ func TestPlainInternal_InvalidEntries_AreAllNamed(t *testing.T) {
 	}
 }
 
+// Entries refused across several calls are all named.
+func TestPlainInternal_InvalidEntriesAcrossCalls_AreAllNamed(t *testing.T) {
+	_, err := NewO3coEndpoint("https://verifier.internal:3000",
+		WithO3coAllowPlainInternal(""),
+		WithO3coAllowPlainInternal("pdp:80"),
+		WithO3coAllowPlainInternal("pdp:0"),
+	)
+	if err == nil {
+		t.Fatal("bad entries were accepted")
+	}
+	for _, entry := range []string{`""`, `"pdp:0"`} {
+		if !strings.Contains(err.Error(), entry) {
+			t.Errorf("error %q does not name %s", err, entry)
+		}
+	}
+}
+
+// An entry that carries a user or a URL's scheme or path is refused without
+// repeating what precedes the host: a URL from the environment, given in
+// place of a host and port, can carry a password, and the error is logged.
+func TestPlainInternal_EntryWithCredentials_IsNotEchoed(t *testing.T) {
+	for _, k := range plainInternalKinds {
+		for _, entry := range []string{
+			"http://user:s3cret@pdp:8181", "user:s3cret@pdp:8181", "s3cret@pdp:8181",
+			"http://user:s3cret@pdp:8181/path", "http://pdp:8181/s3cret",
+			"pdp:8181?token=s3cret", "pdp:8181#s3cret", "user:pa/s3cret@pdp:8181",
+		} {
+			t.Run(k.name+"/"+entry, func(t *testing.T) {
+				_, err := k.build("https://verifier.internal:3000", plainInternalSetup{pairs: []string{entry}})
+				if err == nil {
+					t.Fatalf("%q was accepted", entry)
+				}
+				if strings.Contains(err.Error(), "s3cret") {
+					t.Errorf("error %q repeats the entry's credentials", err)
+				}
+				if !strings.Contains(err.Error(), "AllowPlainInternal") {
+					t.Errorf("error %q does not name the option", err)
+				}
+			})
+		}
+	}
+}
+
 func TestPlainInternal_ValidEntry_IsAccepted(t *testing.T) {
 	valid := []string{
 		"policy-verifier:3000", "PDP.Internal:8181", "pdp:1", "pdp:65535",
@@ -483,5 +526,21 @@ func TestPlainInternal_AnAddressThatDoesNotAnswer_LeavesTimeForTheNext(t *testin
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+// A redacted entry keeps the scheme and the host and port, so the operator
+// can still find it, and drops what can carry a credential.
+func TestRedactedEntry(t *testing.T) {
+	for entry, want := range map[string]string{
+		"http://user:s3cret@pdp:8181/path": "http://…@pdp:8181…",
+		"user:pa/s3cret@pdp:8181":          "…@pdp:8181",
+		"http://pdp:8181/s3cret":           "http://pdp:8181…",
+		"pdp:8181?token=s3cret":            "pdp:8181…",
+		"pdp:8181":                         "pdp:8181",
+	} {
+		if got := redactedEntry(entry); got != want {
+			t.Errorf("redactedEntry(%q) = %q, want %q", entry, got, want)
+		}
 	}
 }

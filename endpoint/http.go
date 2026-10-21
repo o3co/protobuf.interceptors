@@ -136,7 +136,12 @@ func parseBaseURL(raw string) (*url.URL, error) {
 // a host and port, whose port is not a decimal from 1 to 65535 without a
 // leading zero, whose name is not a host name (see validHostName), or whose
 // address is not on a private network: such an entry is never reached.
+// An entry that holds a user, a path, a query or a fragment is a URL given in
+// place of a host and port, and is named only as redactedEntry spells it.
 func plainInternalPair(entry string) (string, error) {
+	if strings.ContainsAny(entry, "@/?#") {
+		return "", fmt.Errorf("plain-internal entry %q is not a host and port: it is a URL or names a user", redactedEntry(entry))
+	}
 	host, port, err := net.SplitHostPort(entry)
 	if err != nil {
 		return "", fmt.Errorf("plain-internal entry %q is not a host and port: %w", entry, err)
@@ -155,6 +160,24 @@ func plainInternalPair(entry string) (string, error) {
 		return "", fmt.Errorf("plain-internal entry %q: the host is neither an address nor a host name", entry)
 	}
 	return net.JoinHostPort(name, port), nil
+}
+
+// redactedEntry returns entry with what can carry a credential replaced by
+// "…": a user and password before the last '@', and everything from the
+// first '/', '?' or '#' after the host. A scheme is kept.
+func redactedEntry(entry string) string {
+	var prefix string
+	rest := entry
+	if i := strings.Index(rest, "://"); i >= 0 {
+		prefix, rest = rest[:i+3], rest[i+3:]
+	}
+	if i := strings.LastIndexByte(rest, '@'); i >= 0 {
+		prefix, rest = prefix+"…@", rest[i+1:]
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i] + "…"
+	}
+	return prefix + rest
 }
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
@@ -255,8 +278,8 @@ func privateTransport(d *privatenet.Dialer) *http.Transport {
 	}
 }
 
-// maxIdleConns bounds a private transport's idle connections, as
-// http.DefaultTransport bounds its own.
+// maxIdleConns bounds a private transport's idle connections: the total
+// http.DefaultTransport keeps, and here the bound for its one host too.
 const maxIdleConns = 100
 
 // isLoopback reports whether host is localhost, in any case, or a literal

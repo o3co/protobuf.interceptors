@@ -16,9 +16,10 @@
 // connects only to those.
 //
 // The private networks are 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12,
-// 192.168.0.0/16 and fc00::/7. The cloud metadata addresses inside them are
-// not private. An IPv4 address mapped into IPv6 is judged as the IPv4 address
-// a connection reaches; no other IPv6 form that carries an IPv4 address is.
+// 192.168.0.0/16 and fc00::/7. The cloud metadata and credential addresses
+// inside them are not private. An IPv4 address mapped into IPv6 is judged as
+// the IPv4 address a connection reaches; no other IPv6 form that carries an
+// IPv4 address is.
 package privatenet
 
 import (
@@ -54,7 +55,7 @@ var metadataAddresses = []netip.Addr{
 }
 
 // Contains reports whether addr is on a private network and is not a cloud
-// metadata address. A zoned address is not, an IPv4-mapped one included:
+// metadata or credential address. A zoned address is not, an IPv4-mapped one included:
 // the zone names a link, and unmapping drops it, which would reach another
 // address than the one written.
 func Contains(addr netip.Addr) bool {
