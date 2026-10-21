@@ -79,6 +79,7 @@ func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*u
 			return nil, nil, fmt.Errorf("base URL %s is listed with With%sAllowPlainInternal, whose address check runs in the endpoint's own transport: it cannot be reached over With%sTransport", u.Redacted(), kind, kind)
 		case listed:
 			dialer := r.privateDialer
+			dialer.Timeout = timeout
 			transport = privateTransport(&dialer)
 		case !r.allowInsecure:
 			return nil, nil, fmt.Errorf("base URL %s sends the bearer token in plaintext to a host other than loopback: use https, list its host and port with With%sAllowPlainInternal for a host on a private network, or permit it with With%sAllowInsecure", u.Redacted(), kind, kind)

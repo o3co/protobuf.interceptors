@@ -75,22 +75,36 @@ type Dialer struct {
 	// Resolver looks up a host's addresses. Nil is net.DefaultResolver.
 	Resolver Resolver
 	// Dial connects to one address, written as an IP and port. Nil is a
-	// net.Dialer with http.DefaultTransport's timeout and keep-alive.
+	// net.Dialer with http.DefaultTransport's keep-alive.
 	Dial func(ctx context.Context, network, address string) (net.Conn, error)
+	// Timeout bounds a whole DialContext, the lookup and every attempt.
+	// Zero is defaultTimeout. net/http dials under a context that carries no
+	// deadline of the request's, so this is what shares time among the
+	// addresses.
+	Timeout time.Duration
 }
 
-var defaultDialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+// defaultTimeout is http.DefaultTransport's dial timeout.
+const defaultTimeout = 30 * time.Second
+
+var defaultDialer = &net.Dialer{KeepAlive: 30 * time.Second}
 
 // DialContext connects to address, a host and port, at the first of the
-// host's addresses that answers, trying them in turn; while more than one is
-// left to try, an attempt has its share of the time ctx leaves, as with a
-// net.Dialer. It refuses before connecting at all when the host resolves to
+// host's addresses that answers, trying them in turn within Timeout; while
+// more than one is left to try, an attempt has its share of the time left, as
+// with a net.Dialer. It refuses before connecting at all when the host resolves to
 // no address or to any address that is not private.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
 	}
+	timeout := d.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var addrs []netip.Addr
 	if addr, err := netip.ParseAddr(host); err == nil {

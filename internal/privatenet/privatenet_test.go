@@ -286,3 +286,28 @@ func TestDialer_Defaults_HonourTheContext(t *testing.T) {
 		}
 	}
 }
+
+// Timeout bounds the dial where ctx has no deadline, as net/http's does not,
+// and is what the attempts share; zero is the default.
+func TestDialer_Timeout_BoundsADialWithoutADeadline(t *testing.T) {
+	for _, tt := range []struct {
+		timeout time.Duration
+		share   time.Duration
+	}{
+		{4 * time.Second, 2 * time.Second},
+		{0, defaultTimeout / 2},
+	} {
+		r := &fakeResolver{addrs: addrs("10.0.0.7", "10.0.0.8")}
+		d := &deadlineDial{}
+		start := time.Now()
+		if _, err := (&Dialer{Resolver: r, Dial: d.dial, Timeout: tt.timeout}).DialContext(context.Background(), "tcp", "pdp:80"); err == nil {
+			t.Fatal("expected an error")
+		}
+		if len(d.deadlines) != 2 {
+			t.Fatalf("dialed %d times, want 2", len(d.deadlines))
+		}
+		if got := d.deadlines[0].Sub(start); got > tt.share+100*time.Millisecond || got < tt.share-time.Second {
+			t.Errorf("Timeout %v: the first attempt had %v, want about %v", tt.timeout, got, tt.share)
+		}
+	}
+}

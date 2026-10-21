@@ -458,8 +458,9 @@ verifier, err := endpoint.NewO3coEndpoint(
 - **Checked as each connection is made.** The host is resolved, and unless
   every address it resolves to is private none is connected to, so a name that
   comes to resolve to a public address is refused rather than sent the token.
-  The connection goes to a checked address directly, through no proxy the
-  environment names. An IPv4 address mapped into IPv6 counts as the IPv4
+  The addresses are tried in turn within the endpoint's timeout, each but the
+  last with a share of it, and the connection goes to a checked address
+  directly, through no proxy the environment names. An IPv4 address mapped into IPv6 counts as the IPv4
   address; no other IPv6 form that carries one does.
 - **Matched as written.** A base URL's host and port must be listed; a URL
   without a port has port 80. A host name matches in any case and with or

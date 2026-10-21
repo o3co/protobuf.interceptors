@@ -26,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/internal/privatenet"
@@ -36,6 +37,7 @@ type plainInternalSetup struct {
 	pairs         []string
 	allowInsecure bool
 	transport     http.RoundTripper
+	timeout       time.Duration
 	// dialer replaces the private-network dialer's lookup and connect; its
 	// zero value leaves both as they are.
 	dialer privatenet.Dialer
@@ -63,6 +65,9 @@ var plainInternalKinds = []struct {
 			if s.transport != nil {
 				opts = append(opts, WithO3coTransport(s.transport))
 			}
+			if s.timeout != 0 {
+				opts = append(opts, WithO3coTimeout(s.timeout))
+			}
 			return NewO3coEndpoint(baseURL, opts...)
 		},
 		client: func(ep VerifierEndpoint) *http.Client { return ep.(*o3coEndpoint).httpClient },
@@ -81,6 +86,9 @@ var plainInternalKinds = []struct {
 			}
 			if s.transport != nil {
 				opts = append(opts, WithOPATransport(s.transport))
+			}
+			if s.timeout != 0 {
+				opts = append(opts, WithOPATimeout(s.timeout))
 			}
 			return NewOPAEndpoint(baseURL, "authz/allow", opts...)
 		},
@@ -101,6 +109,9 @@ var plainInternalKinds = []struct {
 			}
 			if s.transport != nil {
 				opts = append(opts, WithCedarTransport(s.transport))
+			}
+			if s.timeout != 0 {
+				opts = append(opts, WithCedarTimeout(s.timeout))
 			}
 			return NewCedarEndpoint(baseURL, opts...)
 		},
@@ -375,6 +386,39 @@ func TestPlainInternal_UsesNoProxy(t *testing.T) {
 			// once per process.
 			if tr.Proxy != nil {
 				t.Error("the transport has a proxy function")
+			}
+		})
+	}
+}
+
+// An address that takes no connection leaves time for the next within the
+// endpoint's timeout: net/http dials with a context that carries no deadline,
+// so the endpoint bounds the dial itself.
+func TestPlainInternal_AnAddressThatDoesNotAnswer_LeavesTimeForTheNext(t *testing.T) {
+	for _, k := range plainInternalKinds {
+		t.Run(k.name, func(t *testing.T) {
+			t.Parallel()
+			srv := serve(t, http.StatusOK, k.allow)
+			port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
+			pair := net.JoinHostPort("pdp.test", port)
+			dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+				if address == net.JoinHostPort("10.0.0.7", port) {
+					<-ctx.Done() // a dropped SYN
+					return nil, ctx.Err()
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, network, srv.Listener.Addr().String())
+			}
+			ep, err := k.build("http://"+pair, plainInternalSetup{
+				pairs:   []string{pair},
+				timeout: 6 * time.Second,
+				dialer:  privatenet.Dialer{Resolver: resolvingTo("10.0.0.7", "10.0.0.8"), Dial: dial},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := ep.Verify(ctxWithToken("tok"), "r", "a"); err != nil {
+				t.Errorf("unexpected error: %v", err)
 			}
 		})
 	}

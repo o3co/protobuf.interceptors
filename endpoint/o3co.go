@@ -167,7 +167,9 @@ func WithO3coAllowInsecure() O3coOption {
 // The addresses are checked as each connection is made: the host is
 // resolved, and unless every address it resolves to is private none is
 // connected to, so a name that comes to resolve elsewhere is refused. The
-// connection goes straight to a checked address, through no proxy.
+// addresses are tried in turn within the endpoint's timeout, each but the
+// last with a share of it, and the connection goes straight to a checked
+// address, through no proxy.
 // Every request still carries the subject's bearer token in the clear
 // on that network: list only backends on a network trusted against reading and
 // changing what crosses it.
