@@ -160,10 +160,17 @@ type opaInput struct {
 	Resource string `json:"resource"`
 	Action   string `json:"action"`
 	Token    string `json:"token"`
+	// Context holds the extracted field_mappings values on the context
+	// (interceptors.ExtractedFieldsFromContext), keyed by placeholder. They
+	// come from the request, so a policy reads them as the caller's claims.
+	Context map[string]string `json:"context,omitempty"`
 }
 
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
-// The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
+// The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}. The
+// input holds resource, action and token, and context, the extracted
+// field_mappings values (interceptors.ExtractedFieldsFromContext), when there
+// are any.
 // It returns an error if policyPath is empty or baseURL does not name http or
 // https and a host, and refuses http to a host other than loopback unless
 // WithOPAAllowPlainInternal lists its host and port or WithOPAAllowInsecure is
@@ -220,6 +227,9 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 			Action:   action,
 			Token:    token,
 		},
+	}
+	if fields, ok := interceptors.ExtractedFieldsFromContext(ctx); ok && len(fields) > 0 {
+		reqBody.Input.Context = fields
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
