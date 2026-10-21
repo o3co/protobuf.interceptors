@@ -20,8 +20,9 @@
 // handler was built with (connect.WithSchema) and resolves it;
 // VerificationInterceptor reads the bearer token and request ID from the
 // request headers and asks the endpoint. Pass both to a handler, the policy
-// interceptor first. A handler built without a schema is refused, and a
-// stream is re-checked on every message it sends or receives (see
+// interceptor first. A handler built without a schema is refused, a method
+// without a policy option passes unchecked unless WithRequirePolicy is given,
+// and a stream is re-checked on every message it sends or receives (see
 // WithStreamRecheckInterval). Passed to a client, both interceptors let every
 // call through untouched.
 //
