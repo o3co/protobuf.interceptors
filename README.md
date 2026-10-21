@@ -677,8 +677,10 @@ authenticated, on an allow and on a denial. It is empty when the verifier sent
 none, which it does for a token without a subject; the OPA and Cedar endpoints
 report no decision at all. It is reported only: no verdict rests on it. When
 the verifier sends the `subject` key it must be a non-empty string; `null`,
-`""` or another type makes the envelope not whole, so a `200` carrying it fails
-closed.
+`""` or another type makes the envelope not whole, so a `2xx` carrying it fails
+closed, and a `403` carrying it is still a denial but reports no decision. A
+verifier older than v0.4.0 sends `""` for a token whose `sub` is empty, and
+those allows fail closed.
 
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The

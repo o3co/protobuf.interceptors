@@ -284,6 +284,20 @@ func TestO3coVerifyDecision_IgnoresUnknownKeys(t *testing.T) {
 	if !d.RevisionConfirmed() {
 		t.Errorf("RevisionConfirmed() = false for %+v", d)
 	}
+	// Subject in another case is an unknown key: it neither replaces subject
+	// nor makes the envelope not whole.
+	if d.Subject != "u1" {
+		t.Errorf("Subject = %q, want %q", d.Subject, "u1")
+	}
+}
+
+// subject in another case alone is no subject.
+func TestO3coVerifyDecision_SubjectInAnotherCase_IsIgnored(t *testing.T) {
+	body := `{"decision": "allow", "resource": "r", "action": "a", "Subject": "u1", "reason": {"groups": []}}`
+	d, err := newTestEndpoint(t, serve(t, http.StatusOK, body).URL).VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err != nil || d == nil || d.Subject != "" {
+		t.Errorf("VerifyDecision = (%+v, %v), want an allow with no subject", d, err)
+	}
 }
 
 // Without evaluation — a verifier that does not report one, or has not opted
@@ -719,22 +733,23 @@ func TestO3coVerifyDecision_PassedAndSatisfiedByInAnotherCase_AreIgnored(t *test
 	}
 }
 
-// subjectEnvelope is a decision envelope of verdict carrying subjectJSON as its
-// subject key, or no subject key when subjectJSON is empty.
+// subjectEnvelope is a decision envelope of verdict, "allow" or "deny",
+// carrying subjectJSON as its subject key, or no subject key when subjectJSON
+// is empty.
 func subjectEnvelope(verdict, subjectJSON string) string {
-	var deny, subject string
-	if verdict == "deny" {
-		deny = `"code": "cedar_deny", "message": "Denied",`
-	}
+	var subject string
 	if subjectJSON != "" {
-		subject = `"subject": ` + subjectJSON + `,`
+		subject = `"subject": ` + subjectJSON + `, `
 	}
-	return `{ "decision": "` + verdict + `", ` + deny + subject + ` "resource": "posts:1", "action": "read",
-  "reason": { "groups": [ {
-    "ruleType": "rbac", "passed": ` + map[string]string{"allow": "true", "deny": "false"}[verdict] + `,
-    "evaluated": [ { "code": "role_granted", "message": "Granted", "passed": ` + map[string]string{"allow": "true", "deny": "false"}[verdict] + ` } ]` +
-		map[string]string{"allow": `, "satisfiedBy": { "code": "role_granted", "message": "Granted", "passed": true }`, "deny": ""}[verdict] + `
-  } ] } }`
+	if verdict == "allow" {
+		return `{"decision": "allow", ` + subject + `"resource": "posts:1", "action": "read",
+  "reason": {"groups": [{"ruleType": "rbac", "passed": true,
+    "evaluated": [{"code": "role_granted", "message": "Granted", "passed": true}],
+    "satisfiedBy": {"code": "role_granted", "message": "Granted", "passed": true}}]}}`
+	}
+	return `{"decision": "deny", "code": "cedar_deny", "message": "Denied", ` + subject + `"resource": "posts:1", "action": "read",
+  "reason": {"groups": [{"ruleType": "rbac", "passed": false,
+    "evaluated": [{"code": "role_missing", "message": "Missing", "passed": false}]}]}}`
 }
 
 // The subject the verifier authenticated is reported, and its absence is no

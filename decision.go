@@ -20,9 +20,9 @@ import (
 )
 
 // Decision is what an authorization backend reported behind one verdict: the
-// deny code and message, and the reason — every rule group it evaluated, how
-// each rule came out, and, where a rule reported one, the evaluation behind
-// that answer.
+// subject it was about, the deny code and message, and the reason — every
+// rule group it evaluated, how each rule came out, and, where a rule reported
+// one, the evaluation behind that answer.
 //
 // It is for the service, never for the RPC caller. Policy revisions and
 // evaluation statuses say when a policy set changed and whether a denial was
