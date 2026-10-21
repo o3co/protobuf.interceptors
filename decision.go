@@ -17,6 +17,7 @@ package interceptors
 import (
 	"context"
 	"regexp"
+	"time"
 )
 
 // Decision is what an authorization backend reported behind one verdict: the
@@ -189,8 +190,32 @@ func DecisionFromContext(ctx context.Context) (*Decision, bool) {
 	return d, ok && d != nil
 }
 
+// CheckPhase says where in an RPC an authorization check was made.
+type CheckPhase string
+
+const (
+	// CheckOpen is the check made before the handler runs: a unary RPC's
+	// only check, or the check that opens a stream.
+	CheckOpen CheckPhase = "open"
+	// CheckSend is a stream's re-check before a message the handler sends.
+	CheckSend CheckPhase = "send"
+	// CheckReceive is a stream's re-check after a message the handler
+	// receives.
+	CheckReceive CheckPhase = "receive"
+)
+
 // DecisionEvent is one authorization check a verification interceptor made.
 type DecisionEvent struct {
+	// Procedure is the RPC's full method name, "/package.Service/Method".
+	Procedure string
+	// Phase is where in the RPC the check was made. Any phase but CheckOpen
+	// is a stream's re-check.
+	Phase CheckPhase
+	// Duration is the time the endpoint call took. It is 0 when the
+	// interceptor made no call: a malformed credential it refused itself. A
+	// request with no token is the endpoint's to refuse, so its call is
+	// timed.
+	Duration time.Duration
 	// Resource and Action are what the backend was asked about.
 	Resource string
 	Action   string
@@ -206,6 +231,14 @@ type DecisionEvent struct {
 // interceptor makes — allowed, denied or failed — before the interceptor acts
 // on it: for a stream, the check that opens it and each re-check after. It is
 // where a service records what authorized or refused an operation, since a
-// denied RPC's handler never runs. It runs on the RPC's goroutine, so it
-// should not block.
+// denied RPC's handler never runs.
+//
+// It runs synchronously, and the RPC waits for it. A unary RPC's handler, or a
+// stream's, starts only after it returns. A stream's re-check calls it inside
+// the send or receive that made the check, while the stream's checks are
+// serialized: until it returns, that send or receive waits, and so does every
+// other send or receive on the stream that needs a check, in either direction.
+// Keep it cheap and non-blocking — hand slow work, such as a write to a remote
+// audit store, to another goroutine. Nothing recovers a panic in it: the
+// panic reaches the RPC's goroutine.
 type DecisionObserver func(ctx context.Context, ev DecisionEvent)

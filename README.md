@@ -656,6 +656,8 @@ with the endpoint's error before it is mapped for the caller:
 
 ```go
 observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
+    // ev.Procedure ("/pkg.Svc/Method"); ev.Phase (CheckOpen, CheckSend,
+    // CheckReceive); ev.Duration (the endpoint call, 0 when none was made);
     // ev.Resource, ev.Action; ev.Decision (nil when nothing was reported);
     // ev.Err (nil when allowed; errors.As finds *interceptors.DeniedError)
 }
@@ -663,8 +665,22 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
-A stream's re-check calls the observer on the send or receive that made it,
-which waits for the observer to return. Once a stream's client has gone away,
+- **`Procedure`** is the RPC's full method name, on both frameworks.
+- **`Phase`** is `CheckOpen` for the check made before the handler runs — a
+  unary RPC's only check, or the one that opens a stream — and `CheckSend` or
+  `CheckReceive` for a stream's re-check before a send or after a receive. Any
+  phase but `CheckOpen` is a re-check.
+- **`Duration`** is how long the endpoint call took. It is `0` when the
+  interceptor made no call: a malformed credential it refused itself (see
+  [Bearer token and request ID](#bearer-token-and-request-id)). A request with
+  no token is the endpoint's to refuse, so that call is timed, however short.
+
+**Keep the observer cheap and non-blocking.** It runs synchronously: a
+handler starts only after it returns. A stream's re-check calls it inside the
+send or receive that made the check, while the stream's checks are
+serialized, so until it returns that send or receive waits, and so does every
+other one on the stream that needs a check, in either direction. Hand slow
+work — a write to a remote audit store — to another goroutine. Once a stream's client has gone away,
 the next send's re-check on a built-in endpoint fails with the RPC's context
 error — the observer sees `context.Canceled` or `context.DeadlineExceeded`, not
 a denial.
