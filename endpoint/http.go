@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/internal/privatenet"
 )
 
@@ -291,15 +292,36 @@ func validHeaderName(name string) bool {
 }
 
 // requestError reports err, which ended a request to the backend made under
-// ctx. When ctx itself ended, the error wraps ctx.Err(), so errors.Is finds
-// context.Canceled or context.DeadlineExceeded. Otherwise it is the backend's
-// failure and wraps no context error — net/http reports the endpoint's own
-// timeout as context.DeadlineExceeded, which must not read as the caller's.
+// ctx before its answer was whole. When ctx itself ended, the error wraps
+// ctx.Err(), so errors.Is finds context.Canceled or context.DeadlineExceeded.
+// Otherwise the backend could not be reached, did not answer within the
+// endpoint's own timeout, or broke the connection, and the error wraps
+// interceptors.ErrBackendUnavailable and no context error — net/http reports
+// the endpoint's own timeout as context.DeadlineExceeded, which must not read
+// as the caller's. A host the private-network check refused is this
+// service's refusal, not the backend's failure, and wraps neither.
 func requestError(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
 	}
-	return fmt.Errorf("%s: %v", what, err)
+	if errors.Is(err, privatenet.ErrNotPrivate) {
+		return fmt.Errorf("%s: %v", what, err)
+	}
+	return fmt.Errorf("%w: %s: %v", interceptors.ErrBackendUnavailable, what, err)
+}
+
+// statusError returns err, which reports a status the endpoint does not take
+// as an answer, wrapping interceptors.ErrBackendUnavailable when the status
+// says the backend is overloaded or down: 429, 502, 503 or 504, the statuses
+// gRPC's and Connect's HTTP mappings read as unavailable. Any other status,
+// 500 and 3xx included, says the backend or this service is misconfigured or
+// broke the contract.
+func statusError(status int, err error) error {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return fmt.Errorf("%w: %v", interceptors.ErrBackendUnavailable, err)
+	}
+	return err
 }
 
 // readBounded reads body up to max bytes, and reports whether it held more.

@@ -25,9 +25,11 @@ import (
 // toConnectError converts a framework-neutral error to a ConnectRPC error. The
 // caller is told only the code and a fixed message for it: an endpoint's
 // error can name the backend, the URL it called, or why a token was refused.
-// Canceled and DeadlineExceeded say that the RPC's own context, ctx, ended; an
-// endpoint that timed out or was canceled while the RPC was live failed, and
-// that is Internal.
+// Canceled and DeadlineExceeded say that the RPC's own context, ctx, ended,
+// and win over every other cause. Unavailable says the backend could not
+// answer now (interceptors.ErrBackendUnavailable), which a client may retry
+// with backoff; it is still a refusal. Any other failure, an endpoint that
+// was canceled while the RPC was live included, is Internal.
 // The returned error unwraps to err, so an interceptor placed outside these
 // can still record it.
 func toConnectError(ctx context.Context, err error) error {
@@ -47,6 +49,8 @@ func toConnectError(ctx context.Context, err error) error {
 		return connect.NewError(connect.CodeCanceled, &fixedMessage{"request canceled", err})
 	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return connect.NewError(connect.CodeDeadlineExceeded, &fixedMessage{"deadline exceeded", err})
+	case errors.Is(err, interceptors.ErrBackendUnavailable):
+		return connect.NewError(connect.CodeUnavailable, &fixedMessage{"authorization backend unavailable", err})
 	default:
 		return connect.NewError(connect.CodeInternal, &fixedMessage{"authorization check failed", err})
 	}

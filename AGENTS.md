@@ -87,10 +87,12 @@ O3CO_VERIFIER_WIRE_CONTRACT=<auth.policy-verifier checkout>/tests/integration/sr
 | `*interceptors.UnauthenticatedError` | `Unauthenticated` | `unauthenticated` |
 | `context.Canceled`, when the RPC's own context was canceled | `Canceled` | `request canceled` |
 | `context.DeadlineExceeded`, when the RPC's own deadline passed | `DeadlineExceeded` | `deadline exceeded` |
+| `interceptors.ErrBackendUnavailable` | `Unavailable` | `authorization backend unavailable` |
 | anything else | `Internal` | `authorization check failed` |
 
 - **The message is fixed per code.** An endpoint's error can name the backend, the URL it called or why a token was refused, so none of its text reaches the caller, and no error carries a decision in its message.
-- **`Canceled` and `DeadlineExceeded` need the RPC's context to have ended.** An endpoint whose own timeout fired, or that was canceled while the RPC was live, failed: that is `Internal`. The HTTP endpoints wrap `ctx.Err()` only when the caller's context ended (`endpoint/http.go`), so the two cannot be confused.
+- **`Canceled` and `DeadlineExceeded` need the RPC's context to have ended**, and win over every other row. The HTTP endpoints wrap `ctx.Err()` only when the caller's context ended (`endpoint/http.go`), so the two cannot be confused with the endpoint's own timeout.
+- **`Unavailable` is the backend unable to answer now, and still a refusal.** The HTTP endpoints wrap `ErrBackendUnavailable` for a connection refused or broken, their own timeout, and `429` / `502` / `503` / `504` — the statuses gRPC's and Connect's HTTP mappings read as unavailable (`endpoint/http.go`, `requestError` and `statusError`). A `500`, a `3xx`, any other status, a malformed body, and a host the private-network check refused are misconfiguration or a broken contract: `Internal`, which a client does not retry.
 - **The returned error unwraps to the cause**, so an interceptor outside these can `errors.As` / `errors.Is` it. The observer gets the cause before mapping.
 - **An error the table does not name is `Internal`, and no error lets the handler run.**
 - A change to one framework's mapping is a change to both, and to the README's [Errors](README.md#errors) table. `grpc/errors_test.go` and `connectrpc/errors_test.go` pin the table.
