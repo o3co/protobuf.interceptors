@@ -23,16 +23,24 @@
 package streamcheck
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
+
+// ErrCheckIncomplete is the failure of a check that never returned: it
+// panicked, or its goroutine exited. Nothing established that the stream is
+// still authorized, so it ends the stream like any other failure.
+var ErrCheckIncomplete = errors.New("streamcheck: the authorization check did not complete")
 
 // Gate runs a stream's authorization checks. Each stream has its own.
 //
 // A check runs unless the last one began less than the interval ago; a zero
 // interval runs every check. The first check always runs. The first failure
 // is final: every later Check returns it without running anything, and Err
-// reports it. Checks never overlap, since a stream may send on one goroutine
+// reports it. A check that does not return — one that panics — is a failure
+// too: Err reports ErrCheckIncomplete, and the panic reaches Check's caller
+// unchanged. Checks never overlap, since a stream may send on one goroutine
 // while it receives on another.
 type Gate struct {
 	interval time.Duration
@@ -65,10 +73,14 @@ func (g *Gate) Check(check func() error) error {
 	if g.interval > 0 && g.checked && start.Sub(g.last) < g.interval {
 		return nil
 	}
+	// Failed until check returns, so a check that panics leaves the gate
+	// closed.
+	g.err = ErrCheckIncomplete
 	if err := check(); err != nil {
 		g.err = err
 		return err
 	}
+	g.err = nil
 	g.checked, g.last = true, start
 	return nil
 }

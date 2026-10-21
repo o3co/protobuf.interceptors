@@ -165,3 +165,48 @@ func TestGate_ZeroInterval_ClockStepsBack_StillChecks(t *testing.T) {
 		t.Errorf("checks run = %d, want 2", calls)
 	}
 }
+
+// A check that panics never returned an answer, so it is a failure: the
+// stream does not stay open on a check that did not complete.
+func TestGate_CheckThatPanics_IsFinal(t *testing.T) {
+	g := streamcheck.New(0, newClock().now)
+	calls := 0
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the check's panic did not reach the caller")
+			}
+		}()
+		_ = g.Check(func() error { calls++; panic("observer failed") })
+	}()
+
+	if err := g.Err(); !errors.Is(err, streamcheck.ErrCheckIncomplete) {
+		t.Errorf("Err() = %v, want ErrCheckIncomplete", err)
+	}
+	if err := g.Check(counting(&calls)); !errors.Is(err, streamcheck.ErrCheckIncomplete) {
+		t.Errorf("Check() = %v, want ErrCheckIncomplete", err)
+	}
+	if calls != 1 {
+		t.Errorf("checks run = %d, want 1: nothing is asked after a check that did not complete", calls)
+	}
+}
+
+// A check that panics within the interval of the last allowed one is still
+// final.
+func TestGate_CheckThatPanics_IsFinal_WithInterval(t *testing.T) {
+	c := newClock()
+	g := streamcheck.New(time.Hour, c.now)
+	calls := 0
+	_ = g.Check(counting(&calls))
+	c.advance(2 * time.Hour)
+	func() {
+		defer func() { _ = recover() }()
+		_ = g.Check(func() error { panic("observer failed") })
+	}()
+	if err := g.Check(counting(&calls)); !errors.Is(err, streamcheck.ErrCheckIncomplete) {
+		t.Errorf("Check() = %v, want ErrCheckIncomplete", err)
+	}
+	if calls != 1 {
+		t.Errorf("checks run = %d, want 1", calls)
+	}
+}
