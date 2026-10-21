@@ -142,14 +142,14 @@ A framework module released without a core change skips stages 1 and 2, as long 
 
 ### Dependency updates
 
-Dependabot (`.github/dependabot.yml`) opens weekly updates for the three modules and the workflow actions. Minor and patch updates are grouped; majors and security updates arrive one directory at a time. A dependency bumped in the core alone can make the framework modules' `go mod tidy -diff` fail, since they build the core through the `replace`: run `go mod tidy` in all three modules on such a pull request. The tool versions pinned inside the workflows — staticcheck in `ci.yml`, govulncheck in `govulncheck.yml` — are not tracked by Dependabot; staticcheck's pin must move when the `go` directive passes 1.25, the newest Go that staticcheck 2025.1.1 supports.
+Dependabot (`.github/dependabot.yml`) opens weekly updates for the three modules and the workflow actions. Minor and patch updates are grouped; majors and security updates arrive one directory at a time. A dependency bumped in the core alone can make the framework modules' `go mod tidy -diff` fail, since they build the core through the `replace`: run `go mod tidy` in all three modules on such a pull request. The tool versions pinned inside the workflows — staticcheck in `ci.yml`, govulncheck in `govulncheck.yml` — are not tracked by Dependabot; staticcheck's pin must move when the `go` directive passes 1.27, the newest Go that staticcheck 2026.2.2 supports; a staticcheck release whose own `go` directive is above this module's cannot run on the `minimum` toolchain.
 
 ### Tests and checks
 
 CI (`.github/workflows/ci.yml`) runs, for each module:
 
 - `go vet ./...` and `go test ./... -race -covermode=atomic -coverprofile=cover.out` on three toolchains: `minimum` (the `go` directive, the oldest a consumer may build with), `oldstable` and `stable` (the two releases the Go team supports). The `go` directive need not rise for the library to be tested on a supported Go.
-- on the `minimum` toolchain only: `gofmt -l .` must print nothing, `go mod tidy -diff` must show nothing, staticcheck (pinned to `2025.1.1`) must report nothing, and the coverage report is uploaded to Codecov under the module's flag (`codecov.yml`).
+- on the `minimum` toolchain only: `gofmt -l .` must print nothing, `go mod tidy -diff` must show nothing, staticcheck (pinned to `2026.2.2`) must report nothing, and the coverage report is uploaded to Codecov under the module's flag (`codecov.yml`).
 
 The same locally, in each of `.`, `grpc/` and `connectrpc/`:
 
@@ -158,7 +158,7 @@ gofmt -l .
 go vet ./...
 go test ./... -race -count=1
 go mod tidy -diff
-go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 ```
 
