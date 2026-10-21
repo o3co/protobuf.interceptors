@@ -47,7 +47,8 @@ func TestContains(t *testing.T) {
 		// carry one are not reached at it.
 		"::10.0.0.1", "64:ff9b::a00:1", "2002:a00:1::",
 		// Cloud metadata addresses inside the private ranges.
-		"100.100.100.200", "::ffff:100.100.100.200", "fd00:ec2::254", "fd20:ce::254",
+		"100.100.100.200", "::ffff:100.100.100.200", "fd00:ec2::254", "fd00:ec2::23",
+		"fd20:ce::254", "fd00:a9fe:a9fe::1",
 		// A zoned address is never private, mapped or not: the zone names a
 		// link, and dropping it would reach another address.
 		"fd00::1%eth0", "::ffff:10.0.0.5%eth0", "::ffff:192.168.1.1%0",
@@ -113,6 +114,9 @@ func TestDialer_ConnectsOnlyWhenEveryAddressIsPrivate(t *testing.T) {
 		lookup   bool
 		dialed   []string
 		refused  bool
+		// notPrivate is set when the refusal is for an address that is not
+		// private, rather than for want of one.
+		notPrivate bool
 	}{
 		{
 			name:     "a name resolving to private addresses",
@@ -137,25 +141,28 @@ func TestDialer_ConnectsOnlyWhenEveryAddressIsPrivate(t *testing.T) {
 			dialed:   []string{"tcp 192.168.3.4:80"},
 		},
 		{
-			name:     "one public address among private ones",
-			address:  "pdp.internal:8181",
-			resolved: addrs("10.0.0.7", "203.0.114.1"),
-			lookup:   true,
-			refused:  true,
+			name:       "one public address among private ones",
+			address:    "pdp.internal:8181",
+			resolved:   addrs("10.0.0.7", "203.0.114.1"),
+			lookup:     true,
+			refused:    true,
+			notPrivate: true,
 		},
 		{
-			name:     "a loopback address",
-			address:  "pdp.internal:8181",
-			resolved: addrs("127.0.0.1"),
-			lookup:   true,
-			refused:  true,
+			name:       "a loopback address",
+			address:    "pdp.internal:8181",
+			resolved:   addrs("127.0.0.1"),
+			lookup:     true,
+			refused:    true,
+			notPrivate: true,
 		},
 		{
-			name:     "a metadata address",
-			address:  "pdp.internal:80",
-			resolved: addrs("100.100.100.200"),
-			lookup:   true,
-			refused:  true,
+			name:       "a metadata address",
+			address:    "pdp.internal:80",
+			resolved:   addrs("100.100.100.200"),
+			lookup:     true,
+			refused:    true,
+			notPrivate: true,
 		},
 		{
 			name:    "no address at all",
@@ -169,21 +176,24 @@ func TestDialer_ConnectsOnlyWhenEveryAddressIsPrivate(t *testing.T) {
 			dialed:  []string{"tcp [fd00::9]:8181"},
 		},
 		{
-			name:     "a zoned address among private ones",
-			address:  "pdp.internal:8181",
-			resolved: addrs("10.0.0.7", "::ffff:10.0.0.8%eth0"),
-			lookup:   true,
-			refused:  true,
+			name:       "a zoned address among private ones",
+			address:    "pdp.internal:8181",
+			resolved:   addrs("10.0.0.7", "::ffff:10.0.0.8%eth0"),
+			lookup:     true,
+			refused:    true,
+			notPrivate: true,
 		},
 		{
-			name:    "a zoned literal mapping a private address",
-			address: "[::ffff:10.0.0.9%eth0]:8181",
-			refused: true,
+			name:       "a zoned literal mapping a private address",
+			address:    "[::ffff:10.0.0.9%eth0]:8181",
+			refused:    true,
+			notPrivate: true,
 		},
 		{
-			name:    "a public literal",
-			address: "8.8.8.8:80",
-			refused: true,
+			name:       "a public literal",
+			address:    "8.8.8.8:80",
+			refused:    true,
+			notPrivate: true,
 		},
 	}
 	for _, tt := range tests {
@@ -202,6 +212,9 @@ func TestDialer_ConnectsOnlyWhenEveryAddressIsPrivate(t *testing.T) {
 				}
 				if len(d.dialed) != 0 {
 					t.Errorf("dialed %v, want nothing", d.dialed)
+				}
+				if got := errors.Is(err, ErrNotPrivate); got != tt.notPrivate {
+					t.Errorf("errors.Is(%v, ErrNotPrivate) = %v, want %v", err, got, tt.notPrivate)
 				}
 			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)

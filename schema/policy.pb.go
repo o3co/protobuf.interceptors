@@ -40,7 +40,11 @@ type FieldMapping struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// placeholder is the name used inside the resource template, e.g. "id" for "<id>"
 	Placeholder string `protobuf:"bytes,1,opt,name=placeholder,proto3" json:"placeholder,omitempty"`
-	// request_field is the protobuf request field name to extract the value from
+	// request_field names the request field to extract the value from: a field
+	// name, e.g. "id", or field names joined by "." that walk singular message
+	// fields to a scalar, e.g. "post.author.id". A repeated or map field on the
+	// way is not supported, and a message on the way that the request did not
+	// set refuses the request.
 	RequestField  string `protobuf:"bytes,2,opt,name=request_field,json=requestField,proto3" json:"request_field,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

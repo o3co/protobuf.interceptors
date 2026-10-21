@@ -99,7 +99,8 @@ RPC request
 │  VerificationInterceptor         │  reads policy from ctx,
 │                                  │  calls VerifierEndpoint.Verify(),
 │                                  │  refuses with PermissionDenied,
-│                                  │  Unauthenticated or Internal
+│                                  │  Unauthenticated, Unavailable
+│                                  │  or Internal
 └───────────────┬──────────────────┘
                 │
                 ▼
@@ -212,8 +213,9 @@ every framework; which one fits depends on the backend:
   resource and action only, so it cannot make that decision.
 
 A fourth path — keeping the field mapping but dropping its placeholder from the
-resource template, so the value travels as request context instead — is **not
-portable**: it works on ConnectRPC with the o3co endpoint and nowhere else. Read
+resource template, so the value travels as request context instead — works on
+unary RPCs of either framework with the o3co or OPA endpoint, and not with Cedar
+or the static endpoint, nor on a stream. Read
 [Extracted field forwarding](#extracted-field-forwarding) before relying on it.
 
 Substitution is a single pass over the template: a value that itself spells
@@ -226,9 +228,12 @@ naming a resource no policy meant.
 
 ### Request fields a placeholder can read
 
-`request_field` names a **top-level** field of the request message by its
-`.proto` field name; a dotted path into a nested message is not read. The field
-must be a single value (not `repeated`, not a `map`) of one of these kinds:
+`request_field` names a field of the request message by its `.proto` field
+name, or a path of field names joined by `.` that walks into nested messages:
+`post.author.id` reads `id` of the request's `post`'s `author`. Field names
+cannot contain `.`, so a path names one field at most. Every segment but the
+last must be a singular message field; the last, the leaf, must be a single
+value (not `repeated`, not a `map`) of one of these kinds:
 
 | Kind | Substituted as |
 |---|---|
@@ -239,9 +244,24 @@ must be a single value (not `repeated`, not a `map`) of one of these kinds:
 | `bytes` | lowercase hex |
 
 Any other kind — `enum`, `float`, `double`, a message — and a field the message
-does not have fail resolution with `Internal`. A field the request did not set
+does not have fail resolution with `Internal`. A leaf the request did not set
 resolves to its default value, in proto3 the zero value: `0` and `false` fill
-the placeholder, while an empty `string` or `bytes` is refused as empty.
+the placeholder, while an empty `string` or `bytes` is refused as empty. The
+leaf of a path is read exactly as a top-level field is, and its value is
+checked against the [segment grammar](#placeholder-values) the same way.
+
+On the way to the leaf:
+
+- **A message the request did not set is refused**, as
+  `*interceptors.ResourceValueError`, so `PermissionDenied` with no backend
+  asked — even for a mapping whose placeholder the template does not use.
+  Whether it is set is the caller's choice, so it never resolves to a default.
+- **A `repeated` or `map` field, a scalar, or a name the message does not
+  have** fails resolution with `Internal`: the policy names a path the request
+  type cannot have. The whole path is checked against the type first, so this
+  holds whether or not the request set the messages on it.
+- **A streaming method** still refuses `field_mappings` outright (see
+  [Streaming](#streaming)), paths included.
 
 A `bytes` field is substituted as its lowercase hex encoding, always: the byte
 `0xff` resolves to `ff` and the two bytes `"ff"` to `6666`, so two different
@@ -257,32 +277,42 @@ authorization decision depends on the framework *and* on the backend:
 
 | Path | Extracted | Placed in context | Reaches the decision |
 |---|---|---|---|
-| ConnectRPC unary | yes | yes | only via the **o3co** endpoint |
+| ConnectRPC unary | yes | yes | via the **o3co** and **OPA** endpoints |
 | ConnectRPC streaming | — | — | no — `field_mappings` refused with `Internal` |
-| gRPC unary | yes | **no, discarded** | **no** |
+| gRPC unary | yes | yes | via the **o3co** and **OPA** endpoints |
 | gRPC streaming | — | — | no — `field_mappings` refused with `Internal` |
 
-Only `connectrpc.PolicyOptionInterceptor` resolves with
-`ResolveResourceWithFields` and attaches the result via
-`interceptors.WithExtractedFields`. The gRPC unary interceptor resolves with
-`ResolveResource`, which drops the fields; both stream interceptors refuse a
-policy carrying `field_mappings` before resolving anything (see
-[Streaming](#streaming)). And of the four backends only `endpoint.NewO3coEndpoint`
-reads the context back out, sending it as the `context` object of `POST /verify`
-— OPA, Cedar and the static endpoint never look at it.
+Both unary policy interceptors, `policygrpc.PolicyOptionInterceptor` and
+`policyconnect.PolicyOptionInterceptor`, resolve with
+`ResolveResourceWithFields` and attach the values, keyed by placeholder, via
+`interceptors.WithExtractedFields` when there is at least one. Both stream
+interceptors refuse a policy carrying `field_mappings` before resolving anything
+(see [Streaming](#streaming)). Of the four backends:
 
-**So on gRPC unary, moving a placeholder out of the resource template does not
-make its value available to the decision — it removes it**: resolution no
-longer refuses the value, but the verifier decides without it, a question with
-less information than before, which is worse than a refusal. (A gRPC stream
-whose policy keeps the mapping still fails with `Internal`; see
-[Streaming](#streaming).) Use one of the remedies above that your backend
-supports.
+| Endpoint | What it does with the values |
+|---|---|
+| o3co | Sends them as the `context` object of `POST /verify`. The verifier's `RequestContextAttributeCollector` promotes only the keys its operator declared; any other key is ignored. |
+| OPA | Sends them as `input.context`, an object of strings. With no values, `input` has no `context` key. |
+| Cedar | Does not send them: its request carries an empty context. A Cedar agent that validates requests against a schema rejects a context attribute the schema does not declare, so sending them would break such a deployment. |
+| static | Matches resource and action only. |
 
-The gRPC unary path does not forward the values as ConnectRPC does. The stream
-interceptors' refusal of `field_mappings` is a separate limitation, on either
-framework: the policy interceptor runs before the handler reads any request
-message, and a client or bidirectional stream has no single one.
+**The values are claims.** They come from the request message, which the caller
+writes, and nothing has checked them against the bearer token. A policy must
+treat them as what the caller asserts — compare them with the token's subject,
+say — and never as established facts.
+
+**On o3co, the verifier bounds the `context` it accepts**: `maxContextEntries`
+(default 64, every property counted) and `maxContextValueLength` (default 1024
+characters in any string, keys included), answered `400` when exceeded, and the
+whole body to `maxBodyBytes` (default 65536 bytes), answered `413`. All three
+are set in the verifier's configuration, and the interceptors map either answer
+to `Internal`: the RPC is refused, not decided without the values. Keep the
+number of mappings and the length of the values they can carry within the
+verifier's limits.
+
+The stream interceptors' refusal of `field_mappings` holds on either framework:
+the policy interceptor runs before the handler reads any request message, and a
+client or bidirectional stream has no single one.
 
 [auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
 
@@ -441,7 +471,25 @@ called, or why a token was refused, so none of its text reaches the caller:
 | `*interceptors.UnauthenticatedError`, including an unreadable credential | `Unauthenticated` | `unauthenticated` |
 | `context.Canceled`, when the RPC's own context was canceled | `Canceled` | `request canceled` |
 | `context.DeadlineExceeded`, when the RPC's own deadline passed | `DeadlineExceeded` | `deadline exceeded` |
-| anything else — a backend failure (including the endpoint's own HTTP timeout while the RPC is live), a method with no descriptor, a method with no policy under `WithRequirePolicy` (`interceptors.ErrNoPolicy`), a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `interceptors.ErrBackendUnavailable`: the backend could not answer now — its name did not resolve, the connection was refused, reset or closed before the answer was whole, it did not answer within the endpoint's own timeout, or it answered `429`, `502`, `503` or `504` | `Unavailable` | `authorization backend unavailable` |
+| anything else — a backend that answered outside its contract (`500`, a `3xx`, another unexpected status, a malformed body), a TLS handshake refused (a certificate not trusted or not parseable, an alert), `https` to a backend that does not speak TLS, an address no connection can have (an invalid port), a host the private-network check refused, a method with no descriptor, a method with no policy under `WithRequirePolicy` (`interceptors.ErrNoPolicy`), a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+
+`Unavailable` and `Internal` are both refusals: the handler does not run.
+`Unavailable` says the backend is down or overloaded for now, so a client may
+retry with backoff, as gRPC's status code guidance and the usual retry
+policies expect; on a stream, where every message is re-checked, a short
+outage of the verifier ends the stream with a code a client can retry on, not
+a server fault. `Internal` says
+something is misconfigured or broke a contract, which retrying does not fix.
+The statuses read as unavailable are the ones gRPC's and Connect's HTTP
+mappings read so; a `500` maps to neither and stays `Internal`. A name that
+does not resolve and a refused connection cannot be told from an outage, so
+they are `Unavailable` even when the base URL is wrong; so is a transport
+failure this library cannot name, as grpc-go and connect-go read one. An error
+from a transport given with `With…Transport` is read the same way, by its
+type. The
+RPC's own cancellation or deadline wins over both. A `VerifierEndpoint` of the service's
+own may wrap `ErrBackendUnavailable` for the same failures.
 
 The full error goes to the `WithDecisionObserver` observer for every check
 (see [Recording the decision](#recording-the-decision)). The error an
@@ -489,13 +537,13 @@ network, say — can take plaintext without `With…AllowInsecure()`:
 `WithCedarAllowPlainInternal(...)` permits `http://` to the listed `host:port`
 pairs alone, and reaches them at private addresses alone — `10.0.0.0/8`,
 `100.64.0.0/10`, `172.16.0.0/12`, `192.168.0.0/16` and `fc00::/7`, never a cloud
-metadata address (`100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`). This is
-the line auth.provider's `outbound.plain-internal` draws.
+metadata or credential address (`100.100.100.200`, `fd00:ec2::254`,
+`fd00:ec2::23`, `fd20:ce::254`, `fd00:a9fe:a9fe::1`).
 
 ```go
 verifier, err := endpoint.NewO3coEndpoint(
-    "http://policy-verifier:3001",
-    endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+    "http://policy-verifier:3000",
+    endpoint.WithO3coAllowPlainInternal("policy-verifier:3000"),
 )
 ```
 
@@ -512,11 +560,18 @@ verifier, err := endpoint.NewO3coEndpoint(
   without one trailing dot, an address in any spelling of it. A host name that
   is not ASCII matches no entry: `net/http` asks for its IDNA form, another
   name. Loopback and `https://` are as they are without the option.
-- **An entry that could never be reached panics at the option**: one that is
+- **An entry that could never be reached makes the constructor return an
+  error** naming it, and every other such entry: one that is
   not a `host:port`, whose port is outside 1–65535 or written with a leading
   zero, or whose host is neither an ASCII host name of letters, digits,
   hyphens and underscores (its last label not all digits, which a resolver may
-  read as an address) nor an address on a private network.
+  read as an address) nor an address on a private network. An entry is
+  deployment configuration, so it is reported like a base URL rather than as a
+  panic: `WithO3coAllowPlainInternal(os.Getenv("PDP_ADDR"))` with the variable
+  unset passes `""`, which `NewO3coEndpoint` refuses. A call with no entry lists
+  nothing. An entry that holds a user, a path, a query or a fragment — a URL
+  given in place of a host and port — is named without them, or not at all
+  when where they end is ambiguous, since they can carry a credential.
 - **A listed pair is always checked.** It is checked under `With…AllowInsecure()`
   too, and the constructor returns an error for one given `With…Transport(rt)`,
   since the check runs in the endpoint's own transport.
@@ -525,12 +580,17 @@ What the requests carry is still in the clear on that network: list only
 backends on a network trusted against reading and changing it.
 
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
-the bearer token on it reach only the backend that was configured.
+the bearer token on it reach only the backend that was configured. Each asks
+for its answer without a content coding (`Accept-Encoding: identity`, unless a
+static header names one), so nothing is decoded on the way and a body that does
+not parse is never taken for a broken connection.
 
 When the caller's context is cancelled or its deadline passes, an HTTP
 endpoint's error wraps `ctx.Err()`, so `errors.Is` finds `context.Canceled` or
 `context.DeadlineExceeded`. The endpoint's own timeout is the backend failing
-to answer, and wraps neither.
+to answer, and wraps neither: like a name that does not resolve, a refused
+or broken connection, or a `429`, `502`, `503` or `504`, it wraps
+`interceptors.ErrBackendUnavailable` (see [Errors](#errors)).
 
 For mutual TLS or a private CA, give the endpoint the transport to send over —
 `WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,
@@ -562,7 +622,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | `WithO3coHeaders(map[string]string)` | Static headers added to every verify request. Merges across calls. |
 | `WithO3coRequireConfirmedRevision()` | Refuse an allow not established against confirmed policy revisions. Off by default; see [Requiring a confirmed revision](#requiring-a-confirmed-revision). |
 | `WithO3coAllowInsecure()` | Permit an `http://` base URL to a host other than loopback. |
-| `WithO3coAllowPlainInternal(hostPorts...)` | Permit an `http://` base URL to the listed `host:port` pairs, reached only at private addresses; see above. Adds across calls. Panics on an entry that could never be reached. |
+| `WithO3coAllowPlainInternal(hostPorts...)` | Permit an `http://` base URL to the listed `host:port` pairs, reached only at private addresses; see above. Adds across calls. `NewO3coEndpoint` returns an error for an entry that could never be reached. |
 | `WithO3coTransport(rt)` | Transport the requests are sent over, e.g. for mutual TLS. Default `http.DefaultTransport`. Panics if `rt` is nil. |
 
 `WithO3coHeaders` is what a deployment needs when auth.policy-verifier has its
@@ -598,11 +658,14 @@ invalid. Every other `401` is still an `UnauthenticatedError`.
 
 `NewOPAEndpoint(baseURL, policyPath)` asks `POST {baseURL}/v1/data/{policyPath}`
 with the input `{"resource", "action", "token"}` — the bearer token as sent, so
-the policy must verify it. It allows only when the response's `result` key, in
-exactly that case, holds JSON `true`. An absent `result` (OPA's undefined),
-`null` or `false` is a deny; a `result` that is not a boolean, a body that is not a JSON
-object, one larger than the size bound, and any non-`2xx` status are errors. An
-empty `policyPath` is refused at construction.
+the policy must verify it — and `"context"`, the extracted `field_mappings`
+values, when the RPC has any (see
+[Extracted field forwarding](#extracted-field-forwarding)). It allows only when
+the response's `result` key, in exactly that case, holds JSON `true`. An absent
+`result` (OPA's undefined), `null` or `false` is a deny; a `result` that is not
+a boolean, a body that is not a JSON object, one larger than the size bound,
+and any non-`2xx` status are errors. An empty `policyPath` is refused at
+construction.
 
 | Option | Effect |
 |---|---|
@@ -619,8 +682,10 @@ empty `policyPath` is refused at construction.
 `NewCedarEndpoint(baseURL, opts...)` asks `POST {baseURL}/v1/is_authorized`
 with the principal the resolver returned, the action and the resource, each as
 a Cedar entity UID (`User::"alice"`, `Action::"read"`, `Resource::"posts/1"`
-with the default prefixes), and an empty context. It allows only when the
-response's `decision` key, in exactly that case, is `"Allow"`; any other
+with the default prefixes), and an empty context: extracted `field_mappings`
+values are not sent (see
+[Extracted field forwarding](#extracted-field-forwarding)). It allows only when
+the response's `decision` key, in exactly that case, is `"Allow"`; any other
 decision is a deny, and a body that is not a JSON object, one larger than the
 size bound, and any non-`2xx` status are errors. Without
 `WithCedarPrincipalResolver` the constructor returns an error.
@@ -664,11 +729,11 @@ The interface carries only the resolved resource and action, so anything else an
 endpoint wants must come off the context itself. Each built-in endpoint reads
 the bearer token there, and uses it its own way: the o3co endpoint sends it to
 the verifier, the OPA endpoint sends it as `input.token`, the Cedar endpoint
-resolves a principal from it, and the static endpoint only requires one. Only
-the o3co endpoint reads the extracted `field_mappings` values, forwarding them
-as the `context` object of `POST /verify` when a framework put them there; OPA
-decides on resource, action and token, Cedar on principal, action and
-resource, and the static endpoint matches resource and action — see
+resolves a principal from it, and the static endpoint only requires one. The
+o3co and OPA endpoints also read the extracted `field_mappings` values, sending
+them as the `context` object of `POST /verify` and as `input.context`; Cedar
+decides on principal, action and resource, and the static endpoint matches
+resource and action — see
 [Extracted field forwarding](#extracted-field-forwarding).
 
 ## Recording the decision
@@ -700,6 +765,8 @@ with the endpoint's error before it is mapped for the caller:
 
 ```go
 observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
+    // ev.Procedure ("/pkg.Svc/Method"); ev.Phase (CheckOpen, CheckSend,
+    // CheckReceive); ev.Duration (the endpoint call, 0 when none was made);
     // ev.Resource, ev.Action; ev.Decision (nil when nothing was reported);
     // ev.Err (nil when allowed; errors.As finds *interceptors.DeniedError)
 }
@@ -707,18 +774,45 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
-A stream's re-check calls the observer on the send or receive that made it,
-which waits for the observer to return. Once a stream's client has gone away,
-the next send's re-check on an HTTP endpoint (o3co, OPA, Cedar) fails with the
-RPC's context error — the observer sees `context.Canceled` or
-`context.DeadlineExceeded`, not a denial. On Cedar that holds once the
-principal resolver has answered: a resolver that does I/O with the context
-fails first, and its error is an `UnauthenticatedError`. The static endpoint
-does not watch the context's cancellation: its re-check answers as before, the
-observer sees that answer, and the send then fails on the transport.
+- **`Procedure`** is the RPC's full method name, on both frameworks.
+- **`Phase`** is `CheckOpen` for the check made before the handler runs — a
+  unary RPC's only check, or the one that opens a stream — and `CheckSend` or
+  `CheckReceive` for a stream's re-check before a send or after a receive. Any
+  phase but `CheckOpen` is a re-check.
+- **`Duration`** is how long the endpoint call took. It is `0` when the
+  interceptor made no call: a malformed credential it refused itself (see
+  [Bearer token and request ID](#bearer-token-and-request-id)). A request with
+  no token is the endpoint's to refuse, so that call is timed, however short.
+
+**Keep the observer cheap and non-blocking.** It runs synchronously: a
+handler starts only after it returns. A stream's re-check calls it inside the
+send or receive that made the check, while the stream's checks are
+serialized, so until it returns that send or receive waits, and so does every
+other send or receive on the stream, in either direction — with
+`WithStreamRecheckInterval` too, whether or not its own re-check is due. Hand
+slow work — a write to a remote audit store — to another goroutine.
+
+Once a stream's client has gone away, the next send's re-check on an HTTP
+endpoint (o3co, OPA, Cedar) fails with the RPC's context error — the observer
+sees `context.Canceled` or `context.DeadlineExceeded`, not a denial. On Cedar
+that holds once the principal resolver has answered: a resolver that does I/O
+with the context fails first, and its error is an `UnauthenticatedError`. The
+static endpoint does not watch the context's cancellation: its re-check
+answers as before, the observer sees that answer, and the send then fails on
+the transport.
 
 On a denial the decision is also on `DeniedError.Decision`, with the verifier's
 deny `code` in `Decision.Code`.
+
+**Who it was about.** `Decision.Subject` is the subject the verifier
+authenticated, on an allow and on a denial. It is empty when the verifier sent
+none, which it does for a token without a subject; the OPA and Cedar endpoints
+report no decision at all. It is reported only: no verdict rests on it. When
+the verifier sends the `subject` key it must be a non-empty string; `null`,
+`""` or another type makes the envelope not whole, so a `2xx` carrying it fails
+closed, and a `403` carrying it is still a denial but reports no decision. A
+verifier older than v0.4.0 sends `""` for a token whose `sub` is empty, and
+those allows fail closed.
 
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The
@@ -760,7 +854,9 @@ larger than `WithO3coMaxResponseBodySize`, or cut off while
 reading is not a decision and reports nothing. On a `200` that makes the answer
 an error, not an allow, and so does any other `2xx` and a `200` carrying a
 whole deny (which is still reported to the observer). The interceptors map that
-error to `Internal`. A `403` is a deny whatever its body holds; the body only
+error to `Internal`, except a body cut off by a broken connection or the
+endpoint's own timeout, which is the backend failing to answer: `Unavailable`.
+A `403` is a deny whatever its body holds; the body only
 reports why. Keys are matched as the contract spells them: one in another
 case (`Passed`, `Decision`) is a key the contract does not define, and is
 ignored like any other, so it cannot stand in for the key it resembles. The
@@ -819,9 +915,17 @@ stream that only sends included.
   asking the verifier, and the interceptor ends the RPC with it whatever the
   handler returns. The client gets the messages sent before the refusal, then
   the status — `PermissionDenied: access denied` for a denial, `Unauthenticated`
-  for a token the backend refused, `Internal` when the verifier failed (see
-  [Errors](#errors) and [When a grant ends mid-stream](#when-a-grant-ends-mid-stream))
-  — on gRPC in the trailers, on ConnectRPC at the end of the stream.
+  for a token the backend refused, `Unavailable` when the verifier could not
+  answer, `Internal` when it failed otherwise (see [Errors](#errors) and
+  [When a grant ends mid-stream](#when-a-grant-ends-mid-stream)) — on gRPC in
+  the trailers, on ConnectRPC at the end of the stream.
+- **A re-check that does not complete ends the stream too.** When the
+  observer or the endpoint panics during a re-check, the panic reaches the
+  handler through the send or receive that made it. The message that send was
+  to carry is not sent, and the message that receive checked is cleared even
+  if the handler recovers the panic. A handler that recovers it and goes on
+  finds every later send and receive refused, and the stream ends with
+  `Internal`; a panic the handler does not recover leaves the interceptor.
 
 Each re-check is one verifier call, and the send or receive waits for it. To
 bound that on a stream that carries many messages, give the verification
@@ -904,11 +1008,15 @@ sent before the refusal:
 | static | never: it checks only that a token is present | never: its rules are fixed |
 
 A backend that cannot answer a re-check — unreachable, slower than the
-endpoint's own timeout, or failing — ends the stream with `Internal` (see [Errors](#errors)), like any other check.
+endpoint's own timeout, or overloaded (`429`, `502`, `503`, `504`) — ends the
+stream with `Unavailable: authorization backend unavailable`; a backend that
+answers outside its contract ends it with `Internal` (see [Errors](#errors)).
 
 A client that receives `Unauthenticated` or `PermissionDenied` mid-stream must
 refresh its token, or have the grant restored, and open a new stream; the
-stream it had is over.
+stream it had is over. A client that receives `Unavailable` may reopen the
+stream with backoff: the backend could not answer, which says nothing about
+the grant, and the stream it had is over too.
 
 ### A refused send comes after the handler's work
 

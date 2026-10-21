@@ -128,15 +128,16 @@ func WithOPAAllowInsecure() OPAOption {
 // A listed base URL is checked so even under WithOPAAllowInsecure, and
 // NewOPAEndpoint returns an error for one given WithOPATransport, which the
 // check cannot run in. Later calls add to earlier ones, and a call with no
-// entry lists nothing. Panics if an entry is not a host and port, its port
-// is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an ASCII host name of
-// letters, digits, hyphens and underscores whose last label is not all
-// digits.
+// entry lists nothing. NewOPAEndpoint returns an error naming every entry
+// that is not a host and port, whose port is not a number from 1 to 65535
+// written without a leading zero, or whose host is neither an address on a
+// private network nor an ASCII host name of letters, digits, hyphens and
+// underscores whose last label is not all digits: such an entry could never
+// be reached. An entry is a deployment value, so it is reported like a base
+// URL rather than at the call.
 func WithOPAAllowPlainInternal(hostPorts ...string) OPAOption {
-	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *opaBuildConfig) {
-		c.reach.addPlainInternal(pairs)
+		c.reach.addPlainInternal(hostPorts)
 	}
 }
 
@@ -159,14 +160,22 @@ type opaInput struct {
 	Resource string `json:"resource"`
 	Action   string `json:"action"`
 	Token    string `json:"token"`
+	// Context holds the extracted field_mappings values on the context
+	// (interceptors.ExtractedFieldsFromContext), keyed by placeholder. They
+	// come from the request, so a policy reads them as the caller's claims.
+	Context map[string]string `json:"context,omitempty"`
 }
 
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
-// The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}.
+// The evaluate URL is constructed as: {baseURL}/v1/data/{policyPath}. The
+// input holds resource, action and token, and context, the extracted
+// field_mappings values (interceptors.ExtractedFieldsFromContext), when there
+// are any.
 // It returns an error if policyPath is empty or baseURL does not name http or
 // https and a host, and refuses http to a host other than loopback unless
 // WithOPAAllowPlainInternal lists its host and port or WithOPAAllowInsecure is
-// given. It returns an error for a listed base URL given WithOPATransport.
+// given. It returns an error for a listed base URL given WithOPATransport,
+// and for an entry WithOPAAllowPlainInternal refuses.
 func NewOPAEndpoint(baseURL, policyPath string, opts ...OPAOption) (VerifierEndpoint, error) {
 	rawPath := strings.TrimSpace(policyPath)
 	if rawPath == "" {
@@ -219,6 +228,9 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 			Token:    token,
 		},
 	}
+	if fields, ok := interceptors.ExtractedFieldsFromContext(ctx); ok && len(fields) > 0 {
+		reqBody.Input.Context = fields
+	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal OPA request body: %w", err)
@@ -232,6 +244,7 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 
 	var requestID string
 	if e.requestIDHeaderKey != "" {
@@ -248,22 +261,27 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 	}
 	defer resp.Body.Close()
 
-	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
-	if err != nil {
+	respBody, oversized, readErr := readBounded(resp.Body, e.maxResponseBodySize)
+	if readErr != nil {
 		if ctx.Err() != nil {
-			return requestError(ctx, "reading the OPA response failed", err)
+			return requestError(ctx, "reading the OPA response failed", readErr)
 		}
-		e.logger.Error("failed to read OPA response body", "error", err, "x-request-id", requestID)
+		e.logger.Error("failed to read OPA response body", "error", readErr, "x-request-id", requestID)
 		respBody = nil
 	}
 
 	e.logger.Debug("OPA response received", "status", resp.StatusCode, "x-request-id", requestID)
 
-	// Non-2xx responses are treated as internal errors.
+	// A non-2xx status is no answer.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		e.logger.Error("error response from OPA", "status", resp.StatusCode, "x-request-id", requestID)
 		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
-		return fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode)
+		return statusError(resp.StatusCode, fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode))
+	}
+
+	// An answer cut off is no answer, whatever part of it arrived.
+	if readErr != nil {
+		return requestError(ctx, "reading the OPA response failed", readErr)
 	}
 
 	if oversized {

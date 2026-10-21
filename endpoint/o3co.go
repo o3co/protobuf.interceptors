@@ -177,15 +177,16 @@ func WithO3coAllowInsecure() O3coOption {
 // A listed base URL is checked so even under WithO3coAllowInsecure, and
 // NewO3coEndpoint returns an error for one given WithO3coTransport, which the
 // check cannot run in. Later calls add to earlier ones, and a call with no
-// entry lists nothing. Panics if an entry is not a host and port, its port
-// is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an ASCII host name of
-// letters, digits, hyphens and underscores whose last label is not all
-// digits.
+// entry lists nothing. NewO3coEndpoint returns an error naming every entry
+// that is not a host and port, whose port is not a number from 1 to 65535
+// written without a leading zero, or whose host is neither an address on a
+// private network nor an ASCII host name of letters, digits, hyphens and
+// underscores whose last label is not all digits: such an entry could never
+// be reached. An entry is a deployment value, so it is reported like a base
+// URL rather than at the call.
 func WithO3coAllowPlainInternal(hostPorts ...string) O3coOption {
-	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *o3coBuildConfig) {
-		c.reach.addPlainInternal(pairs)
+		c.reach.addPlainInternal(hostPorts)
 	}
 }
 
@@ -242,7 +243,8 @@ type o3coEndpoint struct {
 // It returns an error unless baseURL names http or https and a host, and
 // refuses http to a host other than loopback unless WithO3coAllowPlainInternal
 // lists its host and port or WithO3coAllowInsecure is given. It returns an
-// error for a listed base URL given WithO3coTransport.
+// error for a listed base URL given WithO3coTransport, and for an entry
+// WithO3coAllowPlainInternal refuses.
 //
 // The endpoint it returns is also a DecisionVerifier.
 func NewO3coEndpoint(baseURL string, opts ...O3coOption) (VerifierEndpoint, error) {
@@ -329,6 +331,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	var requestID string
@@ -346,12 +349,12 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	}
 	defer resp.Body.Close()
 
-	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
-	if err != nil {
+	respBody, oversized, readErr := readBounded(resp.Body, e.maxResponseBodySize)
+	if readErr != nil {
 		if ctx.Err() != nil {
-			return nil, requestError(ctx, "reading the response failed", err)
+			return nil, requestError(ctx, "reading the response failed", readErr)
 		}
-		e.logger.Error("failed to read response body", "error", err, "x-request-id", requestID)
+		e.logger.Error("failed to read response body", "error", readErr, "x-request-id", requestID)
 		respBody = nil
 	}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
@@ -370,6 +373,10 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 
 	// --- Evaluate based on status code ----------------------------------------
 	if success {
+		// An answer cut off is no answer, whatever part of it arrived.
+		if readErr != nil {
+			return nil, requestError(ctx, "reading the response failed", readErr)
+		}
 		return e.acceptAllow(wire, resp.StatusCode, requestID)
 	}
 
@@ -396,7 +403,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 		return nil, &interceptors.UnauthenticatedError{Reason: "invalid or expired token"}
 	}
 
-	return nil, fmt.Errorf("authorization service error: %d", resp.StatusCode)
+	return nil, statusError(resp.StatusCode, fmt.Errorf("authorization service error: %d", resp.StatusCode))
 }
 
 // acceptAllow decides what a 2xx answer amounts to. wire is the envelope read

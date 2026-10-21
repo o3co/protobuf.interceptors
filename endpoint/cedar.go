@@ -173,15 +173,16 @@ func WithCedarAllowInsecure() CedarOption {
 // A listed base URL is checked so even under WithCedarAllowInsecure, and
 // NewCedarEndpoint returns an error for one given WithCedarTransport, which the
 // check cannot run in. Later calls add to earlier ones, and a call with no
-// entry lists nothing. Panics if an entry is not a host and port, its port
-// is not a number from 1 to 65535 written without a leading zero, or its host
-// is neither an address on a private network nor an ASCII host name of
-// letters, digits, hyphens and underscores whose last label is not all
-// digits.
+// entry lists nothing. NewCedarEndpoint returns an error naming every entry
+// that is not a host and port, whose port is not a number from 1 to 65535
+// written without a leading zero, or whose host is neither an address on a
+// private network nor an ASCII host name of letters, digits, hyphens and
+// underscores whose last label is not all digits: such an entry could never
+// be reached. An entry is a deployment value, so it is reported like a base
+// URL rather than at the call.
 func WithCedarAllowPlainInternal(hostPorts ...string) CedarOption {
-	pairs := mustBePlainInternalPairs(hostPorts)
 	return func(c *cedarBuildConfig) {
-		c.reach.addPlainInternal(pairs)
+		c.reach.addPlainInternal(hostPorts)
 	}
 }
 
@@ -235,7 +236,8 @@ func formatEntityUID(entityType, id string) string {
 // names http or https and a host, and refuses http to a host other than
 // loopback unless WithCedarAllowPlainInternal lists its host and port or
 // WithCedarAllowInsecure is given. It returns an error for a listed base URL
-// given WithCedarTransport.
+// given WithCedarTransport, and for an entry WithCedarAllowPlainInternal
+// refuses.
 //
 // The endpoint does no authentication of its own: the principal it asks
 // about is the one the resolver returns.
@@ -312,6 +314,7 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 
 	var requestID string
 	if e.requestIDHeaderKey != "" {
@@ -328,22 +331,27 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	}
 	defer resp.Body.Close()
 
-	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
-	if err != nil {
+	respBody, oversized, readErr := readBounded(resp.Body, e.maxResponseBodySize)
+	if readErr != nil {
 		if ctx.Err() != nil {
-			return requestError(ctx, "reading the Cedar agent response failed", err)
+			return requestError(ctx, "reading the Cedar agent response failed", readErr)
 		}
-		e.logger.Error("failed to read Cedar agent response body", "error", err, "x-request-id", requestID)
+		e.logger.Error("failed to read Cedar agent response body", "error", readErr, "x-request-id", requestID)
 		respBody = nil
 	}
 
 	e.logger.Debug("Cedar agent response received", "status", resp.StatusCode, "x-request-id", requestID)
 
-	// Non-2xx responses are treated as internal errors.
+	// A non-2xx status is no answer.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		e.logger.Error("error response from Cedar agent", "status", resp.StatusCode, "x-request-id", requestID)
 		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
-		return fmt.Errorf("the Cedar agent returned non-2xx status: %d", resp.StatusCode)
+		return statusError(resp.StatusCode, fmt.Errorf("the Cedar agent returned non-2xx status: %d", resp.StatusCode))
+	}
+
+	// An answer cut off is no answer, whatever part of it arrived.
+	if readErr != nil {
+		return requestError(ctx, "reading the Cedar agent response failed", readErr)
 	}
 
 	if oversized {

@@ -18,14 +18,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
 	policyconnect "github.com/o3co/protobuf.interceptors/connectrpc"
+	"github.com/o3co/protobuf.interceptors/endpoint"
 	"github.com/o3co/protobuf.interceptors/endpointtest"
 	testpb "github.com/o3co/protobuf.interceptors/testproto"
 )
@@ -72,6 +77,7 @@ func TestConnectChain_CallerMessageIsFixed(t *testing.T) {
 		{"denied", &interceptors.DeniedError{Reason: "denied by http://opa.internal:8181"}, connect.CodePermissionDenied, "access denied"},
 		{"unauthenticated", &interceptors.UnauthenticatedError{Reason: "OPA says token expired"}, connect.CodeUnauthenticated, "unauthenticated"},
 		{"backend failure", backendFailure(errors.New("connection refused")), connect.CodeInternal, "authorization check failed"},
+		{"backend unavailable", fmt.Errorf("%w: %w", interceptors.ErrBackendUnavailable, backendFailure(errors.New("connection refused"))), connect.CodeUnavailable, "authorization backend unavailable"},
 		// The endpoint's own timeout or cancellation, while the RPC is live, is
 		// the service's failure, not the caller's deadline.
 		{"endpoint canceled", backendFailure(context.Canceled), connect.CodeInternal, "authorization check failed"},
@@ -154,6 +160,20 @@ func TestConnectVerification_RPCContextEnded(t *testing.T) {
 			err := wrapped(tc.ctx, &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}})
 			assertFixedMessage(t, err, tc.code, tc.message)
 		})
+		// The RPC's own end wins over an endpoint that also says its backend
+		// was unavailable.
+		t.Run(tc.name+"/endpoint also unavailable", func(t *testing.T) {
+			wrapped := policyconnect.VerificationInterceptor(endpointtest.Func(
+				func(ctx context.Context, _, _ string) error {
+					return fmt.Errorf("%w: %w", interceptors.ErrBackendUnavailable, backendFailure(ctx.Err()))
+				},
+			)).WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+				t.Fatal("the handler must not run")
+				return nil
+			})
+			err := wrapped(tc.ctx, &fakeStreamingConn{header: map[string][]string{"Authorization": {"Bearer tok"}}})
+			assertFixedMessage(t, err, tc.code, tc.message)
+		})
 	}
 }
 
@@ -213,6 +233,90 @@ func TestConnectPolicyAndGuardErrors_CallerMessageIsFixed(t *testing.T) {
 			assertFixedMessage(t, err, connect.CodeInternal, "authorization check failed")
 			if !strings.Contains(fmt.Sprint(errors.Unwrap(errors.Unwrap(err))), tc.cause) {
 				t.Errorf("error %v does not unwrap to a cause naming %q", err, tc.cause)
+			}
+		})
+	}
+}
+
+// A real HTTP endpoint whose backend answers it is down: the caller is told
+// Unavailable, the handler never runs, and the observer sees the cause.
+func TestConnectChain_BackendDown_IsUnavailable(t *testing.T) {
+	pdp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer pdp.Close()
+	verifier, err := endpoint.NewOPAEndpoint(pdp.URL, "authz/allow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed error
+	impl := &countingHandler{}
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(func(_ context.Context, ev interceptors.DecisionEvent) {
+			observed = ev.Err
+		})),
+	)
+	defer cleanup()
+
+	assertFixedMessage(t, getResource(t, client), connect.CodeUnavailable, "authorization backend unavailable")
+	if !errors.Is(observed, interceptors.ErrBackendUnavailable) {
+		t.Errorf("observer saw %v, want the endpoint's error wrapping ErrBackendUnavailable", observed)
+	}
+	if impl.calls.Load() != 0 {
+		t.Error("the handler must not run")
+	}
+}
+
+// countingHandler counts the GetResource calls that reach it.
+type countingHandler struct {
+	testServiceHandler
+	calls atomic.Int32
+}
+
+func (h *countingHandler) GetResource(ctx context.Context, req *connect.Request[testpb.GetResourceRequest]) (*connect.Response[testpb.GetResourceResponse], error) {
+	h.calls.Add(1)
+	return h.testServiceHandler.GetResource(ctx, req)
+}
+
+// unavailableAfter allows the first n checks, and finds the backend
+// unavailable for every one after.
+func unavailableAfter(n int) endpoint.VerifierEndpoint {
+	var calls atomic.Int32
+	return endpointtest.Func(func(context.Context, string, string) error {
+		if int(calls.Add(1)) <= n {
+			return nil
+		}
+		return fmt.Errorf("%w: OPA request failed: connection refused", interceptors.ErrBackendUnavailable)
+	})
+}
+
+// On a real stream, a backend that is unavailable when the stream opens, or
+// at the re-check of a later message, ends it with Unavailable; the message
+// that failed the re-check never reaches the handler.
+func TestConnectStreamChain_BackendUnavailable_IsUnavailable(t *testing.T) {
+	cases := []struct {
+		name    string
+		allowed int
+		want    []string
+	}{
+		{"at the opening check", 0, nil},
+		{"at a later message", 2, []string{"first"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			impl := &uploadHandler{}
+			client, cleanup := startConnectServerWithImpl(t, impl,
+				policyconnect.PolicyOptionInterceptor(),
+				policyconnect.VerificationInterceptor(unavailableAfter(tc.allowed)),
+			)
+			defer cleanup()
+
+			err := upload(client, "first", "second")
+
+			assertFixedMessage(t, err, connect.CodeUnavailable, "authorization backend unavailable")
+			if got := impl.all(); !slices.Equal(got, tc.want) {
+				t.Errorf("handler received %q, want %q", got, tc.want)
 			}
 		})
 	}

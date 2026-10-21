@@ -94,9 +94,16 @@ func TestWireContract_StatusesMeanWhatTheVerifierMeans(t *testing.T) {
 	check("callerUnauthenticated", c.Status["callerUnauthenticated"], errorEnvelope(c.Codes["callerUnauthenticated"]), func(err error) bool {
 		return errors.Is(err, ErrCallerUnauthenticated) && !isUnauth(err)
 	})
-	for _, key := range []string{"invalidRequest", "payloadTooLarge", "unsupportedMediaType", "internalError", "verificationUnavailable"} {
+	isUnavailable := func(err error) bool { return errors.Is(err, interceptors.ErrBackendUnavailable) }
+	// The verifier could not verify the credential now: retry may succeed.
+	check("verificationUnavailable", c.Status["verificationUnavailable"], errorEnvelope(c.Codes["verificationUnavailable"]), func(err error) bool {
+		return isUnavailable(err) && !isDenied(err) && !isUnauth(err)
+	})
+	// A request the verifier cannot take, and its own terminal error, say
+	// something is misconfigured or broken: not unavailable.
+	for _, key := range []string{"invalidRequest", "payloadTooLarge", "unsupportedMediaType", "internalError"} {
 		check(key, c.Status[key], errorEnvelope(c.Codes[key]), func(err error) bool {
-			return err != nil && !isDenied(err) && !isUnauth(err)
+			return err != nil && !isDenied(err) && !isUnauth(err) && !isUnavailable(err)
 		})
 	}
 }
@@ -207,6 +214,29 @@ func TestWireContract_EveryRuleGroupKeyDecodes(t *testing.T) {
 	}
 	if !d.Groups[0].Restricts {
 		t.Error("restricts: true decoded as a granting group")
+	}
+}
+
+// An allow carrying every key the contract allows decodes, and subject, one
+// of them, is the subject the verifier authenticated.
+func TestWireContract_DecisionSubjectDecodes(t *testing.T) {
+	c := wirecontract.Load(t)
+	if !slices.Contains(c.Decision.Optional, "subject") {
+		t.Fatalf("the wire contract no longer lists subject on a decision: %v", c.Decision.Optional)
+	}
+	keys := append(append([]string{}, c.Decision.Required...), c.Decision.Optional...)
+	decision := fill(t, "an allow", keys, map[string]any{
+		"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{}},
+		"subject": "user-7f3a",
+	})
+
+	e := newTestEndpoint(t, serve(t, c.Status["allow"], mustJSON(t, decision)).URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err != nil || d == nil {
+		t.Fatalf("VerifyDecision = (%+v, %v)", d, err)
+	}
+	if d.Subject != "user-7f3a" {
+		t.Errorf("Subject = %q, want %q", d.Subject, "user-7f3a")
 	}
 }
 

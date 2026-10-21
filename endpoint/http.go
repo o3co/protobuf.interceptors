@@ -16,6 +16,7 @@ package endpoint
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/internal/privatenet"
 )
 
@@ -37,18 +39,27 @@ type reachConfig struct {
 	// plainInternal holds the listed host:port pairs, each as
 	// plainInternalPair spells it.
 	plainInternal map[string]struct{}
-	transport     http.RoundTripper
+	// refusedEntries holds why each entry plainInternalPair refused was
+	// refused; the constructor returns them.
+	refusedEntries []error
+	transport      http.RoundTripper
 	// privateDialer resolves and connects for a listed pair. Its zero value
 	// uses the system resolver and a net.Dialer.
 	privateDialer privatenet.Dialer
 }
 
-// addPlainInternal lists pairs, each already spelled by plainInternalPair.
-func (r *reachConfig) addPlainInternal(pairs []string) {
-	if r.plainInternal == nil {
-		r.plainInternal = make(map[string]struct{}, len(pairs))
-	}
-	for _, pair := range pairs {
+// addPlainInternal lists entries, each spelled by plainInternalPair, and
+// records why each one it refuses was refused.
+func (r *reachConfig) addPlainInternal(entries []string) {
+	for _, entry := range entries {
+		pair, err := plainInternalPair(entry)
+		if err != nil {
+			r.refusedEntries = append(r.refusedEntries, err)
+			continue
+		}
+		if r.plainInternal == nil {
+			r.plainInternal = make(map[string]struct{})
+		}
 		r.plainInternal[pair] = struct{}{}
 	}
 }
@@ -56,6 +67,8 @@ func (r *reachConfig) addPlainInternal(pairs []string) {
 // client parses raw, the URL an endpoint asks its backend at, and returns it
 // with the client that asks it. kind names the endpoint's options:
 // With{kind}AllowInsecure, With{kind}AllowPlainInternal, With{kind}Transport.
+// It returns an error naming every entry With{kind}AllowPlainInternal
+// refused, whatever raw is.
 //
 // Every request carries the subject's bearer token or what was resolved from
 // it, so plaintext is refused unless the host is loopback, the host and port
@@ -65,6 +78,9 @@ func (r *reachConfig) addPlainInternal(pairs []string) {
 // no proxy. That holds under With{kind}AllowInsecure too, and a listed pair
 // is refused over a caller's transport, which the check would not run in.
 func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*url.URL, *http.Client, error) {
+	if len(r.refusedEntries) > 0 {
+		return nil, nil, fmt.Errorf("With%sAllowPlainInternal: %w", kind, errors.Join(r.refusedEntries...))
+	}
 	u, err := parseBaseURL(raw)
 	if err != nil {
 		return nil, nil, err
@@ -122,7 +138,12 @@ func parseBaseURL(raw string) (*url.URL, error) {
 // a host and port, whose port is not a decimal from 1 to 65535 without a
 // leading zero, whose name is not a host name (see validHostName), or whose
 // address is not on a private network: such an entry is never reached.
+// An entry that holds a user, a path, a query or a fragment is a URL given in
+// place of a host and port, and is named only as redactedEntry spells it.
 func plainInternalPair(entry string) (string, error) {
+	if strings.ContainsAny(entry, "@/?#") {
+		return "", fmt.Errorf("plain-internal entry %q is not a host and port: it is a URL or names a user", redactedEntry(entry))
+	}
 	host, port, err := net.SplitHostPort(entry)
 	if err != nil {
 		return "", fmt.Errorf("plain-internal entry %q is not a host and port: %w", entry, err)
@@ -141,6 +162,49 @@ func plainInternalPair(entry string) (string, error) {
 		return "", fmt.Errorf("plain-internal entry %q: the host is neither an address nor a host name", entry)
 	}
 	return net.JoinHostPort(name, port), nil
+}
+
+// redactedEntry returns entry with what can carry a credential replaced by
+// "…": a user and password before an '@' in the authority, and the path,
+// query and fragment after it. A scheme is kept only at the start, where a
+// URL puts it. An '@' after the authority makes the entry ambiguous — a
+// password can hold the '/' that seems to end the authority — and the entry
+// is replaced whole.
+func redactedEntry(entry string) string {
+	var scheme string
+	rest := entry
+	if i := strings.Index(rest, "://"); i > 0 && validScheme(rest[:i]) {
+		scheme, rest = rest[:i+3], rest[i+3:]
+	}
+	authority, after := rest, ""
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority, after = rest[:i], rest[i:]
+	}
+	if strings.Contains(after, "@") {
+		return "…"
+	}
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = "…@" + authority[i+1:]
+	}
+	if after != "" {
+		authority += "…"
+	}
+	return scheme + authority
+}
+
+// validScheme reports whether s is a URL scheme: a letter, then letters,
+// digits, '+', '-' and '.' (RFC 3986 §3.1).
+func validScheme(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
@@ -229,15 +293,21 @@ func validHostName(name string) bool {
 // privateTransport returns the transport a listed pair is reached over: it
 // connects through d, and uses no proxy, since a proxy would carry the
 // request on in plaintext and resolve the host itself. Each endpoint has its
-// own, and so its own pool of idle connections.
+// own, and so its own pool of idle connections; it reaches one host and port,
+// so the whole pool is for that host.
 func privateTransport(d *privatenet.Dialer) *http.Transport {
 	return &http.Transport{
 		DialContext:           d.DialContext,
-		MaxIdleConns:          100,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConns,
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
 }
+
+// maxIdleConns bounds a private transport's idle connections: the total
+// http.DefaultTransport keeps, and here the bound for its one host too.
+const maxIdleConns = 100
 
 // isLoopback reports whether host is localhost, in any case, or a literal
 // address in 127.0.0.0/8 or ::1. localhost is taken by name, and resolves
@@ -291,15 +361,102 @@ func validHeaderName(name string) bool {
 }
 
 // requestError reports err, which ended a request to the backend made under
-// ctx. When ctx itself ended, the error wraps ctx.Err(), so errors.Is finds
-// context.Canceled or context.DeadlineExceeded. Otherwise it is the backend's
-// failure and wraps no context error — net/http reports the endpoint's own
-// timeout as context.DeadlineExceeded, which must not read as the caller's.
+// ctx before its answer was whole. When ctx itself ended, the error wraps
+// ctx.Err(), so errors.Is finds context.Canceled or context.DeadlineExceeded.
+// Otherwise it wraps no context error — net/http reports the endpoint's own
+// timeout as context.DeadlineExceeded, which must not read as the caller's —
+// and wraps interceptors.ErrBackendUnavailable when err is transient.
 func requestError(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
 	}
+	if transient(err) {
+		return fmt.Errorf("%w: %s: %v", interceptors.ErrBackendUnavailable, what, err)
+	}
 	return fmt.Errorf("%s: %v", what, err)
+}
+
+// transient reports whether err, from sending a request or reading its
+// answer while the caller's context is live, says the backend could not
+// answer now: a failed lookup, a connection refused, reset or closed before
+// the answer was whole, a timeout — any failure but those that come from
+// configuration or from what was sent, which retrying does not change. Those
+// are a TLS alert, sent or received; a certificate this side refuses; any
+// other handshake crypto/tls itself refuses (see tlsRefusal); a backend that
+// does not speak TLS, or speaks HTTP to https; an address no
+// connection can have; and a host the private-network check refused. A
+// failure this library cannot name, net/http's HTTP/2 errors among them, is
+// the backend's, as grpc-go and connect-go read a transport's failures. No
+// body is decoded on the way (see noContentCoding), so a body that does not
+// parse is never a read error.
+func transient(err error) bool {
+	var (
+		alert     tls.AlertError
+		opErr     *net.OpError
+		certErr   *tls.CertificateVerificationError
+		recordErr tls.RecordHeaderError
+		addrErr   *net.AddrError
+	)
+	switch {
+	case errors.As(err, &alert), errors.As(err, &certErr), errors.As(err, &recordErr),
+		errors.Is(err, http.ErrSchemeMismatch), errors.As(err, &addrErr),
+		errors.Is(err, privatenet.ErrNotPrivate), tlsRefusal(err):
+		return false
+	case errors.As(err, &opErr):
+		// crypto/tls reports an alert as an *net.OpError with one of these.
+		return opErr.Op != "remote error" && opErr.Op != "local error"
+	}
+	return true
+}
+
+// tlsRefusal reports whether err wraps an error of crypto/tls's own, which
+// it spells with the prefix "tls: ": a handshake it refused over what the
+// backend sent, such as a certificate that does not parse, which it reports
+// as neither an alert nor a verification error. A network failure during the
+// handshake is an *net.OpError or io.EOF, and the handshake timeout is
+// net/http's; neither carries the prefix. Every error err wraps is looked
+// at, those beside others in a multiple wrap included, as errors.Is does.
+func tlsRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.HasPrefix(err.Error(), "tls: ") {
+		return true
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		return tlsRefusal(e.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			if tlsRefusal(inner) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// noContentCoding asks for the answer without a content coding. net/http
+// decodes a gzip answer only when it asked for one itself, and a decoder's
+// error would read as the connection breaking.
+func noContentCoding(req *http.Request) {
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+}
+
+// statusError returns err, which reports a status the endpoint does not take
+// as an answer, wrapping interceptors.ErrBackendUnavailable when the status
+// says the backend is overloaded or down: 429, 502, 503 or 504, the statuses
+// gRPC's and Connect's HTTP mappings read as unavailable. Any other status,
+// 500 and 3xx included, says the backend or this service is misconfigured or
+// broke the contract.
+func statusError(status int, err error) error {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return fmt.Errorf("%w: %v", interceptors.ErrBackendUnavailable, err)
+	}
+	return err
 }
 
 // readBounded reads body up to max bytes, and reports whether it held more.
@@ -347,18 +504,4 @@ func newHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Cli
 			return http.ErrUseLastResponse
 		},
 	}
-}
-
-// mustBePlainInternalPairs returns entries each spelled by plainInternalPair,
-// and panics on the first it refuses.
-func mustBePlainInternalPairs(entries []string) []string {
-	pairs := make([]string, len(entries))
-	for i, entry := range entries {
-		pair, err := plainInternalPair(entry)
-		if err != nil {
-			panic(err.Error())
-		}
-		pairs[i] = pair
-	}
-	return pairs
 }

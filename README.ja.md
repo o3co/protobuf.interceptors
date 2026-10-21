@@ -79,7 +79,8 @@ RPC request
 │  VerificationInterceptor         │  reads policy from ctx,
 │                                  │  calls VerifierEndpoint.Verify(),
 │                                  │  refuses with PermissionDenied,
-│                                  │  Unauthenticated or Internal
+│                                  │  Unauthenticated, Unavailable
+│                                  │  or Internal
 └───────────────┬──────────────────┘
                 │
                 ▼
@@ -130,7 +131,7 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 - **id の構文に合わせて書いた `ResourceParser` を verifier に設定し**、呼び出し側でその構文にエンコードする。これには auth.policy-verifier（o3co エンドポイント）が必要である。
 - **問題の値がリソースに代入されないようにポリシーを組み替える。** リソース文字列で DID を名指しする代わりに、RPC が実際に持つ型を守り（`resource: "subscriptions"`、`action: "read"`）、Bearer トークンからすでに持っているアイデンティティに対してバックエンドに判定させる。verifier、OPA、Cedar はトークンを見られるが、static エンドポイントはリソースとアクションしか照合しないので、この判定はできない。
 
-4 つ目の道 — フィールドマッピングは残し、そのプレースホルダーをリソーステンプレートから外して、値をリクエストコンテキストとして運ぶ — は**移植性が無い**: ConnectRPC と o3co エンドポイントの組み合わせでしか機能しない。頼る前に[抽出フィールドの転送](#抽出フィールドの転送)を読むこと。
+4 つ目の道 — フィールドマッピングは残し、そのプレースホルダーをリソーステンプレートから外して、値をリクエストコンテキストとして運ぶ — は、どちらのフレームワークでも unary RPC で o3co か OPA エンドポイントを使う場合に機能し、Cedar と static エンドポイントでは機能せず、ストリームでも機能しない。頼る前に[抽出フィールドの転送](#抽出フィールドの転送)を読むこと。
 
 代入はテンプレートに対する 1 回の走査である: それ自体が `<some-placeholder>` と綴られた値はデータのまま残り、別のマッピングによって書き換えられることはない。
 
@@ -138,7 +139,7 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 
 ### プレースホルダーが読めるリクエストフィールド
 
-`request_field` はリクエストメッセージの**トップレベル**のフィールドを `.proto` のフィールド名で指す。ネストしたメッセージへのドット区切りのパスは読まない。フィールドは次のいずれかの種類の単一値（`repeated` でも `map` でもない）でなければならない:
+`request_field` はリクエストメッセージのフィールドを `.proto` のフィールド名で指すか、ネストしたメッセージへたどるフィールド名を `.` でつないだパスで指す: `post.author.id` はリクエストの `post` の `author` の `id` を読む。フィールド名は `.` を含めないので、パスが指すフィールドは高々 1 つである。最後以外の各セグメントは単一のメッセージフィールドでなければならない。最後のセグメント（リーフ）は次のいずれかの種類の単一値（`repeated` でも `map` でもない）でなければならない:
 
 | 種類 | 代入される形 |
 |---|---|
@@ -148,7 +149,13 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 | `bool` | `true` または `false` |
 | `bytes` | 小文字の 16 進数 |
 
-それ以外の種類 — `enum`、`float`、`double`、メッセージ — と、メッセージに無いフィールドは `Internal` で解決に失敗する。リクエストが設定しなかったフィールドはデフォルト値（proto3 ではゼロ値）に解決される: `0` と `false` はプレースホルダーを埋めるが、空の `string` と `bytes` は空として拒否される。
+それ以外の種類 — `enum`、`float`、`double`、メッセージ — と、メッセージに無いフィールドは `Internal` で解決に失敗する。リクエストが設定しなかったリーフはデフォルト値（proto3 ではゼロ値）に解決される: `0` と `false` はプレースホルダーを埋めるが、空の `string` と `bytes` は空として拒否される。パスのリーフはトップレベルのフィールドとまったく同じに読まれ、その値は同じく[セグメントの文法](#プレースホルダーの値)で検査される。
+
+リーフに至る途中では:
+
+- **リクエストが設定しなかったメッセージは拒否される。** `*interceptors.ResourceValueError` となり、どのバックエンドにも問い合わせずに `PermissionDenied` になる — テンプレートがプレースホルダーを使わないマッピングでも同じである。設定するかどうかは呼び出し元が選べるので、デフォルト値に解決することはない。
+- **`repeated` や `map` のフィールド、スカラー、メッセージに無い名前**は `Internal` で解決に失敗する: ポリシーが、リクエストの型には存在し得ないパスを指している。パス全体をまず型に対して検査するので、途中のメッセージをリクエストが設定したかどうかによらない。
+- **ストリーミングのメソッド**は、パスを含め、引き続き `field_mappings` をそのまま拒否する（[ストリーミング](#ストリーミング)を参照）。
 
 `bytes` フィールドは常に小文字の 16 進エンコードとして代入される: バイト `0xff` は `ff` に、2 バイトの `"ff"` は `6666` に解決されるので、異なる 2 つの値が同じリソースを指すことはない。
 
@@ -158,16 +165,25 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 
 | 経路 | 抽出される | コンテキストに置かれる | 判定に届く |
 |---|---|---|---|
-| ConnectRPC unary | はい | はい | **o3co** エンドポイント経由でのみ |
+| ConnectRPC unary | はい | はい | **o3co** と **OPA** エンドポイント経由で |
 | ConnectRPC streaming | — | — | いいえ — `field_mappings` は `Internal` で拒否 |
-| gRPC unary | はい | **いいえ、破棄される** | **いいえ** |
+| gRPC unary | はい | はい | **o3co** と **OPA** エンドポイント経由で |
 | gRPC streaming | — | — | いいえ — `field_mappings` は `Internal` で拒否 |
 
-`ResolveResourceWithFields` で解決し、その結果を `interceptors.WithExtractedFields` で付けるのは `connectrpc.PolicyOptionInterceptor` だけである。gRPC の unary インターセプターはフィールドを捨てる `ResolveResource` で解決し、両方のストリームインターセプターは `field_mappings` を持つポリシーを何も解決する前に拒否する（[ストリーミング](#ストリーミング)を参照）。そして 4 つのバックエンドのうち、コンテキストを読み出すのは `endpoint.NewO3coEndpoint` だけで、それを `POST /verify` の `context` オブジェクトとして送る — OPA、Cedar、static エンドポイントは見ない。
+unary のポリシーインターセプター `policygrpc.PolicyOptionInterceptor` と `policyconnect.PolicyOptionInterceptor` は、どちらも `ResolveResourceWithFields` で解決し、値が 1 つ以上あれば、プレースホルダー名をキーとして `interceptors.WithExtractedFields` で付ける。両方のストリームインターセプターは、`field_mappings` を持つポリシーを何も解決する前に拒否する（[ストリーミング](#ストリーミング)を参照）。4 つのバックエンドのそれぞれの扱い:
 
-**したがって gRPC unary では、プレースホルダーをリソーステンプレートから外しても、その値が判定に使えるようにはならない — 値が消えるだけである**: 解決はもう値を拒否しないが、verifier はその値なしで判定する。以前より情報の少ない問いであり、拒否よりも悪い。（ポリシーにマッピングを残した gRPC ストリームは引き続き `Internal` で失敗する。[ストリーミング](#ストリーミング)を参照。）バックエンドが対応する上記の対処のいずれかを使うこと。
+| エンドポイント | 値をどうするか |
+|---|---|
+| o3co | `POST /verify` の `context` オブジェクトとして送る。verifier の `RequestContextAttributeCollector` が昇格させるのは運用者が宣言したキーだけで、それ以外のキーは無視される。 |
+| OPA | 文字列のオブジェクト `input.context` として送る。値が無ければ `input` に `context` キーは無い。 |
+| Cedar | 送らない: リクエストのコンテキストは空である。スキーマに対してリクエストを検証する Cedar エージェントは、スキーマが宣言しないコンテキスト属性を拒否するので、送るとそうした構成が動かなくなる。 |
+| static | リソースとアクションだけを照合する。 |
 
-gRPC unary の経路は、ConnectRPC のように値を転送しない。ストリームインターセプターが `field_mappings` を拒否するのは、どちらのフレームワークでも別個の制限である: ポリシーインターセプターはハンドラーがリクエストメッセージを読む前に動き、クライアントストリームや双方向ストリームには単一のリクエストメッセージが無い。
+**値は主張である。** 値は呼び出し元が書くリクエストメッセージから来ており、Bearer トークンと照合されたものではない。ポリシーはそれを呼び出し元の主張として — たとえばトークンのサブジェクトと突き合わせて — 扱い、確定した事実として扱ってはならない。
+
+**o3co では、verifier が受け付ける `context` に上限がある**: `maxContextEntries`（既定 64。すべてのプロパティを数える）と `maxContextValueLength`（既定 1024。任意の文字列の文字数で、キー名を含む）で、超えると `400` が返る。ボディ全体には `maxBodyBytes`（既定 65536 バイト）の上限があり、超えると `413` が返る。3 つとも verifier の設定で決まり、インターセプターはどちらの応答も `Internal` に変換する: RPC は拒否され、値なしで判定されることはない。マッピングの数と、それが運びうる値の長さは verifier の上限に収めること。
+
+ストリームインターセプターが `field_mappings` を拒否するのは、どちらのフレームワークでも同じである: ポリシーインターセプターはハンドラーがリクエストメッセージを読む前に動き、クライアントストリームや双方向ストリームには単一のリクエストメッセージが無い。
 
 [auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
 
@@ -293,7 +309,10 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | `*interceptors.UnauthenticatedError`（読み取れないクレデンシャルを含む） | `Unauthenticated` | `unauthenticated` |
 | RPC 自身のコンテキストがキャンセルされたときの `context.Canceled` | `Canceled` | `request canceled` |
 | RPC 自身のデッドラインが過ぎたときの `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
-| それ以外すべて — バックエンドの失敗（RPC が生きている間にエンドポイント自身の HTTP タイムアウトが発火した場合を含む）、ディスクリプターの無いメソッド、`WithRequirePolicy` の下でのポリシーの無いメソッド（`interceptors.ErrNoPolicy`）、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `interceptors.ErrBackendUnavailable`: バックエンドが今は答えられない — 名前が解決できない、接続が拒否・リセットされたか答えが揃う前に閉じられた、エンドポイント自身のタイムアウト内に答えない、または `429`、`502`、`503`、`504` を返した | `Unavailable` | `authorization backend unavailable` |
+| それ以外すべて — 契約の外で答えたバックエンド（`500`、`3xx`、その他の想定外のステータス、不正なボディ）、拒否された TLS ハンドシェイク（信頼できない・パースできない証明書、アラート）、TLS を話さないバックエンドへの `https`、接続できないアドレス（不正なポート）、プライベートネットワーク検査が拒否したホスト、ディスクリプターの無いメソッド、`WithRequirePolicy` の下でのポリシーの無いメソッド（`interceptors.ErrNoPolicy`）、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+
+`Unavailable` も `Internal` も拒否であり、ハンドラーは実行されない。`Unavailable` はバックエンドが今は停止しているか過負荷であることを示すので、gRPC のステータスコードの指針や一般的なリトライポリシーが想定するとおり、クライアントはバックオフ付きでリトライしてよい。メッセージごとに再検査するストリームでは、verifier の短い停止はサーバーの故障ではなく、クライアントがリトライできるコードでストリームを終える。`Internal` は設定の誤りか契約違反を示し、リトライでは直らない。unavailable と読むステータスは gRPC と Connect の HTTP 変換表がそう読むものであり、`500` はどちらにも当たらないので `Internal` のままである。解決できない名前や拒否された接続は停止と区別できないので、ベース URL の誤りであっても `Unavailable` になる。このライブラリが名指せないトランスポートの失敗も、grpc-go や connect-go と同じく `Unavailable` である。`With…Transport` で渡したトランスポートのエラーも、同じくその型で読む。RPC 自身のキャンセルやデッドラインはどちらよりも優先する。サービス独自の `VerifierEndpoint` も、同じ失敗について `ErrBackendUnavailable` をラップしてよい。
 
 完全なエラーは、すべての検査について `WithDecisionObserver` のオブザーバーに渡る（[判定の記録](#判定の記録)を参照）。インターセプターが返すエラーもそれに unwrap できるので、これらより外側に置いたインターセプターは `errors.As` / `errors.Is` で取り出せる — オブザーバーが見ないポリシー参照や解決の失敗は、そこでログできる。インターセプターは自らはログを書かない。
 
@@ -312,25 +331,25 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 
 ベース URL はスキーム（`http` または `https`）とホストを指定する。どちらかを欠くものは、推測されずに構築時に拒否される。o3co や OPA へのリクエストはサブジェクトの Bearer トークンを、Cedar へのリクエストはそこから解決した principal を運ぶので、`http://` はループバック — `localhost`、`127.0.0.0/8`、`::1` — にのみ許される。ただしエンドポイントに `WithO3coAllowInsecure()`、`WithOPAAllowInsecure()`、`WithCedarAllowInsecure()` を与えた場合は別である。それ以外では `https://` を使うこと。`localhost` は大文字小文字を問わず名前で受け付け、他のホストと同じく `/etc/hosts` と DNS で解決される。リテラルのアドレスは 127.0.0.0/8 内のもの、または `::1`（IPv4 射影の `::ffff:127.x.y.z` を含む）として書かれた場合にのみ受け付けるので、`localhost.`、`foo.localhost`、`127.1`、`2130706433`、`0.0.0.0`、ゾーン付きの `::1%lo0` はループバックではない。
 
-プライベートネットワーク上で名前で到達するバックエンド — たとえばプライベートなコンテナネットワーク上の PDP — は、`With…AllowInsecure()` なしで平文を使える: `WithO3coAllowPlainInternal(hostPorts...)`、`WithOPAAllowPlainInternal(...)`、`WithCedarAllowPlainInternal(...)` は、列挙した `host:port` の組にのみ `http://` を許し、しかもプライベートアドレス（`10.0.0.0/8`、`100.64.0.0/10`、`172.16.0.0/12`、`192.168.0.0/16`、`fc00::/7`。ただしクラウドのメタデータアドレス `100.100.100.200`、`fd00:ec2::254`、`fd20:ce::254` を除く）でのみ到達する。auth.provider の `outbound.plain-internal` と同じ線引きである。
+プライベートネットワーク上で名前で到達するバックエンド — たとえばプライベートなコンテナネットワーク上の PDP — は、`With…AllowInsecure()` なしで平文を使える: `WithO3coAllowPlainInternal(hostPorts...)`、`WithOPAAllowPlainInternal(...)`、`WithCedarAllowPlainInternal(...)` は、列挙した `host:port` の組にのみ `http://` を許し、しかもプライベートアドレス（`10.0.0.0/8`、`100.64.0.0/10`、`172.16.0.0/12`、`192.168.0.0/16`、`fc00::/7`。ただしクラウドのメタデータ・認証情報アドレス `100.100.100.200`、`fd00:ec2::254`、`fd00:ec2::23`、`fd20:ce::254`、`fd00:a9fe:a9fe::1` を除く）でのみ到達する。
 
 ```go
 verifier, err := endpoint.NewO3coEndpoint(
-    "http://policy-verifier:3001",
-    endpoint.WithO3coAllowPlainInternal("policy-verifier:3001"),
+    "http://policy-verifier:3000",
+    endpoint.WithO3coAllowPlainInternal("policy-verifier:3000"),
 )
 ```
 
 - **接続のたびに検査する。** ホストを解決し、解決されたアドレスがすべてプライベートでなければどれにも接続しない。したがって後から公開アドレスに解決されるようになった名前は、トークンを送られずに拒否される。アドレスはエンドポイントのタイムアウトの範囲で順に試し、最後以外はその一部の時間だけを使う。接続は検査したアドレスへ直接張り、環境が指定するプロキシは通さない。IPv6 に射影された IPv4 アドレスはその IPv4 アドレスとして扱い、IPv4 アドレスを含むそれ以外の IPv6 形式はそう扱わない。
 - **書かれたとおりに照合する。** ベース URL のホストとポートが列挙されていなければならず、ポートのない URL はポート 80 である。ホスト名は大文字小文字を問わず、末尾のドット 1 つの有無も問わずに一致し、アドレスはどの表記でも一致する。ASCII でないホスト名はどのエントリにも一致しない: `net/http` はその IDNA 形式、つまり別の名前を問い合わせるからである。ループバックと `https://` はこのオプションがない場合と同じである。
-- **決して到達できないエントリはオプションの呼び出しで panic する**: `host:port` でないもの、ポートが 1〜65535 の外にあるか先頭に 0 を付けて書かれたもの、ホストが英字・数字・ハイフン・アンダースコアからなる ASCII のホスト名（最後のラベルがすべて数字ではない。すべて数字だとリゾルバがアドレスと読むことがある）でもプライベートネットワーク上のアドレスでもないもの。
+- **決して到達できないエントリがあると、コンストラクタがそのエントリ（と、ほかのそうしたエントリすべて）を名指すエラーを返す**: `host:port` でないもの、ポートが 1〜65535 の外にあるか先頭に 0 を付けて書かれたもの、ホストが英字・数字・ハイフン・アンダースコアからなる ASCII のホスト名（最後のラベルがすべて数字ではない。すべて数字だとリゾルバがアドレスと読むことがある）でもプライベートネットワーク上のアドレスでもないもの。エントリはデプロイ設定なので、panic ではなくベース URL と同じくエラーで報告する: 環境変数が未設定のまま `WithO3coAllowPlainInternal(os.Getenv("PDP_ADDR"))` とすると `""` が渡り、`NewO3coEndpoint` がそれを拒否する。エントリなしの呼び出しは何も列挙しない。ユーザー、パス、クエリ、フラグメントを含むエントリ（`host:port` の代わりに渡された URL）は、認証情報を含みうるため、それらを除いて名指す（それらの範囲が曖昧なときは何も名指さない）。
 - **列挙した組は常に検査する。** `With…AllowInsecure()` を与えても検査し、`With…Transport(rt)` を与えるとコンストラクタはエラーを返す。検査はエンドポイント自身のトランスポートの中で行うからである。
 
 リクエストが運ぶものはそのネットワーク上では平文のままである。読み取りと改ざんに対して信頼できるネットワーク上のバックエンドだけを列挙すること。
 
-どの HTTP バックエンドもリダイレクトに追従しない: `3xx` はエラーであり、リクエストとそれに載る Bearer トークンは設定したバックエンドにしか届かない。
+どの HTTP バックエンドもリダイレクトに追従しない: `3xx` はエラーであり、リクエストとそれに載る Bearer トークンは設定したバックエンドにしか届かない。各エンドポイントは答えをコンテンツコーディングなしで求める（静的ヘッダーが指定しない限り `Accept-Encoding: identity`）ので、途中で何もデコードされず、パースできないボディが切れた接続と取り違えられることはない。
 
-呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない。
+呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない: 解決できない名前、拒否された接続や切れた接続、`429`、`502`、`503`、`504` と同じく `interceptors.ErrBackendUnavailable` をラップする（[エラー](#エラー)を参照）。
 
 相互 TLS やプライベート CA には、送信に使うトランスポートをエンドポイントに与える — `WithO3coTransport(rt)`、`WithOPATransport(rt)`、`WithCedarTransport(rt)`。たとえば `TLSClientConfig` を設定した `*http.Transport` である。エンドポイントのタイムアウトとリダイレクト不追従は、`*http.Transport` のように、リクエストのコンテキストを尊重し、自らリダイレクトに追従しないトランスポートであれば引き続き適用される。
 
@@ -357,7 +376,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 | `WithO3coHeaders(map[string]string)` | すべての verify リクエストに加える静的ヘッダー。複数回の呼び出しはマージされる。 |
 | `WithO3coRequireConfirmedRevision()` | 確認済みのポリシーリビジョンに基づくと確定できない allow を拒否する。デフォルトはオフ。[確認済みリビジョンの要求](#確認済みリビジョンの要求)を参照。 |
 | `WithO3coAllowInsecure()` | ループバック以外のホストへの `http://` ベース URL を許可する。 |
-| `WithO3coAllowPlainInternal(hostPorts...)` | 列挙した `host:port` の組への `http://` ベース URL を許可し、プライベートアドレスでのみ到達する。上記参照。呼び出しをまたいで追加される。決して到達できないエントリでは panic する。 |
+| `WithO3coAllowPlainInternal(hostPorts...)` | 列挙した `host:port` の組への `http://` ベース URL を許可し、プライベートアドレスでのみ到達する。上記参照。呼び出しをまたいで追加される。決して到達できないエントリがあれば `NewO3coEndpoint` がエラーを返す。 |
 | `WithO3coTransport(rt)` | リクエストを送るトランスポート。相互 TLS など。デフォルト `http.DefaultTransport`。`rt` が nil なら panic する。 |
 
 `WithO3coHeaders` は、auth.policy-verifier の任意の `http.callerAuth` ゲートを有効にしたデプロイで必要になる。このゲートは専用のヘッダー（デフォルト `x-caller-token`）で共有クレデンシャルを期待し、サブジェクトの Bearer トークンとは別の問い — *どのサービスが*そもそも判定を求めてよいか — に答える。それを送る手段が無ければ、ゲートを有効にした時点で、すべての Go の実施ポイントが `401 caller_unauthenticated` で拒否される。
@@ -377,7 +396,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### OPA エンドポイント
 
-`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` — トークンは送られたまま — で問い合わせるので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
+`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` と、RPC に抽出された `field_mappings` の値があればそれを `"context"` として問い合わせる（[抽出フィールドの転送](#抽出フィールドの転送)を参照）。トークンは送られたままなので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
 
 | オプション | 効果 |
 |---|---|
@@ -391,7 +410,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### Cedar エンドポイント
 
-`NewCedarEndpoint(baseURL, opts...)` は `POST {baseURL}/v1/is_authorized` に、リゾルバーが返した principal、アクション、リソースを、それぞれ Cedar のエンティティ UID（デフォルトのプレフィックスでは `User::"alice"`、`Action::"read"`、`Resource::"posts/1"`）として、空のコンテキストとともに問い合わせる。許可するのは、レスポンスの `decision` キー（この綴りの大文字小文字どおり）が `"Allow"` のときだけである。それ以外の decision は deny、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。`WithCedarPrincipalResolver` が無ければコンストラクターはエラーを返す。
+`NewCedarEndpoint(baseURL, opts...)` は `POST {baseURL}/v1/is_authorized` に、リゾルバーが返した principal、アクション、リソースを、それぞれ Cedar のエンティティ UID（デフォルトのプレフィックスでは `User::"alice"`、`Action::"read"`、`Resource::"posts/1"`）として、空のコンテキストとともに問い合わせる — 抽出された `field_mappings` の値は送らない（[抽出フィールドの転送](#抽出フィールドの転送)を参照）。許可するのは、レスポンスの `decision` キー（この綴りの大文字小文字どおり）が `"Allow"` のときだけである。それ以外の decision は deny、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。`WithCedarPrincipalResolver` が無ければコンストラクターはエラーを返す。
 
 | オプション | 効果 |
 |---|---|
@@ -417,7 +436,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 Bearer トークンとリクエスト ID は `context.Context` で渡され、フレームワーク別の `VerificationInterceptor` が設定する（[Bearer トークンとリクエスト ID](#bearer-トークンとリクエスト-id)を参照）。
 
-インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。抽出された `field_mappings` の値を読むのは o3co エンドポイントだけで、フレームワークがそれをコンテキストに置いていれば `POST /verify` の `context` オブジェクトとして転送する。OPA はリソース、アクション、トークンで、Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
+インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。o3co と OPA のエンドポイントは抽出された `field_mappings` の値も読み、それぞれ `POST /verify` の `context` オブジェクト、`input.context` として送る。Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
 
 ## 判定の記録
 
@@ -437,6 +456,8 @@ if d, ok := interceptors.DecisionFromContext(ctx); ok {
 
 ```go
 observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
+    // ev.Procedure ("/pkg.Svc/Method"); ev.Phase (CheckOpen, CheckSend,
+    // CheckReceive); ev.Duration (the endpoint call, 0 when none was made);
     // ev.Resource, ev.Action; ev.Decision (nil when nothing was reported);
     // ev.Err (nil when allowed; errors.As finds *interceptors.DeniedError)
 }
@@ -444,9 +465,17 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
-ストリームの再検査は、それを行った送信または受信の中でオブザーバーを呼び、その送信または受信はオブザーバーが戻るのを待つ。ストリームのクライアントが去った後は、HTTP エンドポイント（o3co、OPA、Cedar）では次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。Cedar でこれが成り立つのは principal リゾルバーが答えた後である: コンテキストを使って I/O をするリゾルバーは先に失敗し、そのエラーは `UnauthenticatedError` になる。static エンドポイントはコンテキストのキャンセルを見ない: その再検査はそれまでと同じ答えを返し、オブザーバーはその答えを見て、送信はその後トランスポートで失敗する。
+- **`Procedure`** は RPC の完全なメソッド名で、両フレームワークで同じ形である。
+- **`Phase`** は、ハンドラーが動く前の検査 — unary RPC の唯一の検査、またはストリームを開く検査 — なら `CheckOpen`、ストリームの送信前・受信後の再検査なら `CheckSend` または `CheckReceive` である。`CheckOpen` 以外はすべて再検査である。
+- **`Duration`** はエンドポイントの呼び出しにかかった時間である。インターセプターが呼び出しをしなかったとき — インターセプター自身が拒否した不正な形のクレデンシャル（[Bearer トークンとリクエスト ID](#bearer-トークンとリクエスト-id) を参照）— は `0` になる。トークンの無いリクエストを拒否するのはエンドポイントなので、その呼び出しはどれほど短くても計られる。
+
+**オブザーバーは軽く、ブロックしないものにする。** オブザーバーは同期的に呼ばれる: ハンドラーはそれが戻ってから始まる。ストリームの再検査は、検査を行った送信または受信の中でオブザーバーを呼び、ストリームの検査は直列化されているので、それが戻るまでその送信または受信は待ち、ストリーム上の他の送受信も、向きにかかわらず待つ — `WithStreamRecheckInterval` があっても、自分の再検査の時期が来ているかどうかにかかわらず待つ。遅い処理 — リモートの監査ストアへの書き込みなど — は別のゴルーチンに渡すこと。
+
+ストリームのクライアントが去った後は、HTTP エンドポイント（o3co、OPA、Cedar）では次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。Cedar でこれが成り立つのは principal リゾルバーが答えた後である: コンテキストを使って I/O をするリゾルバーは先に失敗し、そのエラーは `UnauthenticatedError` になる。static エンドポイントはコンテキストのキャンセルを見ない: その再検査はそれまでと同じ答えを返し、オブザーバーはその答えを見て、送信はその後トランスポートで失敗する。
 
 拒否のときは、判定は `DeniedError.Decision` にもあり、verifier の deny `code` は `Decision.Code` に入る。
+
+**誰についての判定か。** `Decision.Subject` は verifier が認証したサブジェクトであり、allow にも拒否にも入る。verifier がそれを送らなかったとき — サブジェクトを持たないトークンでは送らない — は空である。OPA と Cedar のエンドポイントは判定そのものを報告しない。これは報告のためだけのもので、どの判定もこれに依らない。verifier が `subject` キーを送るときは空でない文字列でなければならない: `null`、`""`、その他の型はエンベロープを不完全にするので、それを持つ `2xx` はフェイルクローズし、それを持つ `403` は拒否のままだが判定を報告しない。v0.4.0 より古い verifier は `sub` が空のトークンに `""` を送るので、その allow はフェイルクローズする。
 
 **そのどれも RPC の呼び出し元には届かない。** リビジョンと評価ステータスは、ポリシーセットがいつ変わったか、拒否がエンジンの失敗だったかを語る。呼び出し元が受け取るのは引き続き `PermissionDenied: access denied` であり、このライブラリが返すどのエラーもメッセージに判定を含まない。どのエンドポイントも、デフォルトのレベルではレスポンスボディをログしない — エラー行が示すのはステータス、リクエスト ID、（o3co では）code であり、ボディは `Debug` に出る。
 
@@ -464,7 +493,7 @@ policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserv
 
 保存すべきものについての verifier 自身の助言がここにも当てはまる: 各操作について、判定結果、deny code、各評価に伴う理由、送ったリクエスト ID（`Decision.RequestID`）。verifier の `decision` ログイベントは同じリクエスト ID を持つので、2 つの記録はそれで結合できる。verifier は `x-request-id` を、`[A-Za-z0-9-_.:+/=#]` の 128 文字以下である場合にのみ保持し、インターセプターは受信した ID をその形の場合にのみ運び、それ以外では生成するので、送る ID は常に結合できる。
 
-allow にはステータスとボディの両方が必要である: `decision: "allow"` を持つ完全な判定エンベロープをボディとする `200` である。ボディが空、JSON でない、verifier の契約が要求するキーを欠く、値を型付けしている箇所のどこかで null または型違い、deny の `code` や `message` を持つ allow（null であっても）、`WithO3coMaxResponseBodySize` より大きい、読み取り途中で切れている — そうしたものは判定ではなく、何も報告しない。`200` ではそれにより答えは allow ではなくエラーになり、`200` 以外の `2xx`、完全な deny を持つ `200`（これは引き続きオブザーバーに報告される）も同様である。インターセプターはそのエラーを `Internal` に変換する。`403` はボディが何を持っていても deny であり、ボディは理由を報告するだけである。キーは契約の綴りどおりに照合する: 大文字小文字の違うもの（`Passed`、`Decision`）は契約が定義しないキーであり、他の未知のキーと同じく無視されるので、似たキーの代わりにはならない。例外は大文字小文字の違う `restricts` で、無視されずに拒否される: そのときエンベロープは完全ではなく、それを持つ `200` はフェイルクローズする。OPA の `result` と Cedar エージェントの `decision` も、同様に正確なキーでのみ読む。
+allow にはステータスとボディの両方が必要である: `decision: "allow"` を持つ完全な判定エンベロープをボディとする `200` である。ボディが空、JSON でない、verifier の契約が要求するキーを欠く、値を型付けしている箇所のどこかで null または型違い、deny の `code` や `message` を持つ allow（null であっても）、`WithO3coMaxResponseBodySize` より大きい、読み取り途中で切れている — そうしたものは判定ではなく、何も報告しない。`200` ではそれにより答えは allow ではなくエラーになり、`200` 以外の `2xx`、完全な deny を持つ `200`（これは引き続きオブザーバーに報告される）も同様である。インターセプターはそのエラーを `Internal` に変換する。ただし切れた接続やエンドポイント自身のタイムアウトで読み取り途中に切れたボディは、バックエンドが答えなかったということなので `Unavailable` になる。`403` はボディが何を持っていても deny であり、ボディは理由を報告するだけである。キーは契約の綴りどおりに照合する: 大文字小文字の違うもの（`Passed`、`Decision`）は契約が定義しないキーであり、他の未知のキーと同じく無視されるので、似たキーの代わりにはならない。例外は大文字小文字の違う `restricts` で、無視されずに拒否される: そのときエンベロープは完全ではなく、それを持つ `200` はフェイルクローズする。OPA の `result` と Cedar エージェントの `decision` も、同様に正確なキーでのみ読む。
 
 ### 確認済みリビジョンの要求
 
@@ -480,7 +509,8 @@ allow にはステータスとボディの両方が必要である: `decision: "
 
 - **送信はメッセージが出ていく前に検査する**ので、拒否されたメッセージは送信されない。
 - **受信はメッセージが届いた後に検査する**ので、取り消し後に届いたメッセージは消去されてハンドラーには渡らない。どのコーデックがデコードしたかは問わない。失敗した受信 — クライアントが自分の側を閉じた、ストリームが壊れた — にはメッセージが無く、再検査しない。
-- **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、バックエンドが拒否したトークンなら `Unauthenticated`、verifier の失敗なら `Internal`（[エラー](#エラー)と[ストリームの途中で付与が終わるとき](#ストリームの途中で付与が終わるとき)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
+- **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、バックエンドが拒否したトークンなら `Unauthenticated`、verifier が答えられなければ `Unavailable`、それ以外の verifier の失敗なら `Internal`（[エラー](#エラー)と[ストリームの途中で付与が終わるとき](#ストリームの途中で付与が終わるとき)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
+- **完了しなかった再検査もストリームを終わらせる。** 再検査の中でオブザーバーまたはエンドポイントが panic すると、その panic は再検査を行った送信または受信を通じてハンドラーに届く。その送信が運ぶはずだったメッセージは送信されず、その受信が検査したメッセージはハンドラーが panic を recover しても消去される。panic を recover して続けるハンドラーには、以後の送信と受信がすべて拒否され、ストリームは `Internal` で終わる。ハンドラーが recover しない panic はインターセプターの外に出る。
 
 再検査 1 回につき verifier の呼び出しが 1 回かかり、送信や受信はそれを待つ。多くのメッセージを運ぶストリームでこれを抑えるには、どちらのフレームワークでも検証インターセプターに `WithStreamRecheckInterval(d)` を与える:
 
@@ -520,9 +550,9 @@ N 個のレスポンスを返すサーバーストリームは N + 2 回 — 開
 | Cedar | principal リゾルバーがトークンを拒否したとき `Unauthenticated`。リゾルバーは検査のたびに呼ばれる | `PermissionDenied` |
 | static | 起きない: トークンがあることしか検査しない | 起きない: 規則は固定である |
 
-再検査に答えられないバックエンド — 到達できない、エンドポイント自身のタイムアウトより遅い、失敗する — は、他の検査と同じく `Internal` でストリームを終わらせる（[エラー](#エラー)を参照）。
+再検査に答えられないバックエンド — 到達できない、エンドポイント自身のタイムアウトより遅い、過負荷（`429`、`502`、`503`、`504`）— は、`Unavailable: authorization backend unavailable` でストリームを終わらせる。契約の外で答えたバックエンドは `Internal` で終わらせる（[エラー](#エラー)を参照）。
 
-ストリームの途中で `Unauthenticated` か `PermissionDenied` を受け取ったクライアントは、トークンを更新するか付与を戻してもらい、新しいストリームを開かなければならない。それまでのストリームは終わっている。
+ストリームの途中で `Unauthenticated` か `PermissionDenied` を受け取ったクライアントは、トークンを更新するか付与を戻してもらい、新しいストリームを開かなければならない。それまでのストリームは終わっている。`Unavailable` を受け取ったクライアントは、バックオフしながらストリームを開き直してよい: バックエンドが答えられなかっただけで、付与については何も言っていない。それまでのストリームはやはり終わっている。
 
 ### 拒否された送信はハンドラーの処理の後に来る
 

@@ -96,25 +96,35 @@ func WithStreamRecheckInterval(d time.Duration) Option {
 
 // WithDecisionObserver has a verification interceptor hand every
 // authorization check it makes to fn, allowed or not (see
-// interceptors.DecisionObserver). A stream's re-check calls fn on the send or
-// receive that made it, which waits for fn to return.
+// interceptors.DecisionObserver). A stream's re-check calls fn inside the
+// SendMsg or RecvMsg that made it, while the stream's checks are serialized,
+// so a slow fn stalls the stream in both directions: keep it cheap and
+// non-blocking.
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(c *config) {
 		c.observer = fn
 	}
 }
 
-// verify runs one authorization check and hands it to the observer, if any.
-// A credential the interceptor could not read (credErr) refuses the check
-// without asking the verifier.
-func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string, credErr error) (*interceptors.Decision, error) {
-	var decision *interceptors.Decision
+// verify runs one authorization check of procedure, made at phase, and hands
+// it to the observer, if any. A credential the interceptor could not read
+// (credErr) refuses the check without asking the verifier.
+func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, procedure string, phase interceptors.CheckPhase, resource, action string, credErr error) (*interceptors.Decision, error) {
+	var (
+		decision *interceptors.Decision
+		took     time.Duration
+	)
 	err := credErr
 	if err == nil {
+		start := c.now()
 		decision, err = endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+		took = c.now().Sub(start)
 	}
 	if c.observer != nil {
-		c.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
+		c.observer(ctx, interceptors.DecisionEvent{
+			Procedure: procedure, Phase: phase, Duration: took,
+			Resource: resource, Action: action, Decision: decision, Err: err,
+		})
 	}
 	return decision, err
 }
@@ -129,7 +139,7 @@ func withDecision(ctx context.Context, d *interceptors.Decision) context.Context
 }
 
 func newConfig(opts []Option) *config {
-	c := &config{}
+	c := &config{now: time.Now}
 	for _, o := range opts {
 		o(c)
 	}
@@ -151,11 +161,12 @@ func withInbound(ctx context.Context) (context.Context, error) {
 // PolicyOptionInterceptor returns a gRPC UnaryServerInterceptor that reads
 // proto method options and injects the resolved Policy into context.
 //
-// It resolves with interceptors.ResolveResource, so extracted field_mappings
-// values fill the resource template and are then discarded, unlike
-// connectrpc.PolicyOptionInterceptor, which forwards them. A field mapping
-// whose placeholder the template does not use therefore never reaches the
-// verifier. See README, "Extracted field forwarding".
+// It resolves with interceptors.ResolveResourceWithFields and attaches the
+// extracted values with interceptors.WithExtractedFields, as
+// connectrpc.PolicyOptionInterceptor does, so a field mapping whose
+// placeholder is absent from the resource template still reaches an endpoint
+// that reads them (in package endpoint, the o3co and OPA endpoints). See
+// README, "Extracted field forwarding".
 func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 	var cache sync.Map
 
@@ -180,7 +191,11 @@ func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 			if !ok {
 				return nil, toGRPCError(ctx, errors.New("request does not implement proto.Message"))
 			}
-			resource, action, err = interceptors.ResolveResource(policy, msg)
+			var fields map[string]string
+			resource, action, fields, err = interceptors.ResolveResourceWithFields(policy, msg)
+			if err == nil && len(fields) > 0 {
+				ctx = interceptors.WithExtractedFields(ctx, fields)
+			}
 		} else {
 			resource, action, err = interceptors.ResolveResource(policy, nil)
 		}
@@ -231,7 +246,7 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 		}
 
 		// Call the verifier endpoint.
-		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
+		decision, err := cfg.verify(ctx, verifier, info.FullMethod, interceptors.CheckOpen, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return nil, toGRPCError(ctx, err)
 		}
