@@ -403,6 +403,8 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
+ストリームの再検査は、それを行った送信または受信の中でオブザーバーを呼び、その送信または受信はオブザーバーが戻るのを待つ。ストリームのクライアントが去った後は、組み込みエンドポイントでは次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。
+
 拒否のときは、判定は `DeniedError.Decision` にもあり、verifier の deny `code` は `Decision.Code` に入る。
 
 **そのどれも RPC の呼び出し元には届かない。** リビジョンと評価ステータスは、ポリシーセットがいつ変わったか、拒否がエンジンの失敗だったかを語る。呼び出し元が受け取るのは引き続き `PermissionDenied: access denied` であり、このライブラリが返すどのエラーもメッセージに判定を含まない。どのエンドポイントも、デフォルトのレベルではレスポンスボディをログしない — エラー行が示すのはステータス、リクエスト ID、（o3co では）code であり、ボディは `Debug` に出る。

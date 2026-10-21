@@ -247,3 +247,74 @@ func TestConnectStreamChain_RevokedWhileSending_NextMessageIsNotSent(t *testing.
 		t.Errorf("observer saw %d checks, want the opening one, the request's and one per send", len(events))
 	}
 }
+
+// Each stream has its own interval: a stream opened within the interval of
+// another stream's check is still checked before its handler runs.
+func TestConnectVerification_RecheckInterval_IsPerStream(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	calls := 0
+	handlerRuns := 0
+	handler := policyconnect.VerificationInterceptor(
+		endpointtest.Func(func(context.Context, string, string) error {
+			calls++
+			if calls == 1 {
+				return nil
+			}
+			return &interceptors.DeniedError{Reason: "the second stream is not allowed"}
+		}),
+		policyconnect.WithStreamRecheckInterval(time.Hour),
+		policyconnect.WithClock(func() time.Time { return now }),
+	).WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error {
+		handlerRuns++
+		return nil
+	})
+
+	if err := handler(policyStreamCtx(), &sendingConn{fakeStreamingConn: fakeStreamingConn{header: http.Header{}}}); err != nil {
+		t.Fatalf("first stream: unexpected error: %v", err)
+	}
+	err := handler(policyStreamCtx(), &sendingConn{fakeStreamingConn: fakeStreamingConn{header: http.Header{}}})
+
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("second stream: code = %v, want %v", connect.CodeOf(err), connect.CodePermissionDenied)
+	}
+	if calls != 2 {
+		t.Errorf("verify calls = %d, want one opening check per stream", calls)
+	}
+	if handlerRuns != 1 {
+		t.Errorf("handler ran %d times, want only for the allowed stream", handlerRuns)
+	}
+}
+
+// The refusal ends the RPC even when the handler returns an error of its own.
+func TestConnectVerification_FailedRecheck_WinsOverTheHandlersError(t *testing.T) {
+	handler := policyconnect.VerificationInterceptor(revokedAfter(1)).
+		WrapStreamingHandler(func(_ context.Context, conn connect.StreamingHandlerConn) error {
+			_ = conn.Send("refused")
+			return connect.NewError(connect.CodeUnavailable, errors.New("the handler's own error"))
+		})
+	err := handler(policyStreamCtx(), &sendingConn{fakeStreamingConn: fakeStreamingConn{header: http.Header{}}})
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("code = %v, want %v", connect.CodeOf(err), connect.CodePermissionDenied)
+	}
+}
+
+// On a real client-streaming RPC: the grant is revoked after the last message
+// was received, so the response is refused.
+func TestConnectStreamChain_RevokedBeforeTheResponse_ResponseIsNotSent(t *testing.T) {
+	impl := &uploadHandler{}
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		// Allowed: the opening check and the one message.
+		policyconnect.VerificationInterceptor(revokedAfter(2)),
+	)
+	defer cleanup()
+
+	err := upload(client, "only")
+
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("code = %v, want %v (%v)", connect.CodeOf(err), connect.CodePermissionDenied, err)
+	}
+	if got := impl.all(); len(got) != 1 || got[0] != "only" {
+		t.Errorf("handler received %q, want the one message", got)
+	}
+}

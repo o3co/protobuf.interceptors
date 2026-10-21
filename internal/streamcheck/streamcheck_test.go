@@ -152,3 +152,16 @@ func TestGate_NilClock_UsesTheSystemClock(t *testing.T) {
 		t.Errorf("checks run = %d, want 1", calls)
 	}
 }
+
+// A zero interval checks every time even when the clock steps backwards.
+func TestGate_ZeroInterval_ClockStepsBack_StillChecks(t *testing.T) {
+	c := newClock()
+	g := streamcheck.New(0, c.now)
+	calls := 0
+	_ = g.Check(counting(&calls))
+	c.advance(-time.Second)
+	_ = g.Check(counting(&calls))
+	if calls != 2 {
+		t.Errorf("checks run = %d, want 2", calls)
+	}
+}

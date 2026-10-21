@@ -15,6 +15,11 @@
 // Package streamcheck decides when a stream's authorization is checked
 // again. The gRPC and ConnectRPC stream interceptors both use it, so a stream
 // is re-checked by the same rule on either framework.
+//
+// The framework modules are released apart from the core and import this
+// package, and a consumer may pair a released framework module with any later
+// core release. So its exported API may only grow: nothing in it is removed,
+// renamed, or changes meaning.
 package streamcheck
 
 import (
@@ -22,7 +27,7 @@ import (
 	"time"
 )
 
-// Gate runs a stream's authorization checks.
+// Gate runs a stream's authorization checks. Each stream has its own.
 //
 // A check runs unless the last one began less than the interval ago; a zero
 // interval runs every check. The first check always runs. The first failure
@@ -57,7 +62,7 @@ func (g *Gate) Check(check func() error) error {
 		return g.err
 	}
 	start := g.now()
-	if g.checked && start.Sub(g.last) < g.interval {
+	if g.interval > 0 && g.checked && start.Sub(g.last) < g.interval {
 		return nil
 	}
 	if err := check(); err != nil {

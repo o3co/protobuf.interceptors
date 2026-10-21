@@ -39,7 +39,9 @@ type config struct {
 
 // WithStreamRecheckInterval has VerificationStreamInterceptor re-check a
 // stream at most once per d instead of on every message: a message sent or
-// received less than d after the last check began goes through without one. The default, 0, re-checks every message.
+// received less than d after the last check began goes through without one.
+// The default, 0, re-checks every message. VerificationInterceptor, which
+// checks each unary RPC once, ignores it.
 //
 // Panics if d is negative.
 func WithStreamRecheckInterval(d time.Duration) Option {
@@ -53,7 +55,8 @@ func WithStreamRecheckInterval(d time.Duration) Option {
 
 // WithDecisionObserver has a verification interceptor hand every
 // authorization check it makes to fn, allowed or not (see
-// interceptors.DecisionObserver).
+// interceptors.DecisionObserver). A stream's re-check calls fn on the send or
+// receive that made it, which waits for fn to return.
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(c *config) {
 		c.observer = fn

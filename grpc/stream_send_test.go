@@ -181,8 +181,7 @@ func TestWithStreamRecheckInterval_Negative_Panics(t *testing.T) {
 
 // pushDesc serves UploadResources as a stream that, given one request, sends
 // up to ten GetResourceResponse messages, stopping at the first send that
-// fails. Its policy is the one the
-// test service declares for UploadResources.
+// fails. Its policy is the one the test service declares for UploadResources.
 func pushDesc(sent *[]string) grpc.ServiceDesc {
 	return grpc.ServiceDesc{
 		ServiceName: "test.v1.TestService",
@@ -262,5 +261,94 @@ func TestStreamChain_RevokedWhileSending_NextMessageIsNotSent(t *testing.T) {
 	}
 	if events := rec.all(); len(events) != 5 {
 		t.Errorf("observer saw %d checks, want the opening one, the request's and one per send", len(events))
+	}
+}
+
+// Each stream has its own interval: a stream opened within the interval of
+// another stream's check is still checked before its handler runs.
+func TestVerificationStreamInterceptor_RecheckInterval_IsPerStream(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	calls := 0
+	interceptor := policygrpc.VerificationStreamInterceptor(
+		endpointtest.Func(func(context.Context, string, string) error {
+			calls++
+			if calls == 1 {
+				return nil
+			}
+			return &interceptors.DeniedError{Reason: "the second stream is not allowed"}
+		}),
+		policygrpc.WithStreamRecheckInterval(time.Hour),
+		policygrpc.WithClock(func() time.Time { return now }),
+	)
+
+	handlerRuns := 0
+	handler := func(any, grpc.ServerStream) error { handlerRuns++; return nil }
+	if err := interceptor(nil, &fakeServerStream{ctx: policyStreamCtx()}, streamInfo(), handler); err != nil {
+		t.Fatalf("first stream: unexpected error: %v", err)
+	}
+	err := interceptor(nil, &fakeServerStream{ctx: policyStreamCtx()}, streamInfo(), handler)
+
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("second stream: code = %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+	if calls != 2 {
+		t.Errorf("verify calls = %d, want one opening check per stream", calls)
+	}
+	if handlerRuns != 1 {
+		t.Errorf("handler ran %d times, want only for the allowed stream", handlerRuns)
+	}
+}
+
+// The refusal ends the RPC even when the handler returns an error of its own.
+func TestVerificationStreamInterceptor_FailedRecheck_WinsOverTheHandlersError(t *testing.T) {
+	interceptor := policygrpc.VerificationStreamInterceptor(revokedAfter(1))
+	err := interceptor(nil, &fakeServerStream{ctx: policyStreamCtx()}, streamInfo(), func(_ any, ss grpc.ServerStream) error {
+		_ = ss.SendMsg("refused")
+		return status.Error(codes.Unavailable, "the handler's own error")
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+}
+
+// On a real client-streaming RPC: the grant is revoked after the last message
+// was received, so the response SendAndClose sends is refused.
+func TestStreamChain_RevokedBeforeTheResponse_ResponseIsNotSent(t *testing.T) {
+	impl := &uploadServer{}
+	srv := grpc.NewServer(grpc.ChainStreamInterceptor(
+		policygrpc.PolicyOptionStreamInterceptor(),
+		// Allowed: the opening check and the one message.
+		policygrpc.VerificationStreamInterceptor(revokedAfter(2)),
+	))
+	testpb.RegisterTestServiceServer(srv, impl)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.Stop()
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	defer conn.Close()
+
+	stream, err := testpb.NewTestServiceClient(conn).UploadResources(bearerCtx("tok"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := stream.Send(&testpb.CreateResourceRequest{Name: "only"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp, err := stream.CloseAndRecv()
+
+	if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v", status.Code(err), codes.PermissionDenied)
+	}
+	if resp != nil {
+		t.Errorf("client received a response: %v", resp)
+	}
+	if got := impl.all(); len(got) != 1 || got[0] != "only" {
+		t.Errorf("handler received %q, want the one message", got)
 	}
 }

@@ -165,7 +165,9 @@ func (p *policyOptionInterceptor) WrapStreamingHandler(next connect.StreamingHan
 type Option func(*verificationInterceptor)
 
 // WithDecisionObserver has VerificationInterceptor hand every authorization
-// check it makes to fn, allowed or not (see interceptors.DecisionObserver).
+// check it makes to fn, allowed or not (see interceptors.DecisionObserver). A
+// stream's re-check calls fn on the send or receive that made it, which waits
+// for fn to return.
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(v *verificationInterceptor) {
 		v.observer = fn
@@ -175,7 +177,8 @@ func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 // WithStreamRecheckInterval has VerificationInterceptor re-check a stream at
 // most once per d instead of on every message: a message sent or received less
 // than d after the last check began goes through without one. The default, 0,
-// re-checks every message.
+// re-checks every message. A unary RPC is checked once, and the option does not
+// apply to it.
 //
 // Panics if d is negative.
 func WithStreamRecheckInterval(d time.Duration) Option {

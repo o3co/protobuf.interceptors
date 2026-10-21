@@ -618,6 +618,12 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
+A stream's re-check calls the observer on the send or receive that made it,
+which waits for the observer to return. Once a stream's client has gone away,
+the next send's re-check on a built-in endpoint fails with the RPC's context
+error — the observer sees `context.Canceled` or `context.DeadlineExceeded`, not
+a denial.
+
 On a denial the decision is also on `DeniedError.Decision`, with the verifier's
 deny `code` in `Decision.Code`.
 
