@@ -346,11 +346,23 @@ func transient(err error) bool {
 // backend sent, such as a certificate that does not parse, which it reports
 // as neither an alert nor a verification error. A network failure during the
 // handshake is an *net.OpError or io.EOF, and the handshake timeout is
-// net/http's; neither carries the prefix.
+// net/http's; neither carries the prefix. Every error err wraps is looked
+// at, those beside others in a multiple wrap included, as errors.Is does.
 func tlsRefusal(err error) bool {
-	for ; err != nil; err = errors.Unwrap(err) {
-		if strings.HasPrefix(err.Error(), "tls: ") {
-			return true
+	if err == nil {
+		return false
+	}
+	if strings.HasPrefix(err.Error(), "tls: ") {
+		return true
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		return tlsRefusal(e.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			if tlsRefusal(inner) {
+				return true
+			}
 		}
 	}
 	return false

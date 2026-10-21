@@ -271,6 +271,8 @@ func TestTransient(t *testing.T) {
 		{"a certificate this side refuses", &url.Error{Op: "Post", URL: "u", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
 		{"a backend that does not speak TLS", &url.Error{Op: "Post", URL: "u", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}, false},
 		{"crypto/tls refusing the handshake", &url.Error{Op: "Post", URL: "u", Err: errors.New("tls: failed to parse certificate from server: x509: malformed certificate")}, false},
+		{"crypto/tls refusing, beside another error", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("transport: %w; cleanup: %w", errors.New("tls: failed to parse certificate from server"), io.EOF)}, false},
+		{"crypto/tls refusing, joined", errors.Join(io.EOF, errors.New("tls: failed to parse certificate from server")), false},
 		{"a scheme mismatch", &url.Error{Op: "Post", URL: "u", Err: http.ErrSchemeMismatch}, false},
 		{"an address no connection can have", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.AddrError{Err: "invalid port", Addr: "65536"}}}, false},
 		{"a host the private-network check refused", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("pdp resolves to 8.8.8.8: %w", privatenet.ErrNotPrivate)}, false},
