@@ -237,8 +237,8 @@ type DecisionEvent struct {
 // stream's, starts only after it returns. A stream's re-check calls it inside
 // the send or receive that made the check, while the stream's checks are
 // serialized: until it returns, that send or receive waits, and so does every
-// other send or receive on the stream that needs a check, in either direction.
-// Keep it cheap and non-blocking — hand slow work, such as a write to a remote
-// audit store, to another goroutine. Nothing recovers a panic in it: the
-// panic reaches the RPC's goroutine.
+// other send or receive on the stream, in either direction, whether or not its
+// own re-check is due. Keep it cheap and non-blocking — hand slow work, such
+// as a write to a remote audit store, to another goroutine. Nothing recovers a
+// panic in it: the panic reaches the RPC's goroutine.
 type DecisionObserver func(ctx context.Context, ev DecisionEvent)

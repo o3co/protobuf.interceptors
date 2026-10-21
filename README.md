@@ -679,11 +679,13 @@ policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserv
 handler starts only after it returns. A stream's re-check calls it inside the
 send or receive that made the check, while the stream's checks are
 serialized, so until it returns that send or receive waits, and so does every
-other one on the stream that needs a check, in either direction. Hand slow
-work — a write to a remote audit store — to another goroutine. Once a stream's client has gone away,
-the next send's re-check on a built-in endpoint fails with the RPC's context
-error — the observer sees `context.Canceled` or `context.DeadlineExceeded`, not
-a denial.
+other send or receive on the stream, in either direction — with
+`WithStreamRecheckInterval` too, whether or not its own re-check is due. Hand
+slow work — a write to a remote audit store — to another goroutine.
+
+Once a stream's client has gone away, the next send's re-check on a built-in
+endpoint fails with the RPC's context error — the observer sees
+`context.Canceled` or `context.DeadlineExceeded`, not a denial.
 
 On a denial the decision is also on `DeniedError.Decision`, with the verifier's
 deny `code` in `Decision.Code`.

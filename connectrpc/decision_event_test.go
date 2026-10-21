@@ -187,3 +187,21 @@ func TestConnectVerification_DecisionEvent_Streaming_RefusedCredential_ZeroDurat
 		t.Errorf("event = %+v, want the refusal with Duration 0, the procedure and CheckOpen", ev)
 	}
 }
+
+// A request with no token is the endpoint's to refuse, so its call is timed.
+func TestConnectChain_DecisionEvent_Unary_NoToken_TheEndpointCallIsTimed(t *testing.T) {
+	clock := newFakeClock()
+	rec := &recorder{}
+	client, cleanup := startConnectServer(t,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(takes(clock, 5*time.Millisecond),
+			policyconnect.WithDecisionObserver(rec.observe), policyconnect.WithClock(clock.now)),
+	)
+	defer cleanup()
+
+	_, _ = client.GetResource(context.Background(), connect.NewRequest(&testpb.GetResourceRequest{Id: "1"}))
+	events := rec.all()
+	if len(events) != 1 || events[0].Duration != 5*time.Millisecond {
+		t.Errorf("events = %+v, want one with Duration 5ms", events)
+	}
+}
