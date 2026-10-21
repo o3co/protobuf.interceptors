@@ -17,6 +17,7 @@ package connectrpc_test
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	policyconnect "github.com/o3co/protobuf.interceptors/connectrpc"
@@ -47,4 +48,25 @@ func Example() {
 	))
 
 	log.Fatal(http.ListenAndServe(":8080", mux))
+}
+
+// A stream is re-checked before each message it sends and after each message
+// it receives. To bound what that costs on a stream that carries many
+// messages, re-check it at most once per interval; a revoked grant then still
+// lets messages through for up to the interval. A unary RPC is checked once,
+// and the option does not apply to it.
+func ExampleWithStreamRecheckInterval() {
+	verifier, err := endpoint.NewO3coEndpoint("https://verifier.internal:3000")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle(testpbconnect.NewTestServiceHandler(&exampleHandler{},
+		connect.WithInterceptors(
+			policyconnect.PolicyOptionInterceptor(),
+			policyconnect.VerificationInterceptor(verifier, policyconnect.WithStreamRecheckInterval(10*time.Second)),
+		),
+	))
+	_ = mux
 }

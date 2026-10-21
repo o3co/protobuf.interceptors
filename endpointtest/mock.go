@@ -14,6 +14,14 @@
 
 // Package endpointtest provides test utilities for services using
 // protobuf.interceptors. Import this package only from test files.
+//
+// Its endpoints never look for a bearer token: Allow allows, and Func and
+// Decide answer whatever fn returns, whether or not the request carried one.
+// Every endpoint in package endpoint refuses a request without a token as
+// *interceptors.UnauthenticatedError before asking its backend, so a test
+// that passes against these can still fail in production for a client that
+// sends none. To test that path, refuse from fn when
+// interceptors.BearerTokenFromContext reports no token.
 package endpointtest
 
 import (
@@ -31,7 +39,8 @@ func (m *mockVerifier) Verify(ctx context.Context, resource, action string) erro
 	return m.fn(ctx, resource, action)
 }
 
-// Allow returns a VerifierEndpoint that always grants authorization.
+// Allow returns a VerifierEndpoint that always grants authorization, a
+// request without a bearer token included.
 func Allow() endpoint.VerifierEndpoint {
 	return &mockVerifier{fn: func(_ context.Context, _, _ string) error { return nil }}
 }
@@ -43,7 +52,9 @@ func Deny() endpoint.VerifierEndpoint {
 	}}
 }
 
-// Func returns a VerifierEndpoint that calls fn on each Verify call.
+// Func returns a VerifierEndpoint that calls fn on each Verify call. It
+// requires no bearer token: fn decides, and reads the token, if it needs one,
+// with interceptors.BearerTokenFromContext.
 func Func(fn func(ctx context.Context, resource, action string) error) endpoint.VerifierEndpoint {
 	return &mockVerifier{fn: fn}
 }
