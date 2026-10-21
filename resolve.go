@@ -16,6 +16,7 @@ package interceptors
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -37,6 +38,11 @@ import (
 //
 // Every "<name>" in the resource template must have a field mapping, or
 // resolution fails. A bytes field resolves to its lowercase hex encoding.
+//
+// A request_field is a field name, or field names joined by '.' that walk
+// singular message fields to a scalar leaf ("post.author.id"). A message on
+// the way that the request did not set is refused as a *ResourceValueError,
+// never read as its default: the caller decides whether it is set.
 func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, action string, fields map[string]string, err error) {
 	if policy.Resource == "" {
 		return "", "", nil, fmt.Errorf("policy resource must not be empty")
@@ -58,6 +64,16 @@ func ResolveResourceWithFields(policy *pb.Policy, msg proto.Message) (resource, 
 		}
 
 		value, extractErr := extractField(msg, field.RequestField)
+		var unset *unsetMessageError
+		if errors.As(extractErr, &unset) {
+			return "", "", nil, &ResourceValueError{
+				Placeholder: field.Placeholder,
+				Reason: fmt.Sprintf(
+					"request field %s is not set, so %s has no value; an unset message never resolves to a default",
+					unset.path, field.RequestField,
+				),
+			}
+		}
 		if extractErr != nil {
 			return "", "", nil, fmt.Errorf("failed to extract field %s: %v", field.RequestField, extractErr)
 		}
@@ -196,20 +212,79 @@ func ResolveResource(policy *pb.Policy, msg proto.Message) (resource, action str
 	return
 }
 
-func extractField(msg proto.Message, fieldName string) (string, error) {
+// unsetMessageError reports a message field on a request_field path that the
+// request did not set.
+type unsetMessageError struct {
+	// path is the request_field prefix that names the unset message.
+	path string
+}
+
+func (e *unsetMessageError) Error() string { return "field " + e.path + " is not set" }
+
+// extractField reads the scalar at path in msg. Each segment but the last
+// names a singular message field to step into; the last names the scalar.
+// Proto field names cannot contain '.', so a path names one field at most.
+//
+// The whole path is checked against msg's type before any value is read, so
+// a path the type cannot have is an error even when the request left a
+// message on it unset.
+func extractField(msg proto.Message, path string) (string, error) {
 	m := msg.ProtoReflect()
-	fd := m.Descriptor().Fields().ByName(protoreflect.Name(fieldName))
-
-	if fd == nil {
-		return "", fmt.Errorf("field %s not found in request", fieldName)
+	fields, err := fieldPath(m.Descriptor(), path)
+	if err != nil {
+		return "", err
 	}
-
-	if fd.IsList() || fd.IsMap() {
-		return "", fmt.Errorf("field %s is list/map, unsupported", fieldName)
+	last := len(fields) - 1
+	for i, fd := range fields[:last] {
+		if !m.Has(fd) {
+			return "", &unsetMessageError{path: joinNames(fields[:i+1])}
+		}
+		m = m.Get(fd).Message()
 	}
+	return scalarString(fields[last], m.Get(fields[last]))
+}
 
-	val := m.Get(fd)
+// fieldPath resolves path against md to the fields it walks: singular
+// message fields, then a singular field of a kind scalarString renders.
+func fieldPath(md protoreflect.MessageDescriptor, path string) ([]protoreflect.FieldDescriptor, error) {
+	segments := strings.Split(path, ".")
+	fields := make([]protoreflect.FieldDescriptor, 0, len(segments))
+	for i, segment := range segments {
+		fd := md.Fields().ByName(protoreflect.Name(segment))
+		if fd == nil {
+			return nil, fmt.Errorf("%s has no field %q", md.FullName(), segment)
+		}
+		if fd.IsList() || fd.IsMap() {
+			return nil, fmt.Errorf("field %s of %s is list/map, unsupported", segment, md.FullName())
+		}
+		fields = append(fields, fd)
+		if i == len(segments)-1 {
+			// Rendering the default value checks the kind, with no request
+			// read.
+			if _, err := scalarString(fd, fd.Default()); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if fd.Message() == nil {
+			return nil, fmt.Errorf("field %s of %s is not a message and has no fields", segment, md.FullName())
+		}
+		md = fd.Message()
+	}
+	return fields, nil
+}
 
+// joinNames returns the request_field path that names fields.
+func joinNames(fields []protoreflect.FieldDescriptor) string {
+	names := make([]string, len(fields))
+	for i, fd := range fields {
+		names[i] = string(fd.Name())
+	}
+	return strings.Join(names, ".")
+}
+
+// scalarString renders val, the value of fd, as the text substituted for it.
+func scalarString(fd protoreflect.FieldDescriptor, val protoreflect.Value) (string, error) {
 	switch fd.Kind() {
 	case protoreflect.StringKind:
 		return val.String(), nil
@@ -226,6 +301,6 @@ func extractField(msg proto.Message, fieldName string) (string, error) {
 	case protoreflect.BoolKind:
 		return fmt.Sprintf("%v", val.Bool()), nil
 	default:
-		return "", fmt.Errorf("unsupported proto field kind %s for %s", fd.Kind(), fieldName)
+		return "", fmt.Errorf("unsupported proto field kind %s for %s", fd.Kind(), fd.Name())
 	}
 }

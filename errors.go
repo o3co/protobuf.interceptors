@@ -72,7 +72,8 @@ func (e *UnconfirmedRevisionError) Error() string {
 }
 
 // ResourceValueError reports a request field value that must not be
-// substituted into a resource template.
+// substituted into a resource template, or a request_field path through a
+// message the request did not set, which has no value at all.
 //
 // Resolution refuses a value that is empty or carries a character outside the
 // verifier's segment token — notably '.' or ':', which can make the string name
@@ -83,9 +84,11 @@ type ResourceValueError struct {
 	// Placeholder is the placeholder whose value was refused, without the
 	// surrounding angle brackets.
 	Placeholder string
-	// Value is the refused value. It is attacker-controlled request data and
-	// is deliberately absent from Error(), so printing the error does not
-	// repeat it; it is here for in-process logging that has decided to log it.
+	// Value is the refused value, empty when the request did not set a
+	// message on the request_field path. It is attacker-controlled request
+	// data and is deliberately absent from Error(), so printing the error does
+	// not repeat it; it is here for in-process logging that has decided to log
+	// it.
 	Value string
 	// Reason states what disqualified the value.
 	Reason string
