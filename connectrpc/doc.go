@@ -21,8 +21,9 @@
 // VerificationInterceptor reads the bearer token and request ID from the
 // request headers and asks the endpoint. Pass both to a handler, the policy
 // interceptor first. A handler built without a schema is refused, and a
-// stream is re-checked on every message it receives. Passed to a client,
-// both interceptors let every call through untouched.
+// stream is re-checked on every message it sends or receives (see
+// WithStreamRecheckInterval). Passed to a client, both interceptors let every
+// call through untouched.
 //
 // The caller is told only a code and a fixed message; the endpoint's error is
 // wrapped by the returned error and handed to the observer set with

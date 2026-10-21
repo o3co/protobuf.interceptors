@@ -30,8 +30,8 @@ backend and carries out its answer.
   would change which resource is named;
 - reading the bearer token and request ID from the request, refusing a
   malformed credential, and passing both to the backend;
-- asking the backend before the handler runs — and on each message a stream
-  receives — and refusing the RPC unless it allows;
+- asking the backend before the handler runs — and for each message a stream
+  sends or receives — and refusing the RPC unless it allows;
 - telling the caller the outcome as a status code with a fixed message, and
   handing the service the full error and the decision behind it;
 - the HTTP clients for the built-in backends: plaintext only to loopback or
@@ -651,8 +651,8 @@ the group granted.
 
 **For every check, denials included.** A denied RPC's handler never runs, so
 the verification interceptors also take an observer. It sees every check — on
-streams, the opening check and each re-check of a received message, on both
-frameworks — with the endpoint's error before it is mapped for the caller:
+streams, the opening check and each re-check that runs, on both frameworks —
+with the endpoint's error before it is mapped for the caller:
 
 ```go
 observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
@@ -662,6 +662,12 @@ observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
 policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(observe))
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
+
+A stream's re-check calls the observer on the send or receive that made it,
+which waits for the observer to return. Once a stream's client has gone away,
+the next send's re-check on a built-in endpoint fails with the RPC's context
+error — the observer sees `context.Canceled` or `context.DeadlineExceeded`, not
+a denial.
 
 On a denial the decision is also on `DeniedError.Decision`, with the verifier's
 deny `code` in `Decision.Code`.
@@ -743,23 +749,50 @@ logs one error naming the setting.
 ## Streaming
 
 A stream is authorized **before its handler is invoked**, on both frameworks —
-a bidirectional or client-streaming handler that sends before it receives, or a
-handler that never receives, is checked like any other.
+a handler that sends before it receives, or never receives, is checked like
+any other.
 
-The check is then repeated on each message the handler receives — `RecvMsg` on
-gRPC, `Receive` on ConnectRPC. The resource and action are fixed for the life
-of a stream, so that re-check is not a second opinion on the same question: it
-is what stops a stream that keeps receiving once its grant has been revoked, or
-its token expired, since the stream opened. It runs after the message arrives,
-so a message that arrives after revocation is cleared and never handed to the
-handler, which gets the mapped error instead, whatever codec decoded it. A
-receive that fails — the client closed its side, the stream broke — has no
-message and is not re-checked. Each received message costs one verifier call,
-so a stream can also end partway when the verifier fails.
+The check is then repeated for each message the stream carries, in either
+direction: before each message the handler sends (`SendMsg` on gRPC, `Send` on
+ConnectRPC) and after each message it receives (`RecvMsg`, `Receive`). The
+resource and action are fixed for the life of a stream, so a re-check is not a
+second opinion on the same question: it is what stops a stream once its grant
+has been revoked, or its token expired, since the stream opened — a server
+stream that only sends included.
 
-Sends are not re-checked, so a server-streaming RPC is checked before its
-handler runs and again when the handler reads its one request, and never after
-that.
+- **A send is checked before the message goes out**, so a refused message is
+  never sent.
+- **A receive is checked after the message arrives**, so a message that
+  arrives after revocation is cleared and never handed to the handler,
+  whatever codec decoded it. A receive that fails — the client closed its
+  side, the stream broke — has no message and is not re-checked.
+- **A failed re-check ends the stream.** The send or receive returns the
+  mapped error, every later send or receive returns the same error without
+  asking the verifier, and the interceptor ends the RPC with it whatever the
+  handler returns. The client gets the messages sent before the refusal, then
+  the status — `PermissionDenied: access denied` for a denial, `Internal` when
+  the verifier failed (see [Errors](#errors)) — on gRPC in the trailers, on
+  ConnectRPC at the end of the stream.
+
+Each re-check is one verifier call, and the send or receive waits for it. To
+bound that on a stream that carries many messages, give the verification
+interceptor `WithStreamRecheckInterval(d)`, on either framework:
+
+```go
+policygrpc.VerificationStreamInterceptor(verifier, policygrpc.WithStreamRecheckInterval(30*time.Second))
+policyconnect.VerificationInterceptor(verifier, policyconnect.WithStreamRecheckInterval(30*time.Second))
+```
+
+The stream is then re-checked at most once per `d`: a message sent or received
+less than `d` after the last check began passes without one, and the first
+message after that is checked. So once a grant is revoked, a message can still
+pass for up to `d`. The default, `0`, re-checks every message. A negative `d`
+panics.
+
+Nothing is checked while a stream carries no message. An idle stream stays
+open, but nothing passes on it without a check; a service that must also close
+idle streams bounds their lifetime itself, for example with a deadline in the
+handler.
 
 `field_mappings` are not supported for streaming RPCs — the policy interceptor
 runs before the handler reads any request message, and a client or

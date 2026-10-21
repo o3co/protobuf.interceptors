@@ -23,6 +23,7 @@ import (
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
+	"github.com/o3co/protobuf.interceptors/internal/streamcheck"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -36,36 +37,45 @@ type contextServerStream struct {
 
 func (s *contextServerStream) Context() context.Context { return s.ctx }
 
-// authServerStream wraps grpc.ServerStream and re-checks authorization on
-// each message RecvMsg returns, before handing it over.
+// authServerStream wraps grpc.ServerStream and re-checks authorization
+// before each message SendMsg sends and after each message RecvMsg returns.
 //
 // The stream is already authorized before the handler is invoked (see
 // VerificationStreamInterceptor). The resource and action are fixed, so
-// re-asking the verifier per message is what stops a stream that keeps
-// receiving once a grant is revoked or a token expires. The check follows the
-// receive, so a message that arrives after revocation is cleared and never
-// handed over; a receive that fails has no message and is not checked. Sends
-// are not re-checked, so a server-streaming RPC is checked before the handler
-// runs and again when its generated handler reads the one request, and never
-// after that.
+// re-asking the verifier per message is what stops a stream once a grant is
+// revoked or a token expires, whichever way its messages flow. A send is
+// checked before the message goes out, so a refused message is never sent. A
+// receive is checked after the message arrives, so a refused message is
+// cleared and never handed over; a receive that fails has no message and is
+// not checked. The gate decides which messages are checked and makes the
+// first failure final: every later send or receive returns it without asking
+// the verifier or using the transport.
 type authServerStream struct {
 	grpc.ServerStream
-	ctx      context.Context
-	resource string
-	action   string
-	verifier endpoint.VerifierEndpoint
-	cfg      *config
+	ctx   context.Context
+	gate  *streamcheck.Gate
+	check func() error
 }
 
 func (s *authServerStream) Context() context.Context { return s.ctx }
 
+func (s *authServerStream) SendMsg(m any) error {
+	if err := s.gate.Check(s.check); err != nil {
+		return err
+	}
+	return s.ServerStream.SendMsg(m)
+}
+
 func (s *authServerStream) RecvMsg(m any) error {
+	if err := s.gate.Err(); err != nil {
+		return err
+	}
 	if err := s.ServerStream.RecvMsg(m); err != nil {
 		return err
 	}
-	if _, err := s.cfg.verify(s.ctx, s.verifier, s.resource, s.action, nil); err != nil {
+	if err := s.gate.Check(s.check); err != nil {
 		clearMessage(m)
-		return toGRPCError(s.ctx, err)
+		return err
 	}
 	return nil
 }
@@ -131,11 +141,14 @@ func PolicyOptionStreamInterceptor() grpc.StreamServerInterceptor {
 
 // VerificationStreamInterceptor returns a gRPC StreamServerInterceptor that
 // reads Policy from the stream context and authorizes the stream before the
-// handler is invoked, then re-checks each message RecvMsg returns.
+// handler is invoked, then re-checks it before each message SendMsg sends and
+// after each message RecvMsg returns — at most once per interval when
+// WithStreamRecheckInterval is given. A failed re-check ends the stream: the
+// interceptor returns it, whatever the handler returns.
 //
 // As with VerificationInterceptor, the decision that opened the stream is on
 // the handler's context, and WithDecisionObserver receives the opening check
-// and every re-check.
+// and every re-check that runs.
 //
 // Panics if verifier is nil.
 func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option) grpc.StreamServerInterceptor {
@@ -159,24 +172,43 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			return handler(srv, wrapped)
 		}
 
+		// Copied once: the policy on the context is shared with the handler and
+		// inner interceptors, and every check of the stream must ask about the
+		// target it opened for.
+		resource, action := policyData.Resource, policyData.Action
+
 		// Authorize before the handler runs, as the ConnectRPC streaming
-		// interceptor does: a bidirectional or client-streaming handler may send
-		// before it receives, and a handler that never calls RecvMsg would never
-		// be checked, so a check only inside RecvMsg would leave either
-		// unauthorized.
-		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
+		// interceptor does: a handler may act before it sends or receives any
+		// message, or never do either, so checks made only per message would
+		// leave it unauthorized. The opening check is the gate's first, so an
+		// interval runs from it.
+		gate := streamcheck.New(cfg.recheckInterval, cfg.now)
+		var decision *interceptors.Decision
+		err := gate.Check(func() error {
+			var err error
+			decision, err = cfg.verify(ctx, verifier, resource, action, credErr)
+			return err
+		})
 		if err != nil {
 			return toGRPCError(ctx, err)
 		}
 
+		hctx := withDecision(ctx, decision)
 		wrapped := &authServerStream{
 			ServerStream: ss,
-			ctx:          withDecision(ctx, decision),
-			resource:     policyData.Resource,
-			action:       policyData.Action,
-			verifier:     verifier,
-			cfg:          cfg,
+			ctx:          hctx,
+			gate:         gate,
+			check: func() error {
+				if _, err := cfg.verify(hctx, verifier, resource, action, nil); err != nil {
+					return toGRPCError(hctx, err)
+				}
+				return nil
+			},
 		}
-		return handler(srv, wrapped)
+		err = handler(srv, wrapped)
+		if denied := gate.Err(); denied != nil {
+			return denied
+		}
+		return err
 	}
 }
