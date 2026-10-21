@@ -169,7 +169,7 @@ gRPC unary の経路は、ConnectRPC のように値を転送しない。スト�
 
 ## インストール
 
-Go 1.26 以降が必要である: すべてのモジュールの `go` ディレクティブは `1.26.0` で、`golang.org/x/net` v0.60.0 がそれを要求する。
+Go 1.26 以降が必要である: すべてのモジュールの `go` ディレクティブは `1.26.0` で、依存する `golang.org/x` のモジュールがそれを要求する。
 
 ```bash
 # gRPC users
@@ -426,7 +426,7 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
-ストリームの再検査は、それを行った送信または受信の中でオブザーバーを呼び、その送信または受信はオブザーバーが戻るのを待つ。ストリームのクライアントが去った後は、HTTP エンドポイント（o3co、OPA、Cedar）では次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。static エンドポイントはコンテキストを読まない: その再検査はそれまでと同じ答えを返し、オブザーバーはその答えを見て、送信はその後トランスポートで失敗する。
+ストリームの再検査は、それを行った送信または受信の中でオブザーバーを呼び、その送信または受信はオブザーバーが戻るのを待つ。ストリームのクライアントが去った後は、HTTP エンドポイント（o3co、OPA、Cedar）では次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。Cedar でこれが成り立つのは principal リゾルバーが答えた後である: コンテキストを使って I/O をするリゾルバーは先に失敗し、そのエラーは `UnauthenticatedError` になる。static エンドポイントはコンテキストのキャンセルを見ない: その再検査はそれまでと同じ答えを返し、オブザーバーはその答えを見て、送信はその後トランスポートで失敗する。
 
 拒否のときは、判定は `DeniedError.Decision` にもあり、verifier の deny `code` は `Decision.Code` に入る。
 
@@ -462,7 +462,7 @@ allow にはステータスとボディの両方が必要である: `decision: "
 
 - **送信はメッセージが出ていく前に検査する**ので、拒否されたメッセージは送信されない。
 - **受信はメッセージが届いた後に検査する**ので、取り消し後に届いたメッセージは消去されてハンドラーには渡らない。どのコーデックがデコードしたかは問わない。失敗した受信 — クライアントが自分の側を閉じた、ストリームが壊れた — にはメッセージが無く、再検査しない。
-- **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、verifier の失敗なら `Internal`（[エラー](#エラー)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
+- **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、バックエンドが拒否したトークンなら `Unauthenticated`、verifier の失敗なら `Internal`（[エラー](#エラー)と[ストリームの途中で付与が終わるとき](#ストリームの途中で付与が終わるとき)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
 
 再検査 1 回につき verifier の呼び出しが 1 回かかり、送信や受信はそれを待つ。多くのメッセージを運ぶストリームでこれを抑えるには、どちらのフレームワークでも検証インターセプターに `WithStreamRecheckInterval(d)` を与える:
 
@@ -487,9 +487,9 @@ verifier calls per stream = 1 + messages received + messages sent
 
 N 個のレスポンスを返すサーバーストリームは N + 2 回 — 開始時の検査、1 つのリクエストメッセージ、各レスポンス — かかる。v0.5 では 2 回だった。1 つのストリームの検査は直列化され、それぞれが verifier を、エンドポイントのタイムアウト（デフォルト 10s）まで待つので、ストリームが運べるのは、両方向を合わせて verifier の往復 1 回あたりおよそ 1 メッセージまでである: 往復 5 ms なら毎秒およそ 200 メッセージになる。
 
-**目安:** 毎秒数メッセージを超えて運ぶストリームには `WithStreamRecheckInterval` を与える。間隔 `d` では、時間 `T` 続くストリームの呼び出しは、何を運んでもおよそ `1 + T/d` 回以下になり、取り消された付与でも最長 `d` の間はメッセージが通る。`d` は許容できる取り消しの遅れとして選ぶ: 書き込みを運ぶストリームなら数秒、読み取り専用のフィードなら 1 分以上。
+**目安:** 毎秒数メッセージを超えて運ぶストリームがあるところには `WithStreamRecheckInterval` を設定する。間隔は、その検証インターセプターが扱うすべてのストリームに適用される: ConnectRPC ではインターセプターをハンドラーごとに与えるので、サービスごとに間隔を持てる。gRPC ではサーバーのストリームインターセプターチェーンがすべてのストリーミングメソッドを扱うので、`info.FullMethod` で間隔の異なるインターセプターに振り分けない限り、1 つの間隔がすべてに適用される。間隔 `d` では、時間 `T` 続くストリームの呼び出しは、何を運んでもおよそ `1 + T/d` 回以下になり、取り消された付与でも最長 `d` の間はメッセージが通る。`d` は許容できる取り消しの遅れとして選ぶ: 書き込みを運ぶストリームなら数秒、読み取り専用のフィードなら 1 分以上。
 
-**クライアントストリームと双方向ストリームでは、コストはクライアントが決める。** クライアントが送る各メッセージが verifier の呼び出し 1 回になるので、小さなメッセージを大量に送るクライアントは、サーバーにその数だけ verifier へ問い合わせさせる。そうしたメソッドには 0 でない間隔を設定するか、1 つのクライアントにできることをサーバーで制限する — 接続あたりのストリーム数（gRPC では `grpc.MaxConcurrentStreams`、ConnectRPC では `http.HTTP2Config.MaxConcurrentStreams`）と、ハンドラーの前に置くメッセージレートの制限である。
+**クライアントストリームと双方向ストリームでは、コストはクライアントが決める。** クライアントが送る各メッセージが verifier の呼び出し 1 回になるので、小さなメッセージを大量に送るクライアントは、サーバーにその数だけ verifier へ問い合わせさせる。そうしたメソッドには 0 でない間隔を設定するか、1 つのクライアントにできることをサーバーで制限する — 接続あたりのストリーム数（gRPC では `grpc.MaxConcurrentStreams`、ConnectRPC では `http.HTTP2Config.MaxConcurrentStreams`）と、チェーンの中で検証インターセプターより前に置くメッセージレートの制限 — メッセージが検査される前に拒否するためである。
 
 ### ストリームの途中で付与が終わるとき
 
@@ -502,7 +502,7 @@ N 個のレスポンスを返すサーバーストリームは N + 2 回 — 開
 | Cedar | principal リゾルバーがトークンを拒否したとき `Unauthenticated`。リゾルバーは検査のたびに呼ばれる | `PermissionDenied` |
 | static | 起きない: トークンがあることしか検査しない | 起きない: 規則は固定である |
 
-再検査に答えられないバックエンド — 到達できない、遅すぎる、失敗する — は、他の検査と同じく `Internal` でストリームを終わらせる（[エラー](#エラー)を参照）。
+再検査に答えられないバックエンド — 到達できない、エンドポイント自身のタイムアウトより遅い、失敗する — は、他の検査と同じく `Internal` でストリームを終わらせる（[エラー](#エラー)を参照）。
 
 ストリームの途中で `Unauthenticated` か `PermissionDenied` を受け取ったクライアントは、トークンを更新するか付与を戻してもらい、新しいストリームを開かなければならない。それまでのストリームは終わっている。
 
@@ -524,7 +524,20 @@ SCHEMA="$(go list -m -f '{{.Dir}}' github.com/o3co/protobuf.interceptors)/schema
 protoc -I proto -I "$SCHEMA" --go_out=. --go_opt=paths=source_relative proto/your/service.proto
 ```
 
-モジュールキャッシュは読み取り専用なので、buf で使うには、ファイルをリポジトリ内の専用ディレクトリの直下（`third_party/o3co/policy.proto`）にコピーし、そのディレクトリを `buf.yaml`（v2）のモジュールとして列挙する。生成は自分のモジュールからだけ行う — `buf generate proto`、または `buf.gen.yaml` の `inputs` — ので、import は解決されるが生成はされない。このファイルは Buf Schema Registry には公開していない。
+モジュールキャッシュは読み取り専用なので、buf で使うには、ファイルをリポジトリ内の専用ディレクトリの直下（`third_party/o3co/policy.proto`）にコピーし、そのディレクトリを `buf.yaml`（v2）のモジュールとして列挙する。生成は自分のモジュールからだけ行う — `buf generate proto`、または `buf.gen.yaml` の `inputs` — ので、import は解決されるが生成はされない。managed モードで `go_package_prefix` を上書きするときは、このファイルを除外すること。そうしないと buf がその `go_package` を書き換え、生成コードが存在しないパッケージを import する:
+
+```yaml
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: example.com/yours/gen
+  disable:
+    - file_option: go_package
+      path: policy.proto
+```
+
+このファイルは Buf Schema Registry には公開していない。
 
 **`policy.proto` の Go コードを生成しないこと。** その Go コードは `schema` パッケージであり、`go_package` オプションがあなたの生成コードをそこへ向ける。自分のパッケージにもう一度生成すると、`policy.proto` と拡張 `o3co.authz.v1.policy` が二重に登録され、protobuf のランタイムが init で登録の衝突として panic する。インクルードパスの直下に置き、`"policy.proto"` として import すること — `schema` パッケージがそれを登録しているパスである。
 

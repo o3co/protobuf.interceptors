@@ -273,7 +273,7 @@ only if you import them.
 ## Installation
 
 Requires Go 1.26 or newer: every module's `go` directive is `1.26.0`, which
-`golang.org/x/net` v0.60.0 requires.
+its `golang.org/x` dependencies require.
 
 ```bash
 # gRPC users
@@ -675,9 +675,11 @@ A stream's re-check calls the observer on the send or receive that made it,
 which waits for the observer to return. Once a stream's client has gone away,
 the next send's re-check on an HTTP endpoint (o3co, OPA, Cedar) fails with the
 RPC's context error — the observer sees `context.Canceled` or
-`context.DeadlineExceeded`, not a denial. The static endpoint does not read the
-context: its re-check answers as before, the observer sees that answer, and
-the send then fails on the transport.
+`context.DeadlineExceeded`, not a denial. On Cedar that holds once the
+principal resolver has answered: a resolver that does I/O with the context
+fails first, and its error is an `UnauthenticatedError`. The static endpoint
+does not watch the context's cancellation: its re-check answers as before, the
+observer sees that answer, and the send then fails on the transport.
 
 On a denial the decision is also on `DeniedError.Decision`, with the verifier's
 deny `code` in `Decision.Code`.
@@ -780,9 +782,10 @@ stream that only sends included.
   mapped error, every later send or receive returns the same error without
   asking the verifier, and the interceptor ends the RPC with it whatever the
   handler returns. The client gets the messages sent before the refusal, then
-  the status — `PermissionDenied: access denied` for a denial, `Internal` when
-  the verifier failed (see [Errors](#errors)) — on gRPC in the trailers, on
-  ConnectRPC at the end of the stream.
+  the status — `PermissionDenied: access denied` for a denial, `Unauthenticated`
+  for a token the backend refused, `Internal` when the verifier failed (see
+  [Errors](#errors) and [When a grant ends mid-stream](#when-a-grant-ends-mid-stream))
+  — on gRPC in the trailers, on ConnectRPC at the end of the stream.
 
 Each re-check is one verifier call, and the send or receive waits for it. To
 bound that on a stream that carries many messages, give the verification
@@ -829,8 +832,13 @@ endpoint's timeout (10s by default), so a stream carries at most about one
 message per verifier round trip, in both directions together: with a 5 ms
 round trip, about 200 messages a second.
 
-**Sizing rule:** give `WithStreamRecheckInterval` to any stream that carries
-more than a few messages a second. With an interval `d`, a stream that lasts
+**Sizing rule:** set `WithStreamRecheckInterval` wherever a stream carries
+more than a few messages a second. The interval applies to every stream the
+verification interceptor serves: on ConnectRPC the interceptors are given per
+handler, so a service can have its own; on gRPC the server's stream
+interceptor chain serves every streaming method, so one interval applies to
+all of them unless you dispatch on `info.FullMethod` to interceptors built
+with different intervals. With an interval `d`, a stream that lasts
 `T` costs at most about `1 + T/d` calls, whatever it carries, and a revoked
 grant still lets messages through for up to `d`. Choose `d` as the revocation
 delay you can accept: seconds for a stream that carries writes, a minute or
@@ -842,7 +850,8 @@ messages makes the server ask the verifier once for each. For such methods,
 set a non-zero interval, or bound what one client can do at the server — the
 streams per connection (`grpc.MaxConcurrentStreams` on gRPC,
 `http.HTTP2Config.MaxConcurrentStreams` on ConnectRPC) and a message-rate
-limit in front of the handler.
+limit placed ahead of the verification interceptor in the chain, so that it
+refuses a message before the message is checked.
 
 ### When a grant ends mid-stream
 
@@ -855,11 +864,11 @@ sent before the refusal:
 |---|---|---|
 | o3co (auth.policy-verifier) | `Unauthenticated` (the verifier answers `401`) | `PermissionDenied` (`403`) |
 | OPA | what the policy decides: a deny is `PermissionDenied` | `PermissionDenied` |
-| Cedar | `Unauthenticated` when the principal resolver refuses the token, which it is asked to on every check | `PermissionDenied` |
+| Cedar | `Unauthenticated` when the principal resolver refuses the token; the resolver is called on every check | `PermissionDenied` |
 | static | never: it checks only that a token is present | never: its rules are fixed |
 
-A backend that cannot answer a re-check — unreachable, too slow, or failing —
-ends the stream with `Internal` (see [Errors](#errors)), like any other check.
+A backend that cannot answer a re-check — unreachable, slower than the
+endpoint's own timeout, or failing — ends the stream with `Internal` (see [Errors](#errors)), like any other check.
 
 A client that receives `Unauthenticated` or `PermissionDenied` mid-stream must
 refresh its token, or have the grant restored, and open a new stream; the
@@ -900,8 +909,22 @@ The module cache is read-only, so to use it with buf, copy the file into your
 repository, at the root of a directory of its own (`third_party/o3co/policy.proto`),
 and list that directory as a module in `buf.yaml` (v2). Generate only from your
 own module — `buf generate proto`, or `inputs` in `buf.gen.yaml` — so the
-import is resolved and not generated. The file is not published to the Buf
-Schema Registry.
+import is resolved and not generated. With managed mode and a
+`go_package_prefix` override, also exempt the file, or buf rewrites its
+`go_package` and your generated code imports a package that does not exist:
+
+```yaml
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: example.com/yours/gen
+  disable:
+    - file_option: go_package
+      path: policy.proto
+```
+
+The file is not published to the Buf Schema Registry.
 
 **Do not generate Go code for `policy.proto`.** Its Go code is the `schema`
 package, and its `go_package` option points your generated code there.

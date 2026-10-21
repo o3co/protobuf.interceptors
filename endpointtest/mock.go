@@ -39,8 +39,8 @@ func (m *mockVerifier) Verify(ctx context.Context, resource, action string) erro
 	return m.fn(ctx, resource, action)
 }
 
-// Allow returns a VerifierEndpoint that always grants authorization, a
-// request without a bearer token included.
+// Allow returns a VerifierEndpoint that always grants authorization, even to
+// a request without a bearer token.
 func Allow() endpoint.VerifierEndpoint {
 	return &mockVerifier{fn: func(_ context.Context, _, _ string) error { return nil }}
 }
