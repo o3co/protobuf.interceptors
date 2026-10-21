@@ -478,8 +478,8 @@ verifier, err := endpoint.NewO3coEndpoint(
   panic: `WithO3coAllowPlainInternal(os.Getenv("PDP_ADDR"))` with the variable
   unset passes `""`, which `NewO3coEndpoint` refuses. A call with no entry lists
   nothing. An entry that holds a user, a path, a query or a fragment — a URL
-  given in place of a host and port — is named without them, since they can
-  carry a credential.
+  given in place of a host and port — is named without them, or not at all
+  when where they end is ambiguous, since they can carry a credential.
 - **A listed pair is always checked.** It is checked under `With…AllowInsecure()`
   too, and the constructor returns an error for one given `With…Transport(rt)`,
   since the check runs in the endpoint's own transport.

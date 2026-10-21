@@ -213,6 +213,7 @@ func TestPlainInternal_EntryWithCredentials_IsNotEchoed(t *testing.T) {
 			"http://user:s3cret@pdp:8181", "user:s3cret@pdp:8181", "s3cret@pdp:8181",
 			"http://user:s3cret@pdp:8181/path", "http://pdp:8181/s3cret",
 			"pdp:8181?token=s3cret", "pdp:8181#s3cret", "user:pa/s3cret@pdp:8181",
+			"http://pdp:8181?token=user@s3cret", "pdp:8181?token=s3cret://value",
 		} {
 			t.Run(k.name+"/"+entry, func(t *testing.T) {
 				_, err := k.build("https://verifier.internal:3000", plainInternalSetup{pairs: []string{entry}})
@@ -534,10 +535,16 @@ func TestPlainInternal_AnAddressThatDoesNotAnswer_LeavesTimeForTheNext(t *testin
 func TestRedactedEntry(t *testing.T) {
 	for entry, want := range map[string]string{
 		"http://user:s3cret@pdp:8181/path": "http://…@pdp:8181…",
-		"user:pa/s3cret@pdp:8181":          "…@pdp:8181",
+		"user:pa/s3cret@pdp:8181":          "…",
 		"http://pdp:8181/s3cret":           "http://pdp:8181…",
 		"pdp:8181?token=s3cret":            "pdp:8181…",
 		"pdp:8181":                         "pdp:8181",
+		// An '@' or "://" outside where a URL puts them makes the entry
+		// ambiguous, and nothing of it is named.
+		"http://pdp:8181?token=user@s3cret": "…",
+		"pdp:8181?token=s3cret://value":     "pdp:8181…",
+		"user:pa/s3cret@pdp:8181/x":         "…",
+		"1http://user:s3cret@pdp:8181":      "…",
 	} {
 		if got := redactedEntry(entry); got != want {
 			t.Errorf("redactedEntry(%q) = %q, want %q", entry, got, want)

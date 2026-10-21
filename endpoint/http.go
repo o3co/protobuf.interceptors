@@ -163,21 +163,46 @@ func plainInternalPair(entry string) (string, error) {
 }
 
 // redactedEntry returns entry with what can carry a credential replaced by
-// "…": a user and password before the last '@', and everything from the
-// first '/', '?' or '#' after the host. A scheme is kept.
+// "…": a user and password before an '@' in the authority, and the path,
+// query and fragment after it. A scheme is kept only at the start, where a
+// URL puts it. An '@' after the authority makes the entry ambiguous — a
+// password can hold the '/' that seems to end the authority — and the entry
+// is replaced whole.
 func redactedEntry(entry string) string {
-	var prefix string
+	var scheme string
 	rest := entry
-	if i := strings.Index(rest, "://"); i >= 0 {
-		prefix, rest = rest[:i+3], rest[i+3:]
+	if i := strings.Index(rest, "://"); i > 0 && validScheme(rest[:i]) {
+		scheme, rest = rest[:i+3], rest[i+3:]
 	}
-	if i := strings.LastIndexByte(rest, '@'); i >= 0 {
-		prefix, rest = prefix+"…@", rest[i+1:]
-	}
+	authority, after := rest, ""
 	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		rest = rest[:i] + "…"
+		authority, after = rest[:i], rest[i:]
 	}
-	return prefix + rest
+	if strings.Contains(after, "@") {
+		return "…"
+	}
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = "…@" + authority[i+1:]
+	}
+	if after != "" {
+		authority += "…"
+	}
+	return scheme + authority
+}
+
+// validScheme reports whether s is a URL scheme: a letter, then letters,
+// digits, '+', '-' and '.' (RFC 3986 §3.1).
+func validScheme(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
