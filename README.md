@@ -221,7 +221,8 @@ On the way to the leaf:
   Whether it is set is the caller's choice, so it never resolves to a default.
 - **A `repeated` or `map` field, a scalar, or a name the message does not
   have** fails resolution with `Internal`: the policy names a path the request
-  type cannot have.
+  type cannot have. The whole path is checked against the type first, so this
+  holds whether or not the request set the messages on it.
 - **A streaming method** still refuses `field_mappings` outright (see
   [Streaming](#streaming)), paths included.
 

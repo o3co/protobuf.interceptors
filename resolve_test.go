@@ -534,6 +534,7 @@ func TestResolveResource_RepeatedPlaceholderIsSubstitutedEverywhere(t *testing.T
 //	  repeated Post posts = 2;
 //	  string id = 3;
 //	  map<string, Post> by_key = 4;
+//	  oneof target { Post featured = 5; Author guest = 6; }
 //	}
 //	message Post { string name = 1; Author author = 2; bytes digest = 3; int64 rank = 4; }
 //	message Author { string id = 1; }
@@ -554,6 +555,10 @@ func nestedMessages(t *testing.T) (request, post, author protoreflect.MessageDes
 		}
 		return f
 	}
+	inOneof := func(f *descriptorpb.FieldDescriptorProto) *descriptorpb.FieldDescriptorProto {
+		f.OneofIndex = proto.Int32(0)
+		return f
+	}
 	msgType := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
 	fd, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
 		Name:    proto.String("nested_request_test.proto"),
@@ -567,7 +572,10 @@ func nestedMessages(t *testing.T) (request, post, author protoreflect.MessageDes
 					field("posts", 2, repeated, msgType, ".nestedtest.Post"),
 					field("id", 3, optional, descriptorpb.FieldDescriptorProto_TYPE_STRING, ""),
 					field("by_key", 4, repeated, msgType, ".nestedtest.Request.ByKeyEntry"),
+					inOneof(field("featured", 5, optional, msgType, ".nestedtest.Post")),
+					inOneof(field("guest", 6, optional, msgType, ".nestedtest.Author")),
 				},
+				OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("target")}},
 				NestedType: []*descriptorpb.DescriptorProto{{
 					Name: proto.String("ByKeyEntry"),
 					Field: []*descriptorpb.FieldDescriptorProto{
@@ -747,5 +755,45 @@ func TestResolveResourceWithFields_NestedPath_ForwardedOnly(t *testing.T) {
 	var valueErr *interceptors.ResourceValueError
 	if !errors.As(err, &valueErr) {
 		t.Errorf("err = %v, want *ResourceValueError", err)
+	}
+}
+
+// A oneof member is unset when another member is set, and is refused as any
+// unset message is.
+func TestResolveResource_NestedPath_OtherOneofMemberSet_IsADenial(t *testing.T) {
+	reqDesc, _, authorDesc := nestedMessages(t)
+	req := dynamicpb.NewMessage(reqDesc)
+	guest := dynamicpb.NewMessage(authorDesc)
+	guest.Set(authorDesc.Fields().ByName("id"), protoreflect.ValueOfString("alice"))
+	req.Set(reqDesc.Fields().ByName("guest"), protoreflect.ValueOfMessage(guest))
+
+	_, _, err := interceptors.ResolveResource(nestedPolicy("posts/<v>", "featured.name"), req)
+	var valueErr *interceptors.ResourceValueError
+	if !errors.As(err, &valueErr) {
+		t.Errorf("err = %v (%T), want *ResourceValueError", err, err)
+	}
+}
+
+// A path the request type cannot have is the policy's mistake whether or not
+// the request set the messages on it: it is never reported as a denial.
+func TestResolveResource_NestedPath_UnwalkableBehindUnsetParent_IsNotADenial(t *testing.T) {
+	for _, path := range []string{
+		"post.title",
+		"post.",
+		"post.name.value",
+		"post.author",
+		"post.author.id.x",
+		"post.author.name",
+	} {
+		t.Run(path, func(t *testing.T) {
+			_, _, err := interceptors.ResolveResource(nestedPolicy("posts/<v>", path), nestedRequest(t, "", ""))
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			var denied *interceptors.DeniedError
+			if errors.As(err, &denied) {
+				t.Errorf("err = %v is a denial, want an error that maps to Internal", err)
+			}
+		})
 	}
 }

@@ -224,29 +224,63 @@ func (e *unsetMessageError) Error() string { return "field " + e.path + " is not
 // extractField reads the scalar at path in msg. Each segment but the last
 // names a singular message field to step into; the last names the scalar.
 // Proto field names cannot contain '.', so a path names one field at most.
+//
+// The whole path is checked against msg's type before any value is read, so
+// a path the type cannot have is an error even when the request left a
+// message on it unset.
 func extractField(msg proto.Message, path string) (string, error) {
 	m := msg.ProtoReflect()
-	segments := strings.Split(path, ".")
-	for i := 0; ; i++ {
-		walked := strings.Join(segments[:i+1], ".")
-		fd := m.Descriptor().Fields().ByName(protoreflect.Name(segments[i]))
-		if fd == nil {
-			return "", fmt.Errorf("field %s not found in request", walked)
-		}
-		if fd.IsList() || fd.IsMap() {
-			return "", fmt.Errorf("field %s is list/map, unsupported", walked)
-		}
-		if i == len(segments)-1 {
-			return scalarString(fd, m.Get(fd))
-		}
-		if fd.Message() == nil {
-			return "", fmt.Errorf("field %s is not a message, so %s cannot be read through it", walked, path)
-		}
+	fields, err := fieldPath(m.Descriptor(), path)
+	if err != nil {
+		return "", err
+	}
+	last := len(fields) - 1
+	for i, fd := range fields[:last] {
 		if !m.Has(fd) {
-			return "", &unsetMessageError{path: walked}
+			return "", &unsetMessageError{path: joinNames(fields[:i+1])}
 		}
 		m = m.Get(fd).Message()
 	}
+	return scalarString(fields[last], m.Get(fields[last]))
+}
+
+// fieldPath resolves path against md to the fields it walks: singular
+// message fields, then a singular field of a kind scalarString renders.
+func fieldPath(md protoreflect.MessageDescriptor, path string) ([]protoreflect.FieldDescriptor, error) {
+	segments := strings.Split(path, ".")
+	fields := make([]protoreflect.FieldDescriptor, 0, len(segments))
+	for i, segment := range segments {
+		fd := md.Fields().ByName(protoreflect.Name(segment))
+		if fd == nil {
+			return nil, fmt.Errorf("%s has no field %q", md.FullName(), segment)
+		}
+		if fd.IsList() || fd.IsMap() {
+			return nil, fmt.Errorf("field %s of %s is list/map, unsupported", segment, md.FullName())
+		}
+		fields = append(fields, fd)
+		if i == len(segments)-1 {
+			// Rendering the default value checks the kind, with no request
+			// read.
+			if _, err := scalarString(fd, fd.Default()); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if fd.Message() == nil {
+			return nil, fmt.Errorf("field %s of %s is not a message and has no fields", segment, md.FullName())
+		}
+		md = fd.Message()
+	}
+	return fields, nil
+}
+
+// joinNames returns the request_field path that names fields.
+func joinNames(fields []protoreflect.FieldDescriptor) string {
+	names := make([]string, len(fields))
+	for i, fd := range fields {
+		names[i] = string(fd.Name())
+	}
+	return strings.Join(names, ".")
 }
 
 // scalarString renders val, the value of fd, as the text substituted for it.

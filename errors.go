@@ -76,9 +76,10 @@ type ResourceValueError struct {
 	// surrounding angle brackets.
 	Placeholder string
 	// Value is the refused value, empty when the request did not set a
-	// message on the request_field path. It is attacker-controlled request data and
-	// is deliberately absent from Error(), so printing the error does not
-	// repeat it; it is here for in-process logging that has decided to log it.
+	// message on the request_field path. It is attacker-controlled request
+	// data and is deliberately absent from Error(), so printing the error does
+	// not repeat it; it is here for in-process logging that has decided to log
+	// it.
 	Value string
 	// Reason states what disqualified the value.
 	Reason string
