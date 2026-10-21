@@ -244,6 +244,7 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 
 	var requestID string
 	if e.requestIDHeaderKey != "" {
@@ -260,22 +261,27 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 	}
 	defer resp.Body.Close()
 
-	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
-	if err != nil {
+	respBody, oversized, readErr := readBounded(resp.Body, e.maxResponseBodySize)
+	if readErr != nil {
 		if ctx.Err() != nil {
-			return requestError(ctx, "reading the OPA response failed", err)
+			return requestError(ctx, "reading the OPA response failed", readErr)
 		}
-		e.logger.Error("failed to read OPA response body", "error", err, "x-request-id", requestID)
+		e.logger.Error("failed to read OPA response body", "error", readErr, "x-request-id", requestID)
 		respBody = nil
 	}
 
 	e.logger.Debug("OPA response received", "status", resp.StatusCode, "x-request-id", requestID)
 
-	// Non-2xx responses are treated as internal errors.
+	// A non-2xx status is no answer.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		e.logger.Error("error response from OPA", "status", resp.StatusCode, "x-request-id", requestID)
 		e.logger.Debug("error response body", "body", truncatedBody(respBody), "x-request-id", requestID)
-		return fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode)
+		return statusError(resp.StatusCode, fmt.Errorf("OPA returned non-2xx status: %d", resp.StatusCode))
+	}
+
+	// An answer cut off is no answer, whatever part of it arrived.
+	if readErr != nil {
+		return requestError(ctx, "reading the OPA response failed", readErr)
 	}
 
 	if oversized {

@@ -94,9 +94,16 @@ func TestWireContract_StatusesMeanWhatTheVerifierMeans(t *testing.T) {
 	check("callerUnauthenticated", c.Status["callerUnauthenticated"], errorEnvelope(c.Codes["callerUnauthenticated"]), func(err error) bool {
 		return errors.Is(err, ErrCallerUnauthenticated) && !isUnauth(err)
 	})
-	for _, key := range []string{"invalidRequest", "payloadTooLarge", "unsupportedMediaType", "internalError", "verificationUnavailable"} {
+	isUnavailable := func(err error) bool { return errors.Is(err, interceptors.ErrBackendUnavailable) }
+	// The verifier could not verify the credential now: retry may succeed.
+	check("verificationUnavailable", c.Status["verificationUnavailable"], errorEnvelope(c.Codes["verificationUnavailable"]), func(err error) bool {
+		return isUnavailable(err) && !isDenied(err) && !isUnauth(err)
+	})
+	// A request the verifier cannot take, and its own terminal error, say
+	// something is misconfigured or broken: not unavailable.
+	for _, key := range []string{"invalidRequest", "payloadTooLarge", "unsupportedMediaType", "internalError"} {
 		check(key, c.Status[key], errorEnvelope(c.Codes[key]), func(err error) bool {
-			return err != nil && !isDenied(err) && !isUnauth(err)
+			return err != nil && !isDenied(err) && !isUnauth(err) && !isUnavailable(err)
 		})
 	}
 }

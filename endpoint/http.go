@@ -16,6 +16,7 @@ package endpoint
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/internal/privatenet"
 )
 
@@ -359,15 +361,102 @@ func validHeaderName(name string) bool {
 }
 
 // requestError reports err, which ended a request to the backend made under
-// ctx. When ctx itself ended, the error wraps ctx.Err(), so errors.Is finds
-// context.Canceled or context.DeadlineExceeded. Otherwise it is the backend's
-// failure and wraps no context error — net/http reports the endpoint's own
-// timeout as context.DeadlineExceeded, which must not read as the caller's.
+// ctx before its answer was whole. When ctx itself ended, the error wraps
+// ctx.Err(), so errors.Is finds context.Canceled or context.DeadlineExceeded.
+// Otherwise it wraps no context error — net/http reports the endpoint's own
+// timeout as context.DeadlineExceeded, which must not read as the caller's —
+// and wraps interceptors.ErrBackendUnavailable when err is transient.
 func requestError(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
 	}
+	if transient(err) {
+		return fmt.Errorf("%w: %s: %v", interceptors.ErrBackendUnavailable, what, err)
+	}
 	return fmt.Errorf("%s: %v", what, err)
+}
+
+// transient reports whether err, from sending a request or reading its
+// answer while the caller's context is live, says the backend could not
+// answer now: a failed lookup, a connection refused, reset or closed before
+// the answer was whole, a timeout — any failure but those that come from
+// configuration or from what was sent, which retrying does not change. Those
+// are a TLS alert, sent or received; a certificate this side refuses; any
+// other handshake crypto/tls itself refuses (see tlsRefusal); a backend that
+// does not speak TLS, or speaks HTTP to https; an address no
+// connection can have; and a host the private-network check refused. A
+// failure this library cannot name, net/http's HTTP/2 errors among them, is
+// the backend's, as grpc-go and connect-go read a transport's failures. No
+// body is decoded on the way (see noContentCoding), so a body that does not
+// parse is never a read error.
+func transient(err error) bool {
+	var (
+		alert     tls.AlertError
+		opErr     *net.OpError
+		certErr   *tls.CertificateVerificationError
+		recordErr tls.RecordHeaderError
+		addrErr   *net.AddrError
+	)
+	switch {
+	case errors.As(err, &alert), errors.As(err, &certErr), errors.As(err, &recordErr),
+		errors.Is(err, http.ErrSchemeMismatch), errors.As(err, &addrErr),
+		errors.Is(err, privatenet.ErrNotPrivate), tlsRefusal(err):
+		return false
+	case errors.As(err, &opErr):
+		// crypto/tls reports an alert as an *net.OpError with one of these.
+		return opErr.Op != "remote error" && opErr.Op != "local error"
+	}
+	return true
+}
+
+// tlsRefusal reports whether err wraps an error of crypto/tls's own, which
+// it spells with the prefix "tls: ": a handshake it refused over what the
+// backend sent, such as a certificate that does not parse, which it reports
+// as neither an alert nor a verification error. A network failure during the
+// handshake is an *net.OpError or io.EOF, and the handshake timeout is
+// net/http's; neither carries the prefix. Every error err wraps is looked
+// at, those beside others in a multiple wrap included, as errors.Is does.
+func tlsRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.HasPrefix(err.Error(), "tls: ") {
+		return true
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() error }:
+		return tlsRefusal(e.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			if tlsRefusal(inner) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// noContentCoding asks for the answer without a content coding. net/http
+// decodes a gzip answer only when it asked for one itself, and a decoder's
+// error would read as the connection breaking.
+func noContentCoding(req *http.Request) {
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+}
+
+// statusError returns err, which reports a status the endpoint does not take
+// as an answer, wrapping interceptors.ErrBackendUnavailable when the status
+// says the backend is overloaded or down: 429, 502, 503 or 504, the statuses
+// gRPC's and Connect's HTTP mappings read as unavailable. Any other status,
+// 500 and 3xx included, says the backend or this service is misconfigured or
+// broke the contract.
+func statusError(status int, err error) error {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return fmt.Errorf("%w: %v", interceptors.ErrBackendUnavailable, err)
+	}
+	return err
 }
 
 // readBounded reads body up to max bytes, and reports whether it held more.

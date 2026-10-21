@@ -462,6 +462,11 @@ func TestPlainInternal_ChecksEveryAddressAsItDials(t *testing.T) {
 					if err == nil || errors.As(err, &denied) {
 						t.Errorf("%v: got %v, want an error that is not a denial", resolved, err)
 					}
+					// The refusal is this library's, not the backend failing:
+					// retrying does not reach it.
+					if errors.Is(err, interceptors.ErrBackendUnavailable) {
+						t.Errorf("%v: got %v, want an error that is not ErrBackendUnavailable", resolved, err)
+					}
 					if len(d.dialed) != 0 {
 						t.Errorf("%v: dialed %v, want nothing", resolved, d.dialed)
 					}

@@ -18,18 +18,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
+	"github.com/o3co/protobuf.interceptors/endpoint"
 	"github.com/o3co/protobuf.interceptors/endpointtest"
 	policygrpc "github.com/o3co/protobuf.interceptors/grpc"
 	testpb "github.com/o3co/protobuf.interceptors/testproto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -72,6 +79,7 @@ func TestChain_CallerMessageIsFixed(t *testing.T) {
 		{"denied", &interceptors.DeniedError{Reason: "denied by http://opa.internal:8181"}, codes.PermissionDenied, "access denied"},
 		{"unauthenticated", &interceptors.UnauthenticatedError{Reason: "OPA says token expired"}, codes.Unauthenticated, "unauthenticated"},
 		{"backend failure", backendFailure(errors.New("connection refused")), codes.Internal, "authorization check failed"},
+		{"backend unavailable", fmt.Errorf("%w: %w", interceptors.ErrBackendUnavailable, backendFailure(errors.New("connection refused"))), codes.Unavailable, "authorization backend unavailable"},
 		// The endpoint's own timeout or cancellation, while the RPC is live, is
 		// the service's failure, not the caller's deadline.
 		{"endpoint canceled", backendFailure(context.Canceled), codes.Internal, "authorization check failed"},
@@ -155,6 +163,21 @@ func TestVerificationInterceptor_RPCContextEnded(t *testing.T) {
 				})
 			assertFixedMessage(t, err, tc.code, tc.message)
 		})
+		// The RPC's own end wins over an endpoint that also says its backend
+		// was unavailable.
+		t.Run(tc.name+"/endpoint also unavailable", func(t *testing.T) {
+			interceptor := policygrpc.VerificationInterceptor(endpointtest.Func(
+				func(ctx context.Context, _, _ string) error {
+					return fmt.Errorf("%w: %w", interceptors.ErrBackendUnavailable, backendFailure(ctx.Err()))
+				},
+			))
+			_, err := interceptor(tc.ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.v1.TestService/GetResource"},
+				func(context.Context, any) (any, error) {
+					t.Fatal("the handler must not run")
+					return nil, nil
+				})
+			assertFixedMessage(t, err, tc.code, tc.message)
+		})
 	}
 }
 
@@ -200,6 +223,107 @@ func TestPolicyAndGuardErrors_CallerMessageIsFixed(t *testing.T) {
 			assertFixedMessage(t, err, codes.Internal, "authorization check failed")
 			if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), tc.cause) {
 				t.Errorf("error %v does not unwrap to a cause naming %q", err, tc.cause)
+			}
+		})
+	}
+}
+
+// A real HTTP endpoint whose backend answers it is down: the caller is told
+// Unavailable, the handler never runs, and the error unwraps to the cause.
+func TestChain_BackendDown_IsUnavailable(t *testing.T) {
+	pdp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer pdp.Close()
+	verifier, err := endpoint.NewOPAEndpoint(pdp.URL, "authz/allow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed error
+	client, cleanup := startServerWithImpl(t, &failingServer{t: t},
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(func(_ context.Context, ev interceptors.DecisionEvent) {
+			observed = ev.Err
+		})),
+	)
+	defer cleanup()
+
+	_, err = client.GetResource(bearerCtx("tok"), &testpb.GetResourceRequest{Id: "1"})
+	assertFixedMessage(t, err, codes.Unavailable, "authorization backend unavailable")
+	if !errors.Is(observed, interceptors.ErrBackendUnavailable) {
+		t.Errorf("observer saw %v, want the endpoint's error wrapping ErrBackendUnavailable", observed)
+	}
+}
+
+// failingServer fails the test if any handler runs.
+type failingServer struct {
+	testServer
+	t *testing.T
+}
+
+func (s *failingServer) GetResource(context.Context, *testpb.GetResourceRequest) (*testpb.GetResourceResponse, error) {
+	s.t.Error("the handler must not run")
+	return &testpb.GetResourceResponse{}, nil
+}
+
+// unavailableAfter allows the first n checks, and finds the backend
+// unavailable for every one after.
+func unavailableAfter(n int) endpoint.VerifierEndpoint {
+	var calls atomic.Int32
+	return endpointtest.Func(func(context.Context, string, string) error {
+		if int(calls.Add(1)) <= n {
+			return nil
+		}
+		return fmt.Errorf("%w: OPA request failed: connection refused", interceptors.ErrBackendUnavailable)
+	})
+}
+
+// On a real stream, a backend that is unavailable when the stream opens, or
+// at the re-check of a later message, ends it with Unavailable; the message
+// that failed the re-check never reaches the handler.
+func TestStreamChain_BackendUnavailable_IsUnavailable(t *testing.T) {
+	cases := []struct {
+		name    string
+		allowed int
+		want    []string
+	}{
+		{"at the opening check", 0, nil},
+		{"at a later message", 2, []string{"first"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			impl := &uploadServer{}
+			srv := grpc.NewServer(grpc.ChainStreamInterceptor(
+				policygrpc.PolicyOptionStreamInterceptor(),
+				policygrpc.VerificationStreamInterceptor(unavailableAfter(tc.allowed)),
+			))
+			testpb.RegisterTestServiceServer(srv, impl)
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("failed to listen: %v", err)
+			}
+			go func() { _ = srv.Serve(lis) }()
+			defer srv.Stop()
+			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatalf("failed to dial: %v", err)
+			}
+			defer conn.Close()
+
+			stream, err := testpb.NewTestServiceClient(conn).UploadResources(bearerCtx("tok"))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, name := range []string{"first", "second"} {
+				if err := stream.Send(&testpb.CreateResourceRequest{Name: name}); err != nil {
+					break
+				}
+			}
+			_, err = stream.CloseAndRecv()
+
+			assertFixedMessage(t, err, codes.Unavailable, "authorization backend unavailable")
+			if got := impl.all(); !slices.Equal(got, tc.want) {
+				t.Errorf("handler received %q, want %q", got, tc.want)
 			}
 		})
 	}

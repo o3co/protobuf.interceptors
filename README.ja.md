@@ -79,7 +79,8 @@ RPC request
 │  VerificationInterceptor         │  reads policy from ctx,
 │                                  │  calls VerifierEndpoint.Verify(),
 │                                  │  refuses with PermissionDenied,
-│                                  │  Unauthenticated or Internal
+│                                  │  Unauthenticated, Unavailable
+│                                  │  or Internal
 └───────────────┬──────────────────┘
                 │
                 ▼
@@ -304,7 +305,10 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | `*interceptors.UnauthenticatedError`（読み取れないクレデンシャルを含む） | `Unauthenticated` | `unauthenticated` |
 | RPC 自身のコンテキストがキャンセルされたときの `context.Canceled` | `Canceled` | `request canceled` |
 | RPC 自身のデッドラインが過ぎたときの `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
-| それ以外すべて — バックエンドの失敗（RPC が生きている間にエンドポイント自身の HTTP タイムアウトが発火した場合を含む）、ディスクリプターの無いメソッド、`WithRequirePolicy` の下でのポリシーの無いメソッド（`interceptors.ErrNoPolicy`）、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `interceptors.ErrBackendUnavailable`: バックエンドが今は答えられない — 名前が解決できない、接続が拒否・リセットされたか答えが揃う前に閉じられた、エンドポイント自身のタイムアウト内に答えない、または `429`、`502`、`503`、`504` を返した | `Unavailable` | `authorization backend unavailable` |
+| それ以外すべて — 契約の外で答えたバックエンド（`500`、`3xx`、その他の想定外のステータス、不正なボディ）、拒否された TLS ハンドシェイク（信頼できない・パースできない証明書、アラート）、TLS を話さないバックエンドへの `https`、接続できないアドレス（不正なポート）、プライベートネットワーク検査が拒否したホスト、ディスクリプターの無いメソッド、`WithRequirePolicy` の下でのポリシーの無いメソッド（`interceptors.ErrNoPolicy`）、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+
+`Unavailable` も `Internal` も拒否であり、ハンドラーは実行されない。`Unavailable` はバックエンドが今は停止しているか過負荷であることを示すので、gRPC のステータスコードの指針や一般的なリトライポリシーが想定するとおり、クライアントはバックオフ付きでリトライしてよい。メッセージごとに再検査するストリームでは、verifier の短い停止はサーバーの故障ではなく、クライアントがリトライできるコードでストリームを終える。`Internal` は設定の誤りか契約違反を示し、リトライでは直らない。unavailable と読むステータスは gRPC と Connect の HTTP 変換表がそう読むものであり、`500` はどちらにも当たらないので `Internal` のままである。解決できない名前や拒否された接続は停止と区別できないので、ベース URL の誤りであっても `Unavailable` になる。このライブラリが名指せないトランスポートの失敗も、grpc-go や connect-go と同じく `Unavailable` である。`With…Transport` で渡したトランスポートのエラーも、同じくその型で読む。RPC 自身のキャンセルやデッドラインはどちらよりも優先する。サービス独自の `VerifierEndpoint` も、同じ失敗について `ErrBackendUnavailable` をラップしてよい。
 
 完全なエラーは、すべての検査について `WithDecisionObserver` のオブザーバーに渡る（[判定の記録](#判定の記録)を参照）。インターセプターが返すエラーもそれに unwrap できるので、これらより外側に置いたインターセプターは `errors.As` / `errors.Is` で取り出せる — オブザーバーが見ないポリシー参照や解決の失敗は、そこでログできる。インターセプターは自らはログを書かない。
 
@@ -339,9 +343,9 @@ verifier, err := endpoint.NewO3coEndpoint(
 
 リクエストが運ぶものはそのネットワーク上では平文のままである。読み取りと改ざんに対して信頼できるネットワーク上のバックエンドだけを列挙すること。
 
-どの HTTP バックエンドもリダイレクトに追従しない: `3xx` はエラーであり、リクエストとそれに載る Bearer トークンは設定したバックエンドにしか届かない。
+どの HTTP バックエンドもリダイレクトに追従しない: `3xx` はエラーであり、リクエストとそれに載る Bearer トークンは設定したバックエンドにしか届かない。各エンドポイントは答えをコンテンツコーディングなしで求める（静的ヘッダーが指定しない限り `Accept-Encoding: identity`）ので、途中で何もデコードされず、パースできないボディが切れた接続と取り違えられることはない。
 
-呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない。
+呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない: 解決できない名前、拒否された接続や切れた接続、`429`、`502`、`503`、`504` と同じく `interceptors.ErrBackendUnavailable` をラップする（[エラー](#エラー)を参照）。
 
 相互 TLS やプライベート CA には、送信に使うトランスポートをエンドポイントに与える — `WithO3coTransport(rt)`、`WithOPATransport(rt)`、`WithCedarTransport(rt)`。たとえば `TLSClientConfig` を設定した `*http.Transport` である。エンドポイントのタイムアウトとリダイレクト不追従は、`*http.Transport` のように、リクエストのコンテキストを尊重し、自らリダイレクトに追従しないトランスポートであれば引き続き適用される。
 
@@ -483,7 +487,7 @@ policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserv
 
 保存すべきものについての verifier 自身の助言がここにも当てはまる: 各操作について、判定結果、deny code、各評価に伴う理由、送ったリクエスト ID（`Decision.RequestID`）。verifier の `decision` ログイベントは同じリクエスト ID を持つので、2 つの記録はそれで結合できる。verifier は `x-request-id` を、`[A-Za-z0-9-_.:+/=#]` の 128 文字以下である場合にのみ保持し、インターセプターは受信した ID をその形の場合にのみ運び、それ以外では生成するので、送る ID は常に結合できる。
 
-allow にはステータスとボディの両方が必要である: `decision: "allow"` を持つ完全な判定エンベロープをボディとする `200` である。ボディが空、JSON でない、verifier の契約が要求するキーを欠く、値を型付けしている箇所のどこかで null または型違い、deny の `code` や `message` を持つ allow（null であっても）、`WithO3coMaxResponseBodySize` より大きい、読み取り途中で切れている — そうしたものは判定ではなく、何も報告しない。`200` ではそれにより答えは allow ではなくエラーになり、`200` 以外の `2xx`、完全な deny を持つ `200`（これは引き続きオブザーバーに報告される）も同様である。インターセプターはそのエラーを `Internal` に変換する。`403` はボディが何を持っていても deny であり、ボディは理由を報告するだけである。キーは契約の綴りどおりに照合する: 大文字小文字の違うもの（`Passed`、`Decision`）は契約が定義しないキーであり、他の未知のキーと同じく無視されるので、似たキーの代わりにはならない。例外は大文字小文字の違う `restricts` で、無視されずに拒否される: そのときエンベロープは完全ではなく、それを持つ `200` はフェイルクローズする。OPA の `result` と Cedar エージェントの `decision` も、同様に正確なキーでのみ読む。
+allow にはステータスとボディの両方が必要である: `decision: "allow"` を持つ完全な判定エンベロープをボディとする `200` である。ボディが空、JSON でない、verifier の契約が要求するキーを欠く、値を型付けしている箇所のどこかで null または型違い、deny の `code` や `message` を持つ allow（null であっても）、`WithO3coMaxResponseBodySize` より大きい、読み取り途中で切れている — そうしたものは判定ではなく、何も報告しない。`200` ではそれにより答えは allow ではなくエラーになり、`200` 以外の `2xx`、完全な deny を持つ `200`（これは引き続きオブザーバーに報告される）も同様である。インターセプターはそのエラーを `Internal` に変換する。ただし切れた接続やエンドポイント自身のタイムアウトで読み取り途中に切れたボディは、バックエンドが答えなかったということなので `Unavailable` になる。`403` はボディが何を持っていても deny であり、ボディは理由を報告するだけである。キーは契約の綴りどおりに照合する: 大文字小文字の違うもの（`Passed`、`Decision`）は契約が定義しないキーであり、他の未知のキーと同じく無視されるので、似たキーの代わりにはならない。例外は大文字小文字の違う `restricts` で、無視されずに拒否される: そのときエンベロープは完全ではなく、それを持つ `200` はフェイルクローズする。OPA の `result` と Cedar エージェントの `decision` も、同様に正確なキーでのみ読む。
 
 ### 確認済みリビジョンの要求
 
@@ -499,7 +503,7 @@ allow にはステータスとボディの両方が必要である: `decision: "
 
 - **送信はメッセージが出ていく前に検査する**ので、拒否されたメッセージは送信されない。
 - **受信はメッセージが届いた後に検査する**ので、取り消し後に届いたメッセージは消去されてハンドラーには渡らない。どのコーデックがデコードしたかは問わない。失敗した受信 — クライアントが自分の側を閉じた、ストリームが壊れた — にはメッセージが無く、再検査しない。
-- **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、verifier の失敗なら `Internal`（[エラー](#エラー)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
+- **失敗した再検査はストリームを終わらせる。** その送信または受信は変換されたエラーを返し、以後の送信と受信はすべて verifier に問い合わせずに同じエラーを返し、インターセプターはハンドラーが何を返してもそのエラーで RPC を終える。クライアントは拒否より前に送られたメッセージを受け取り、その後にステータス — 拒否なら `PermissionDenied: access denied`、verifier が答えられなければ `Unavailable`、それ以外の verifier の失敗なら `Internal`（[エラー](#エラー)を参照）— を受け取る。gRPC ではトレーラーで、ConnectRPC ではストリームの終わりで届く。
 - **完了しなかった再検査もストリームを終わらせる。** 再検査の中でオブザーバーまたはエンドポイントが panic すると、その panic は再検査を行った送信または受信を通じてハンドラーに届く。その送信が運ぶはずだったメッセージは送信されず、その受信が検査したメッセージはハンドラーが panic を recover しても消去される。panic を recover して続けるハンドラーには、以後の送信と受信がすべて拒否され、ストリームは `Internal` で終わる。ハンドラーが recover しない panic はインターセプターの外に出る。
 
 再検査 1 回につき verifier の呼び出しが 1 回かかり、送信や受信はそれを待つ。多くのメッセージを運ぶストリームでこれを抑えるには、どちらのフレームワークでも検証インターセプターに `WithStreamRecheckInterval(d)` を与える:

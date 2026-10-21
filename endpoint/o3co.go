@@ -331,6 +331,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	var requestID string
@@ -348,12 +349,12 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 	}
 	defer resp.Body.Close()
 
-	respBody, oversized, err := readBounded(resp.Body, e.maxResponseBodySize)
-	if err != nil {
+	respBody, oversized, readErr := readBounded(resp.Body, e.maxResponseBodySize)
+	if readErr != nil {
 		if ctx.Err() != nil {
-			return nil, requestError(ctx, "reading the response failed", err)
+			return nil, requestError(ctx, "reading the response failed", readErr)
 		}
-		e.logger.Error("failed to read response body", "error", err, "x-request-id", requestID)
+		e.logger.Error("failed to read response body", "error", readErr, "x-request-id", requestID)
 		respBody = nil
 	}
 	success := resp.StatusCode >= 200 && resp.StatusCode < 300
@@ -372,6 +373,10 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 
 	// --- Evaluate based on status code ----------------------------------------
 	if success {
+		// An answer cut off is no answer, whatever part of it arrived.
+		if readErr != nil {
+			return nil, requestError(ctx, "reading the response failed", readErr)
+		}
 		return e.acceptAllow(wire, resp.StatusCode, requestID)
 	}
 
@@ -398,7 +403,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 		return nil, &interceptors.UnauthenticatedError{Reason: "invalid or expired token"}
 	}
 
-	return nil, fmt.Errorf("authorization service error: %d", resp.StatusCode)
+	return nil, statusError(resp.StatusCode, fmt.Errorf("authorization service error: %d", resp.StatusCode))
 }
 
 // acceptAllow decides what a 2xx answer amounts to. wire is the envelope read

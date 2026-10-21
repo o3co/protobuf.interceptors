@@ -26,9 +26,11 @@ import (
 // toGRPCError converts a framework-neutral error to a gRPC status error. The
 // caller is told only the code and a fixed message for it: an endpoint's
 // error can name the backend, the URL it called, or why a token was refused.
-// Canceled and DeadlineExceeded say that the RPC's own context, ctx, ended; an
-// endpoint that timed out or was canceled while the RPC was live failed, and
-// that is Internal.
+// Canceled and DeadlineExceeded say that the RPC's own context, ctx, ended,
+// and win over Unavailable and Internal. Unavailable says the backend could not
+// answer now (interceptors.ErrBackendUnavailable), which a client may retry
+// with backoff; it is still a refusal. Any other failure, an endpoint that
+// was canceled while the RPC was live included, is Internal.
 // The returned error unwraps to err, so an interceptor placed outside these
 // can still record it.
 func toGRPCError(ctx context.Context, err error) error {
@@ -48,6 +50,8 @@ func toGRPCError(ctx context.Context, err error) error {
 		return &statusError{status.New(codes.Canceled, "request canceled"), err}
 	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return &statusError{status.New(codes.DeadlineExceeded, "deadline exceeded"), err}
+	case errors.Is(err, interceptors.ErrBackendUnavailable):
+		return &statusError{status.New(codes.Unavailable, "authorization backend unavailable"), err}
 	default:
 		return &statusError{status.New(codes.Internal, "authorization check failed"), err}
 	}

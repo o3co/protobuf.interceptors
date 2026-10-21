@@ -99,7 +99,8 @@ RPC request
 │  VerificationInterceptor         │  reads policy from ctx,
 │                                  │  calls VerifierEndpoint.Verify(),
 │                                  │  refuses with PermissionDenied,
-│                                  │  Unauthenticated or Internal
+│                                  │  Unauthenticated, Unavailable
+│                                  │  or Internal
 └───────────────┬──────────────────┘
                 │
                 ▼
@@ -462,7 +463,25 @@ called, or why a token was refused, so none of its text reaches the caller:
 | `*interceptors.UnauthenticatedError`, including an unreadable credential | `Unauthenticated` | `unauthenticated` |
 | `context.Canceled`, when the RPC's own context was canceled | `Canceled` | `request canceled` |
 | `context.DeadlineExceeded`, when the RPC's own deadline passed | `DeadlineExceeded` | `deadline exceeded` |
-| anything else — a backend failure (including the endpoint's own HTTP timeout while the RPC is live), a method with no descriptor, a method with no policy under `WithRequirePolicy` (`interceptors.ErrNoPolicy`), a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `interceptors.ErrBackendUnavailable`: the backend could not answer now — its name did not resolve, the connection was refused, reset or closed before the answer was whole, it did not answer within the endpoint's own timeout, or it answered `429`, `502`, `503` or `504` | `Unavailable` | `authorization backend unavailable` |
+| anything else — a backend that answered outside its contract (`500`, a `3xx`, another unexpected status, a malformed body), a TLS handshake refused (a certificate not trusted or not parseable, an alert), `https` to a backend that does not speak TLS, an address no connection can have (an invalid port), a host the private-network check refused, a method with no descriptor, a method with no policy under `WithRequirePolicy` (`interceptors.ErrNoPolicy`), a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+
+`Unavailable` and `Internal` are both refusals: the handler does not run.
+`Unavailable` says the backend is down or overloaded for now, so a client may
+retry with backoff, as gRPC's status code guidance and the usual retry
+policies expect; on a stream, where every message is re-checked, a short
+outage of the verifier ends the stream with a code a client can retry on, not
+a server fault. `Internal` says
+something is misconfigured or broke a contract, which retrying does not fix.
+The statuses read as unavailable are the ones gRPC's and Connect's HTTP
+mappings read so; a `500` maps to neither and stays `Internal`. A name that
+does not resolve and a refused connection cannot be told from an outage, so
+they are `Unavailable` even when the base URL is wrong; so is a transport
+failure this library cannot name, as grpc-go and connect-go read one. An error
+from a transport given with `With…Transport` is read the same way, by its
+type. The
+RPC's own cancellation or deadline wins over both. A `VerifierEndpoint` of the service's
+own may wrap `ErrBackendUnavailable` for the same failures.
 
 The full error goes to the `WithDecisionObserver` observer for every check
 (see [Recording the decision](#recording-the-decision)). The error an
@@ -553,12 +572,17 @@ What the requests carry is still in the clear on that network: list only
 backends on a network trusted against reading and changing it.
 
 No HTTP backend follows a redirect: a `3xx` is an error, so the request and
-the bearer token on it reach only the backend that was configured.
+the bearer token on it reach only the backend that was configured. Each asks
+for its answer without a content coding (`Accept-Encoding: identity`, unless a
+static header names one), so nothing is decoded on the way and a body that does
+not parse is never taken for a broken connection.
 
 When the caller's context is cancelled or its deadline passes, an HTTP
 endpoint's error wraps `ctx.Err()`, so `errors.Is` finds `context.Canceled` or
 `context.DeadlineExceeded`. The endpoint's own timeout is the backend failing
-to answer, and wraps neither.
+to answer, and wraps neither: like a name that does not resolve, a refused
+or broken connection, or a `429`, `502`, `503` or `504`, it wraps
+`interceptors.ErrBackendUnavailable` (see [Errors](#errors)).
 
 For mutual TLS or a private CA, give the endpoint the transport to send over —
 `WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,
@@ -817,7 +841,9 @@ larger than `WithO3coMaxResponseBodySize`, or cut off while
 reading is not a decision and reports nothing. On a `200` that makes the answer
 an error, not an allow, and so does any other `2xx` and a `200` carrying a
 whole deny (which is still reported to the observer). The interceptors map that
-error to `Internal`. A `403` is a deny whatever its body holds; the body only
+error to `Internal`, except a body cut off by a broken connection or the
+endpoint's own timeout, which is the backend failing to answer: `Unavailable`.
+A `403` is a deny whatever its body holds; the body only
 reports why. Keys are matched as the contract spells them: one in another
 case (`Passed`, `Decision`) is a key the contract does not define, and is
 ignored like any other, so it cannot stand in for the key it resembles. The
@@ -875,8 +901,9 @@ stream that only sends included.
   mapped error, every later send or receive returns the same error without
   asking the verifier, and the interceptor ends the RPC with it whatever the
   handler returns. The client gets the messages sent before the refusal, then
-  the status — `PermissionDenied: access denied` for a denial, `Internal` when
-  the verifier failed (see [Errors](#errors)) — on gRPC in the trailers, on
+  the status — `PermissionDenied: access denied` for a denial, `Unavailable`
+  when the verifier could not answer, `Internal` when it failed otherwise (see
+  [Errors](#errors)) — on gRPC in the trailers, on
   ConnectRPC at the end of the stream.
 - **A re-check that does not complete ends the stream too.** When the
   observer or the endpoint panics during a re-check, the panic reaches the

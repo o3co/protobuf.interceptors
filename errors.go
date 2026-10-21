@@ -16,6 +16,21 @@ package interceptors
 
 import "errors"
 
+// ErrBackendUnavailable reports that the backend could not give an answer
+// now: its name did not resolve, the connection was refused, reset or closed
+// before its answer was whole, it did not answer within the endpoint's own
+// timeout, or it answered that it is overloaded or down (429, 502, 503 or
+// 504). The HTTP endpoints wrap it for those failures, and a VerifierEndpoint
+// of the service's own may wrap it for the same. It is still a refusal:
+// nothing is allowed.
+//
+// The framework interceptors tell the RPC caller Unavailable with the fixed
+// message "authorization backend unavailable", which a client may retry with
+// backoff. A backend that answers outside its contract, or a failure that
+// retrying does not change — a TLS handshake refused, an address no
+// connection can have — is not unavailable: that is Internal.
+var ErrBackendUnavailable = errors.New("authorization backend unavailable")
+
 // ErrNoPolicy reports an RPC refused because its method declares no policy
 // option while the verification interceptor was built to require one (the
 // framework modules' WithRequirePolicy). The omission is the service's, not
