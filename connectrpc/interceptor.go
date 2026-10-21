@@ -336,9 +336,9 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 // message is never sent. A receive is checked after the message arrives, so a
 // refused message is cleared and never handed over; a receive that fails has
 // no message and is not checked. A check that does not return — the observer
-// panicked — is a failure: a send it guarded is not sent, a message it checked
-// is cleared even when the handler recovers the panic, and the stream fails
-// with Internal. The gate decides which messages are checked and makes the
+// or the endpoint panicked — is a failure: a send it guarded is not sent, a
+// message it checked is cleared even when the handler recovers the panic, and
+// the stream fails with Internal. The gate decides which messages are checked and makes the
 // first failure final: every later send or receive returns it without asking
 // the verifier or using the transport.
 type authStreamingHandlerConn struct {

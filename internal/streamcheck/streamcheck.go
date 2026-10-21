@@ -30,7 +30,9 @@ import (
 
 // ErrCheckIncomplete is the failure of a check that never returned: it
 // panicked, or its goroutine exited. Nothing established that the stream is
-// still authorized, so it ends the stream like any other failure.
+// still authorized, so it ends the stream like any other failure. No check
+// returns it, so a caller that maps the errors its checks return for the RPC
+// caller maps this one too.
 var ErrCheckIncomplete = errors.New("streamcheck: the authorization check did not complete")
 
 // Gate runs a stream's authorization checks. Each stream has its own.

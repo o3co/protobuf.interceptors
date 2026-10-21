@@ -210,3 +210,31 @@ func TestGate_CheckThatPanics_IsFinal_WithInterval(t *testing.T) {
 		t.Errorf("checks run = %d, want 1", calls)
 	}
 }
+
+// A check waiting while another panics does not run: the gate is already
+// closed when it gets the lock.
+func TestGate_CheckThatPanics_ClosesTheGateForAWaitingCheck(t *testing.T) {
+	g := streamcheck.New(0, time.Now)
+	started, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer func() { _ = recover() }()
+		_ = g.Check(func() error {
+			close(started)
+			<-release
+			panic("observer failed")
+		})
+	}()
+	<-started
+
+	result := make(chan error)
+	ran := false
+	go func() { result <- g.Check(func() error { ran = true; return nil }) }()
+	close(release)
+
+	if err := <-result; !errors.Is(err, streamcheck.ErrCheckIncomplete) {
+		t.Errorf("Check() = %v, want ErrCheckIncomplete", err)
+	}
+	if ran {
+		t.Error("the waiting check ran after the gate closed")
+	}
+}

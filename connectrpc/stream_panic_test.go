@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
@@ -131,5 +132,50 @@ func TestConnectVerification_ObserverPanicsOnSendRecheck_ClosesTheStream(t *test
 	}
 	if calls != 2 {
 		t.Errorf("verifier calls = %d, want 2", calls)
+	}
+}
+
+// An endpoint that panics on a re-check made after the interval has passed
+// closes the stream the same way, and the interval does not reopen it.
+func TestConnectVerification_EndpointPanicsOnRecheck_WithInterval_ClosesTheStream(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	calls := 0
+	verifier := endpointtest.Func(func(context.Context, string, string) error {
+		calls++
+		if calls == 2 {
+			panic("endpoint failed")
+		}
+		return nil
+	})
+	msg := new(string)
+	var recvPanicked bool
+	var laterSend error
+	handler := policyconnect.VerificationInterceptor(verifier,
+		policyconnect.WithStreamRecheckInterval(time.Minute),
+		policyconnect.WithClock(func() time.Time { return now })).
+		WrapStreamingHandler(func(_ context.Context, conn connect.StreamingHandlerConn) error {
+			now = now.Add(time.Minute)
+			recvPanicked = recovered(func() { _ = conn.Receive(msg) })
+			laterSend = conn.Send("within the interval of nothing")
+			return nil
+		})
+	conn := &sendingConn{fakeStreamingConn: fakeStreamingConn{header: http.Header{}, recv: func(m any) error {
+		*m.(*string) = "checked by a re-check that did not complete"
+		return nil
+	}}}
+
+	err := handler(policyStreamCtx(), conn)
+
+	if !recvPanicked {
+		t.Fatal("the endpoint's panic did not reach the handler")
+	}
+	if *msg != "" {
+		t.Errorf("the message reached the handler: %q", *msg)
+	}
+	if connect.CodeOf(laterSend) != connect.CodeInternal || conn.sendCalls != 0 {
+		t.Errorf("later Send code = %v with %d transport sends, want %v and 0", connect.CodeOf(laterSend), conn.sendCalls, connect.CodeInternal)
+	}
+	if connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("interceptor code = %v, want %v", connect.CodeOf(err), connect.CodeInternal)
 	}
 }

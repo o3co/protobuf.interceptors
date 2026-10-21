@@ -17,6 +17,7 @@ package grpc_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpointtest"
@@ -130,5 +131,49 @@ func TestVerificationStreamInterceptor_ObserverPanicsOnSendRecheck_ClosesTheStre
 	}
 	if calls != 2 {
 		t.Errorf("verifier calls = %d, want 2", calls)
+	}
+}
+
+// An endpoint that panics on a re-check made after the interval has passed
+// closes the stream the same way, and the interval does not reopen it.
+func TestVerificationStreamInterceptor_EndpointPanicsOnRecheck_WithInterval_ClosesTheStream(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	calls := 0
+	verifier := endpointtest.Func(func(context.Context, string, string) error {
+		calls++
+		if calls == 2 {
+			panic("endpoint failed")
+		}
+		return nil
+	})
+	interceptor := policygrpc.VerificationStreamInterceptor(verifier,
+		policygrpc.WithStreamRecheckInterval(time.Minute),
+		policygrpc.WithClock(func() time.Time { return now }))
+	stream := &fakeServerStream{ctx: policyStreamCtx(), recv: func(m any) error {
+		*m.(*string) = "checked by a re-check that did not complete"
+		return nil
+	}}
+
+	msg := new(string)
+	var recvPanicked bool
+	var laterSend error
+	err := interceptor(nil, stream, streamInfo(), func(_ any, ss grpc.ServerStream) error {
+		now = now.Add(time.Minute)
+		recvPanicked = recovered(func() { _ = ss.RecvMsg(msg) })
+		laterSend = ss.SendMsg("within the interval of nothing")
+		return nil
+	})
+
+	if !recvPanicked {
+		t.Fatal("the endpoint's panic did not reach the handler")
+	}
+	if *msg != "" {
+		t.Errorf("the message reached the handler: %q", *msg)
+	}
+	if status.Code(laterSend) != codes.Internal || stream.sendCalls != 0 {
+		t.Errorf("later SendMsg code = %v with %d transport sends, want %v and 0", status.Code(laterSend), stream.sendCalls, codes.Internal)
+	}
+	if status.Code(err) != codes.Internal {
+		t.Errorf("interceptor code = %v, want %v", status.Code(err), codes.Internal)
 	}
 }
