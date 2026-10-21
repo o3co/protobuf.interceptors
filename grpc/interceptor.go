@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
@@ -31,7 +32,23 @@ import (
 type Option func(*config)
 
 type config struct {
-	observer interceptors.DecisionObserver
+	observer        interceptors.DecisionObserver
+	recheckInterval time.Duration
+	now             func() time.Time
+}
+
+// WithStreamRecheckInterval has VerificationStreamInterceptor re-check a
+// stream at most once per d instead of on every message: a message sent or
+// received less than d after the last check began goes through without one. The default, 0, re-checks every message.
+//
+// Panics if d is negative.
+func WithStreamRecheckInterval(d time.Duration) Option {
+	if d < 0 {
+		panic("WithStreamRecheckInterval: interval must not be negative")
+	}
+	return func(c *config) {
+		c.recheckInterval = d
+	}
 }
 
 // WithDecisionObserver has a verification interceptor hand every

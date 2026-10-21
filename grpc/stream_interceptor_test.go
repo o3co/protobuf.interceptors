@@ -127,8 +127,8 @@ func TestVerificationStreamInterceptor_SendBeforeRecv_IsDenied(t *testing.T) {
 }
 
 // TestVerificationStreamInterceptor_NeverReceives_IsStillChecked covers a
-// handler that only ever sends and never calls RecvMsg, so only the check
-// before the handler authorizes it.
+// handler that only ever sends and never calls RecvMsg: it is checked before
+// the handler runs and again before its send.
 func TestVerificationStreamInterceptor_NeverReceives_IsStillChecked(t *testing.T) {
 	verifyCalls := 0
 	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
@@ -145,8 +145,8 @@ func TestVerificationStreamInterceptor_NeverReceives_IsStillChecked(t *testing.T
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if verifyCalls != 1 {
-		t.Errorf("verifyCalls = %d, want 1: a stream that never receives must still be authorized", verifyCalls)
+	if verifyCalls != 2 {
+		t.Errorf("verifyCalls = %d, want 2: a stream that never receives must still be authorized", verifyCalls)
 	}
 }
 

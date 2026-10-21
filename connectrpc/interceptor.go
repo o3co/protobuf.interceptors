@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"time"
 
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
+	"github.com/o3co/protobuf.interceptors/internal/streamcheck"
 	pb "github.com/o3co/protobuf.interceptors/schema"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -170,20 +172,40 @@ func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	}
 }
 
+// WithStreamRecheckInterval has VerificationInterceptor re-check a stream at
+// most once per d instead of on every message: a message sent or received less
+// than d after the last check began goes through without one. The default, 0,
+// re-checks every message.
+//
+// Panics if d is negative.
+func WithStreamRecheckInterval(d time.Duration) Option {
+	if d < 0 {
+		panic("WithStreamRecheckInterval: interval must not be negative")
+	}
+	return func(v *verificationInterceptor) {
+		v.recheckInterval = d
+	}
+}
+
 // verificationInterceptor implements connect.Interceptor for VerificationInterceptor.
 type verificationInterceptor struct {
-	verifier endpoint.VerifierEndpoint
-	observer interceptors.DecisionObserver
+	verifier        endpoint.VerifierEndpoint
+	observer        interceptors.DecisionObserver
+	recheckInterval time.Duration
+	now             func() time.Time
 }
 
 // VerificationInterceptor returns a ConnectRPC Interceptor that reads Policy
 // from context and calls the verifier endpoint. A stream is authorized before
-// its handler runs, then re-checked on each message Receive returns.
+// its handler runs, then re-checked before each message Send sends and after
+// each message Receive returns — at most once per interval when
+// WithStreamRecheckInterval is given. A failed re-check ends the stream: the
+// interceptor returns it, whatever the handler returns.
 //
 // When the endpoint is an endpoint.DecisionVerifier, the decision that allowed
 // the RPC is on the handler's context (interceptors.DecisionFromContext), and
-// WithDecisionObserver receives every check, denied ones included. Nothing of
-// a decision reaches the RPC caller's error.
+// WithDecisionObserver receives every check that runs, denied ones included.
+// Nothing of a decision reaches the RPC caller's error.
 //
 // Panics if verifier is nil.
 func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option) connect.Interceptor {
@@ -267,45 +289,69 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return next(ctx, conn)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
+		// The opening check is the gate's first, so an interval runs from it.
+		gate := streamcheck.New(v.recheckInterval, v.now)
+		err := gate.Check(func() error {
+			var err error
+			ctx, err = v.verify(ctx, policyData.Resource, policyData.Action, credErr)
+			return err
+		})
 		if err != nil {
 			return toConnectError(ctx, err)
 		}
 
-		return next(ctx, &authStreamingHandlerConn{
+		err = next(ctx, &authStreamingHandlerConn{
 			StreamingHandlerConn: conn,
-			ctx:                  ctx,
-			resource:             policyData.Resource,
-			action:               policyData.Action,
-			v:                    v,
+			gate:                 gate,
+			check: func() error {
+				if _, err := v.verify(ctx, policyData.Resource, policyData.Action, nil); err != nil {
+					return toConnectError(ctx, err)
+				}
+				return nil
+			},
 		})
+		if denied := gate.Err(); denied != nil {
+			return denied
+		}
+		return err
 	}
 }
 
-// authStreamingHandlerConn re-checks authorization on each message Receive
-// returns, before handing it over.
+// authStreamingHandlerConn re-checks authorization before each message Send
+// sends and after each message Receive returns.
 //
 // The stream is already authorized before the handler is invoked. The
 // resource and action are fixed, so re-asking the verifier per message is what
-// stops a stream that keeps receiving once a grant is revoked or a token
-// expires. The check follows the receive, so a message that arrives after
-// revocation is cleared and never handed over; a receive that fails has no
-// message and is not checked. Sends are not re-checked.
+// stops a stream once a grant is revoked or a token expires, whichever way its
+// messages flow. A send is checked before the message goes out, so a refused
+// message is never sent. A receive is checked after the message arrives, so a
+// refused message is cleared and never handed over; a receive that fails has
+// no message and is not checked. The gate decides which messages are checked
+// and makes the first failure final: every later send or receive returns it
+// without asking the verifier or using the transport.
 type authStreamingHandlerConn struct {
 	connect.StreamingHandlerConn
-	ctx      context.Context
-	resource string
-	action   string
-	v        *verificationInterceptor
+	gate  *streamcheck.Gate
+	check func() error
+}
+
+func (c *authStreamingHandlerConn) Send(msg any) error {
+	if err := c.gate.Check(c.check); err != nil {
+		return err
+	}
+	return c.StreamingHandlerConn.Send(msg)
 }
 
 func (c *authStreamingHandlerConn) Receive(msg any) error {
+	if err := c.gate.Err(); err != nil {
+		return err
+	}
 	if err := c.StreamingHandlerConn.Receive(msg); err != nil {
 		return err
 	}
-	if _, err := c.v.verify(c.ctx, c.resource, c.action, nil); err != nil {
+	if err := c.gate.Check(c.check); err != nil {
 		clearMessage(msg)
-		return toConnectError(c.ctx, err)
+		return err
 	}
 	return nil
 }
