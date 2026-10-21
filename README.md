@@ -460,8 +460,9 @@ verifier, err := endpoint.NewO3coEndpoint(
   comes to resolve to a public address is refused rather than sent the token.
   The addresses are tried in turn within the endpoint's timeout, each but the
   last with a share of it, and the connection goes to a checked address
-  directly, through no proxy the environment names. An IPv4 address mapped into IPv6 counts as the IPv4
-  address; no other IPv6 form that carries one does.
+  directly, through no proxy the environment names. An IPv4 address mapped
+  into IPv6 counts as the IPv4 address; no other IPv6 form that carries one
+  does.
 - **Matched as written.** A base URL's host and port must be listed; a URL
   without a port has port 80. A host name matches in any case and with or
   without one trailing dot, an address in any spelling of it. A host name that

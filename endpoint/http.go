@@ -71,9 +71,10 @@ func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*u
 	}
 	transport := r.transport
 	if u.Scheme == "http" && !isLoopback(u.Hostname()) {
-		pair, ok := urlPair(u)
-		_, listed := r.plainInternal[pair]
-		listed = listed && ok
+		listed := false
+		if pair, ok := urlPair(u); ok {
+			_, listed = r.plainInternal[pair]
+		}
 		switch {
 		case listed && r.transport != nil:
 			return nil, nil, fmt.Errorf("base URL %s is listed with With%sAllowPlainInternal, whose address check runs in the endpoint's own transport: it cannot be reached over With%sTransport", u.Redacted(), kind, kind)
@@ -143,16 +144,17 @@ func plainInternalPair(entry string) (string, error) {
 }
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
-// entry; a URL without a port has http's. It reports false for a host name
-// that is not ASCII: net/http asks for its IDNA form, which no entry names,
-// and case folding could make it read as one that does.
+// entry; a URL without a port has http's. It reports false for a host that
+// no entry can name: a name that is not ASCII, since net/http asks for its
+// IDNA form and case folding could make it read as an entry, and a name that
+// validHostName refuses, such as an address with a trailing dot.
 func urlPair(u *url.URL) (string, bool) {
 	host := u.Hostname()
 	if addr, err := netip.ParseAddr(host); err == nil {
 		host = addr.Unmap().String()
 	} else {
 		var ascii bool
-		if host, ascii = asciiLower(strings.TrimSuffix(host, ".")); !ascii {
+		if host, ascii = asciiLower(strings.TrimSuffix(host, ".")); !ascii || !validHostName(host) {
 			return "", false
 		}
 	}

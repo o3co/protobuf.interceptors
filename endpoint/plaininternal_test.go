@@ -198,6 +198,8 @@ func TestPlainInternal_AcceptsAListedPairAndNoOther(t *testing.T) {
 		"http://policy-verifier:3002",
 		"http://policy-verifier",
 		"http://policy-verifier..:3001",
+		// An address with a trailing dot is a name, and not the listed address.
+		"http://10.0.0.5.:8181",
 		"http://other:3001",
 		// A name that only folds to a listed one: net/http asks for its
 		// IDNA form, another host.

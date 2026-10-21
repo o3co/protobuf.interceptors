@@ -91,9 +91,9 @@ var defaultDialer = &net.Dialer{KeepAlive: 30 * time.Second}
 
 // DialContext connects to address, a host and port, at the first of the
 // host's addresses that answers, trying them in turn within Timeout; while
-// more than one is left to try, an attempt has its share of the time left, as
-// with a net.Dialer. It refuses before connecting at all when the host resolves to
-// no address or to any address that is not private.
+// more than one is left to try, an attempt has its share of the time left,
+// as with a net.Dialer. It refuses before connecting at all when the host
+// resolves to no address or to any address that is not private.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
