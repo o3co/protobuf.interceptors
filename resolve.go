@@ -30,11 +30,9 @@ import (
 // by placeholder name, including those whose placeholder the resource template
 // does not use, so a caller can forward them with WithExtractedFields.
 //
-// Of the interceptors, only connectrpc.PolicyOptionInterceptor forwards the
-// values, and only on unary RPCs. The gRPC unary interceptor calls
-// ResolveResource, which discards them, and on both frameworks a streaming RPC
-// whose policy carries field_mappings is refused before resolution. See
-// README, "Extracted field forwarding".
+// The unary PolicyOptionInterceptors of both frameworks forward the values. On
+// both frameworks a streaming RPC whose policy carries field_mappings is
+// refused before resolution. See README, "Extracted field forwarding".
 //
 // Every "<name>" in the resource template must have a field mapping, or
 // resolution fails. A bytes field resolves to its lowercase hex encoding.

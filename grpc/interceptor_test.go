@@ -249,22 +249,20 @@ func TestChain_PlaceholderValueWithinGrammar_IsResolved(t *testing.T) {
 	}
 }
 
-// TestChain_FieldMappings_ExtractedFieldsAreNotInContext is the gRPC half of the
+// TestChain_FieldMappings_ExtractedFieldsAreInContext is the gRPC half of the
 // contract the README's "Extracted field forwarding" table states: the gRPC
-// unary interceptor resolves with ResolveResource, which drops the extracted
-// values: they are absent from the context the verifier is called with, while
-// the substituted resource carries the mapped value.
+// unary interceptor forwards the extracted values on the context the verifier
+// is called with, and the substituted resource carries the mapped value.
 // TestConnectChain_FieldMappings_StoresExtractedFieldsInContext pins the
-// ConnectRPC half. If this fails because the fields are present, that table is
-// stale.
-func TestChain_FieldMappings_ExtractedFieldsAreNotInContext(t *testing.T) {
-	var fieldsPresent bool
+// ConnectRPC half.
+func TestChain_FieldMappings_ExtractedFieldsAreInContext(t *testing.T) {
+	var fields map[string]string
 	var capturedResource string
 	client, cleanup := startServer(t,
 		policygrpc.PolicyOptionInterceptor(),
 		policygrpc.VerificationInterceptor(endpointtest.Func(
 			func(ctx context.Context, resource, _ string) error {
-				_, fieldsPresent = interceptors.ExtractedFieldsFromContext(ctx)
+				fields, _ = interceptors.ExtractedFieldsFromContext(ctx)
 				capturedResource = resource
 				return nil
 			},
@@ -281,8 +279,29 @@ func TestChain_FieldMappings_ExtractedFieldsAreNotInContext(t *testing.T) {
 	if capturedResource != "resource/abc-123" {
 		t.Errorf("resource = %q, want %q: the value must still reach the template", capturedResource, "resource/abc-123")
 	}
-	if fieldsPresent {
-		t.Error("gRPC unary put extracted fields in context; " +
-			"forwarding is ConnectRPC-only and README \"Extracted field forwarding\" says so")
+	if len(fields) != 1 || fields["id"] != "abc-123" {
+		t.Errorf("extracted fields = %v, want map[id:abc-123]", fields)
+	}
+}
+
+func TestChain_NoFieldMappings_NoExtractedFieldsInContext(t *testing.T) {
+	present := true
+	client, cleanup := startServer(t,
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(endpointtest.Func(
+			func(ctx context.Context, _, _ string) error {
+				_, present = interceptors.ExtractedFieldsFromContext(ctx)
+				return nil
+			},
+		)),
+	)
+	defer cleanup()
+
+	// GetResource declares no field_mappings.
+	if _, err := client.GetResource(bearerCtx("tok"), &testpb.GetResourceRequest{Id: "1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if present {
+		t.Error("extracted fields are on the context of a policy without field_mappings")
 	}
 }

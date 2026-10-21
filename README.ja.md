@@ -130,7 +130,7 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 - **id の構文に合わせて書いた `ResourceParser` を verifier に設定し**、呼び出し側でその構文にエンコードする。これには auth.policy-verifier（o3co エンドポイント）が必要である。
 - **問題の値がリソースに代入されないようにポリシーを組み替える。** リソース文字列で DID を名指しする代わりに、RPC が実際に持つ型を守り（`resource: "subscriptions"`、`action: "read"`）、Bearer トークンからすでに持っているアイデンティティに対してバックエンドに判定させる。verifier、OPA、Cedar はトークンを見られるが、static エンドポイントはリソースとアクションしか照合しないので、この判定はできない。
 
-4 つ目の道 — フィールドマッピングは残し、そのプレースホルダーをリソーステンプレートから外して、値をリクエストコンテキストとして運ぶ — は**移植性が無い**: ConnectRPC と o3co エンドポイントの組み合わせでしか機能しない。頼る前に[抽出フィールドの転送](#抽出フィールドの転送)を読むこと。
+4 つ目の道 — フィールドマッピングは残し、そのプレースホルダーをリソーステンプレートから外して、値をリクエストコンテキストとして運ぶ — は、どちらのフレームワークでも unary RPC で o3co か OPA エンドポイントを使う場合に機能し、Cedar と static エンドポイントでは機能せず、ストリームでも機能しない。頼る前に[抽出フィールドの転送](#抽出フィールドの転送)を読むこと。
 
 代入はテンプレートに対する 1 回の走査である: それ自体が `<some-placeholder>` と綴られた値はデータのまま残り、別のマッピングによって書き換えられることはない。
 
@@ -164,16 +164,25 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithRequirePolicy(
 
 | 経路 | 抽出される | コンテキストに置かれる | 判定に届く |
 |---|---|---|---|
-| ConnectRPC unary | はい | はい | **o3co** エンドポイント経由でのみ |
+| ConnectRPC unary | はい | はい | **o3co** と **OPA** エンドポイント経由で |
 | ConnectRPC streaming | — | — | いいえ — `field_mappings` は `Internal` で拒否 |
-| gRPC unary | はい | **いいえ、破棄される** | **いいえ** |
+| gRPC unary | はい | はい | **o3co** と **OPA** エンドポイント経由で |
 | gRPC streaming | — | — | いいえ — `field_mappings` は `Internal` で拒否 |
 
-`ResolveResourceWithFields` で解決し、その結果を `interceptors.WithExtractedFields` で付けるのは `connectrpc.PolicyOptionInterceptor` だけである。gRPC の unary インターセプターはフィールドを捨てる `ResolveResource` で解決し、両方のストリームインターセプターは `field_mappings` を持つポリシーを何も解決する前に拒否する（[ストリーミング](#ストリーミング)を参照）。そして 4 つのバックエンドのうち、コンテキストを読み出すのは `endpoint.NewO3coEndpoint` だけで、それを `POST /verify` の `context` オブジェクトとして送る — OPA、Cedar、static エンドポイントは見ない。
+unary のポリシーインターセプター `policygrpc.PolicyOptionInterceptor` と `policyconnect.PolicyOptionInterceptor` は、どちらも `ResolveResourceWithFields` で解決し、値が 1 つ以上あれば、プレースホルダー名をキーとして `interceptors.WithExtractedFields` で付ける。両方のストリームインターセプターは、`field_mappings` を持つポリシーを何も解決する前に拒否する（[ストリーミング](#ストリーミング)を参照）。4 つのバックエンドのそれぞれの扱い:
 
-**したがって gRPC unary では、プレースホルダーをリソーステンプレートから外しても、その値が判定に使えるようにはならない — 値が消えるだけである**: 解決はもう値を拒否しないが、verifier はその値なしで判定する。以前より情報の少ない問いであり、拒否よりも悪い。（ポリシーにマッピングを残した gRPC ストリームは引き続き `Internal` で失敗する。[ストリーミング](#ストリーミング)を参照。）バックエンドが対応する上記の対処のいずれかを使うこと。
+| エンドポイント | 値をどうするか |
+|---|---|
+| o3co | `POST /verify` の `context` オブジェクトとして送る。verifier の `RequestContextAttributeCollector` が昇格させるのは運用者が宣言したキーだけで、それ以外のキーは無視される。 |
+| OPA | 文字列のオブジェクト `input.context` として送る。値が無ければ `input` に `context` キーは無い。 |
+| Cedar | 送らない: リクエストのコンテキストは空である。スキーマに対してリクエストを検証する Cedar エージェントは、スキーマが宣言しないコンテキスト属性を拒否するので、送るとそうした構成が動かなくなる。 |
+| static | リソースとアクションだけを照合する。 |
 
-gRPC unary の経路は、ConnectRPC のように値を転送しない。ストリームインターセプターが `field_mappings` を拒否するのは、どちらのフレームワークでも別個の制限である: ポリシーインターセプターはハンドラーがリクエストメッセージを読む前に動き、クライアントストリームや双方向ストリームには単一のリクエストメッセージが無い。
+**値は主張である。** 値は呼び出し元が書くリクエストメッセージから来ており、Bearer トークンと照合されたものではない。ポリシーはそれを呼び出し元の主張として — たとえばトークンのサブジェクトと突き合わせて — 扱い、確定した事実として扱ってはならない。
+
+**o3co では、verifier が受け付ける `context` に上限がある**: `maxContextEntries`（既定 64。すべてのプロパティを数える）と `maxContextValueLength`（既定 1024。任意の文字列の文字数で、キー名を含む）で、超えると `400` が返る。ボディ全体には `maxBodyBytes`（既定 65536 バイト）の上限があり、超えると `413` が返る。3 つとも verifier の設定で決まり、インターセプターはどちらの応答も `Internal` に変換する: RPC は拒否され、値なしで判定されることはない。マッピングの数と、それが運びうる値の長さは verifier の上限に収めること。
+
+ストリームインターセプターが `field_mappings` を拒否するのは、どちらのフレームワークでも同じである: ポリシーインターセプターはハンドラーがリクエストメッセージを読む前に動き、クライアントストリームや双方向ストリームには単一のリクエストメッセージが無い。
 
 [auth.policy-verifier]: https://github.com/o3co/auth.policy-verifier
 
@@ -379,7 +388,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### OPA エンドポイント
 
-`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` — トークンは送られたまま — で問い合わせるので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
+`NewOPAEndpoint(baseURL, policyPath)` は `POST {baseURL}/v1/data/{policyPath}` に、入力 `{"resource", "action", "token"}` と、RPC に抽出された `field_mappings` の値があればそれを `"context"` として問い合わせる（[抽出フィールドの転送](#抽出フィールドの転送)を参照）。トークンは送られたままなので、ポリシーがトークンを検証しなければならない。許可するのは、レスポンスの `result` キー（この綴りの大文字小文字どおり）が JSON の `true` を持つときだけである。`result` が無い（OPA の undefined）、`null`、`false` なら deny、`result` が真偽値でない、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。空の `policyPath` は構築時に拒否される。
 
 | オプション | 効果 |
 |---|---|
@@ -393,7 +402,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 ### Cedar エンドポイント
 
-`NewCedarEndpoint(baseURL, opts...)` は `POST {baseURL}/v1/is_authorized` に、リゾルバーが返した principal、アクション、リソースを、それぞれ Cedar のエンティティ UID（デフォルトのプレフィックスでは `User::"alice"`、`Action::"read"`、`Resource::"posts/1"`）として、空のコンテキストとともに問い合わせる。許可するのは、レスポンスの `decision` キー（この綴りの大文字小文字どおり）が `"Allow"` のときだけである。それ以外の decision は deny、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。`WithCedarPrincipalResolver` が無ければコンストラクターはエラーを返す。
+`NewCedarEndpoint(baseURL, opts...)` は `POST {baseURL}/v1/is_authorized` に、リゾルバーが返した principal、アクション、リソースを、それぞれ Cedar のエンティティ UID（デフォルトのプレフィックスでは `User::"alice"`、`Action::"read"`、`Resource::"posts/1"`）として、空のコンテキストとともに問い合わせる — 抽出された `field_mappings` の値は送らない（[抽出フィールドの転送](#抽出フィールドの転送)を参照）。許可するのは、レスポンスの `decision` キー（この綴りの大文字小文字どおり）が `"Allow"` のときだけである。それ以外の decision は deny、ボディが JSON オブジェクトでない、ボディがサイズ上限を超える、ステータスが `2xx` 以外の場合はエラーである。`WithCedarPrincipalResolver` が無ければコンストラクターはエラーを返す。
 
 | オプション | 効果 |
 |---|---|
@@ -419,7 +428,7 @@ verifier は、不正なサブジェクトトークンにも、拒否した呼�
 
 Bearer トークンとリクエスト ID は `context.Context` で渡され、フレームワーク別の `VerificationInterceptor` が設定する（[Bearer トークンとリクエスト ID](#bearer-トークンとリクエスト-id)を参照）。
 
-インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。抽出された `field_mappings` の値を読むのは o3co エンドポイントだけで、フレームワークがそれをコンテキストに置いていれば `POST /verify` の `context` オブジェクトとして転送する。OPA はリソース、アクション、トークンで、Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
+インターフェースが運ぶのは解決済みのリソースとアクションだけなので、エンドポイントがそれ以外に必要とするものは、自らコンテキストから取り出さなければならない。組み込みのエンドポイントはどれもそこから Bearer トークンを読み、それぞれのやり方で使う: o3co エンドポイントは verifier に送り、OPA エンドポイントは `input.token` として送り、Cedar エンドポイントはそこから principal を解決し、static エンドポイントは存在を要求するだけである。o3co と OPA のエンドポイントは抽出された `field_mappings` の値も読み、それぞれ `POST /verify` の `context` オブジェクト、`input.context` として送る。Cedar は principal、アクション、リソースで判定し、static エンドポイントはリソースとアクションを照合する — [抽出フィールドの転送](#抽出フィールドの転送)を参照。
 
 ## 判定の記録
 
