@@ -15,6 +15,7 @@
 package endpoint
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -148,6 +149,52 @@ func TestOPAVerify_RequestBody_ContainsInputFields(t *testing.T) {
 	defer srv.Close()
 	ep, _ := NewOPAEndpoint(srv.URL, "authz/allow")
 	_ = ep.Verify(ctxWithToken("my-tok"), "posts", "read")
+}
+
+// The extracted field_mappings values on the context reach the policy as
+// input.context.
+func TestOPAVerify_WithExtractedFields_SendsInputContext(t *testing.T) {
+	var input map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]map[string]json.RawMessage
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("request body is not JSON: %v", err)
+		}
+		input = req["input"]
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": true})
+	}))
+	defer srv.Close()
+	ep, _ := NewOPAEndpoint(srv.URL, "authz/allow")
+
+	ctx := interceptors.WithExtractedFields(ctxWithToken("tok"), map[string]string{"subscriber_did": "did:example:abc"})
+	if err := ep.Verify(ctx, "posts", "read"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(input["context"], &got); err != nil {
+		t.Fatalf("input.context = %s, want an object: %v", input["context"], err)
+	}
+	if len(got) != 1 || got["subscriber_did"] != "did:example:abc" {
+		t.Errorf("input.context = %v, want map[subscriber_did:did:example:abc]", got)
+	}
+
+	for name, ctx := range map[string]context.Context{
+		"no fields":    ctxWithToken("tok"),
+		"empty fields": interceptors.WithExtractedFields(ctxWithToken("tok"), map[string]string{}),
+	} {
+		input = nil
+		if err := ep.Verify(ctx, "posts", "read"); err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if _, ok := input["context"]; ok {
+			t.Errorf("%s: input carries a context key: %s", name, input["context"])
+		}
+		if _, ok := input["resource"]; !ok {
+			t.Errorf("%s: input carries no resource; the request was not read", name)
+		}
+	}
 }
 
 // OPA's keys are case-sensitive: a key in another case is not result, and

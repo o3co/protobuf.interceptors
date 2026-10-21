@@ -186,7 +186,10 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
-			// No policy — pass through.
+			// No policy — pass through, unless WithRequirePolicy refuses it.
+			if err := cfg.checkUnannotated(info.FullMethod); err != nil {
+				return toGRPCError(ctx, err)
+			}
 			wrapped := &contextServerStream{ServerStream: ss, ctx: ctx}
 			return handler(srv, wrapped)
 		}
