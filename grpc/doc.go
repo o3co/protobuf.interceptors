@@ -21,8 +21,8 @@
 // and VerificationStreamInterceptor read the bearer token and request ID from
 // the incoming metadata and ask the endpoint. Chain the policy interceptor
 // before the verification interceptor. A method whose descriptor is not
-// registered is refused, and a stream is re-checked on every message it
-// receives.
+// registered is refused, and a stream is re-checked on every message it sends
+// or receives (see WithStreamRecheckInterval).
 //
 // The caller is told only a status code and a fixed message; the endpoint's
 // error is wrapped by the returned status error and handed to the observer
