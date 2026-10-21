@@ -249,9 +249,10 @@ say — and never as established facts.
 
 **On o3co, the verifier bounds the `context` it accepts**: `maxContextEntries`
 (default 64, every property counted) and `maxContextValueLength` (default 1024
-characters in any string, keys included), both set in the verifier's
-configuration. A request beyond either is answered `400`, which the interceptors
-map to `Internal`: the RPC is refused, not decided without the values. Keep the
+characters in any string, keys included), answered `400` when exceeded, and the
+whole body to `maxBodyBytes` (default 65536 bytes), answered `413`. All three
+are set in the verifier's configuration, and the interceptors map either answer
+to `Internal`: the RPC is refused, not decided without the values. Keep the
 number of mappings and the length of the values they can carry within the
 verifier's limits.
 
@@ -566,11 +567,12 @@ invalid. Every other `401` is still an `UnauthenticatedError`.
 with the input `{"resource", "action", "token"}` — the bearer token as sent, so
 the policy must verify it — and `"context"`, the extracted `field_mappings`
 values, when the RPC has any (see
-[Extracted field forwarding](#extracted-field-forwarding)). It allows only when the response's `result` key, in
-exactly that case, holds JSON `true`. An absent `result` (OPA's undefined),
-`null` or `false` is a deny; a `result` that is not a boolean, a body that is not a JSON
-object, one larger than the size bound, and any non-`2xx` status are errors. An
-empty `policyPath` is refused at construction.
+[Extracted field forwarding](#extracted-field-forwarding)). It allows only when
+the response's `result` key, in exactly that case, holds JSON `true`. An absent
+`result` (OPA's undefined), `null` or `false` is a deny; a `result` that is not
+a boolean, a body that is not a JSON object, one larger than the size bound,
+and any non-`2xx` status are errors. An empty `policyPath` is refused at
+construction.
 
 | Option | Effect |
 |---|---|
@@ -589,8 +591,8 @@ with the principal the resolver returned, the action and the resource, each as
 a Cedar entity UID (`User::"alice"`, `Action::"read"`, `Resource::"posts/1"`
 with the default prefixes), and an empty context: extracted `field_mappings`
 values are not sent (see
-[Extracted field forwarding](#extracted-field-forwarding)). It allows only when the
-response's `decision` key, in exactly that case, is `"Allow"`; any other
+[Extracted field forwarding](#extracted-field-forwarding)). It allows only when
+the response's `decision` key, in exactly that case, is `"Allow"`; any other
 decision is a deny, and a body that is not a JSON object, one larger than the
 size bound, and any non-`2xx` status are errors. Without
 `WithCedarPrincipalResolver` the constructor returns an error.
