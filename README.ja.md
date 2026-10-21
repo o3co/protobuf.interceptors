@@ -272,10 +272,10 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | `*interceptors.UnauthenticatedError`（読み取れないクレデンシャルを含む） | `Unauthenticated` | `unauthenticated` |
 | RPC 自身のコンテキストがキャンセルされたときの `context.Canceled` | `Canceled` | `request canceled` |
 | RPC 自身のデッドラインが過ぎたときの `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
-| `interceptors.ErrBackendUnavailable`: バックエンドが今は答えられない — 到達できない、エンドポイント自身のタイムアウト内に答えない、答えが揃う前に接続が切れた、または `429`、`502`、`503`、`504` を返した | `Unavailable` | `authorization backend unavailable` |
-| それ以外すべて — 契約の外で答えたバックエンド（`500`、`3xx`、その他の想定外のステータス、不正なボディ）、プライベートネットワーク検査が拒否したホスト、ディスクリプターの無いメソッド、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `interceptors.ErrBackendUnavailable`: バックエンドが今は答えられない — 名前が解決できない、接続が拒否・リセットされたか答えが揃う前に閉じられた、エンドポイント自身のタイムアウト内に答えない、または `429`、`502`、`503`、`504` を返した | `Unavailable` | `authorization backend unavailable` |
+| それ以外すべて — 契約の外で答えたバックエンド（`500`、`3xx`、その他の想定外のステータス、不正なボディやデコードできないボディ）、証明書やアラートで拒否された TLS ハンドシェイク、`http` を話すバックエンドへの `https`、プライベートネットワーク検査が拒否したホスト、ディスクリプターの無いメソッド、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
-`Unavailable` も `Internal` も拒否であり、ハンドラーは実行されない。`Unavailable` はバックエンドが今は停止しているか過負荷であることを示すので、gRPC のステータスコードの指針や一般的なリトライポリシーが想定するとおり、クライアントはバックオフ付きでリトライしてよい。メッセージごとに再検査するストリームでは、verifier の短い停止はサーバーの故障ではなく、クライアントがリトライできるコードでストリームを終える。`Internal` は設定の誤りか契約違反を示し、リトライでは直らない。unavailable と読むステータスは gRPC と Connect の HTTP 変換表がそう読むものであり、`500` はどちらにも当たらないので `Internal` のままである。RPC 自身のキャンセルやデッドラインはどちらよりも優先する。サービス独自の `VerifierEndpoint` も、同じ失敗について `ErrBackendUnavailable` をラップしてよい。
+`Unavailable` も `Internal` も拒否であり、ハンドラーは実行されない。`Unavailable` はバックエンドが今は停止しているか過負荷であることを示すので、gRPC のステータスコードの指針や一般的なリトライポリシーが想定するとおり、クライアントはバックオフ付きでリトライしてよい。メッセージごとに再検査するストリームでは、verifier の短い停止はサーバーの故障ではなく、クライアントがリトライできるコードでストリームを終える。`Internal` は設定の誤りか契約違反を示し、リトライでは直らない。unavailable と読むステータスは gRPC と Connect の HTTP 変換表がそう読むものであり、`500` はどちらにも当たらないので `Internal` のままである。解決できない名前や拒否された接続は停止と区別できないので、ベース URL の誤りであっても `Unavailable` になる。`With…Transport` で渡したトランスポートのエラーも、同じくその型で読む。RPC 自身のキャンセルやデッドラインはどちらよりも優先する。サービス独自の `VerifierEndpoint` も、同じ失敗について `ErrBackendUnavailable` をラップしてよい。
 
 完全なエラーは、すべての検査について `WithDecisionObserver` のオブザーバーに渡る（[判定の記録](#判定の記録)を参照）。インターセプターが返すエラーもそれに unwrap できるので、これらより外側に置いたインターセプターは `errors.As` / `errors.Is` で取り出せる — オブザーバーが見ないポリシー参照や解決の失敗は、そこでログできる。インターセプターは自らはログを書かない。
 
@@ -312,7 +312,7 @@ verifier, err := endpoint.NewO3coEndpoint(
 
 どの HTTP バックエンドもリダイレクトに追従しない: `3xx` はエラーであり、リクエストとそれに載る Bearer トークンは設定したバックエンドにしか届かない。
 
-呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない: 拒否された接続、切れた接続、`429`、`502`、`503`、`504` と同じく `interceptors.ErrBackendUnavailable` をラップする（[エラー](#エラー)を参照）。
+呼び出し元のコンテキストがキャンセルされるかデッドラインが過ぎると、HTTP エンドポイントのエラーは `ctx.Err()` をラップするので、`errors.Is` で `context.Canceled` または `context.DeadlineExceeded` が見つかる。エンドポイント自身のタイムアウトはバックエンドが答えなかったということであり、どちらもラップしない: 解決できない名前、拒否された接続や切れた接続、`429`、`502`、`503`、`504` と同じく `interceptors.ErrBackendUnavailable` をラップする（[エラー](#エラー)を参照）。
 
 相互 TLS やプライベート CA には、送信に使うトランスポートをエンドポイントに与える — `WithO3coTransport(rt)`、`WithOPATransport(rt)`、`WithCedarTransport(rt)`。たとえば `TLSClientConfig` を設定した `*http.Transport` である。エンドポイントのタイムアウトとリダイレクト不追従は、`*http.Transport` のように、リクエストのコンテキストを尊重し、自らリダイレクトに追従しないトランスポートであれば引き続き適用される。
 

@@ -398,8 +398,8 @@ called, or why a token was refused, so none of its text reaches the caller:
 | `*interceptors.UnauthenticatedError`, including an unreadable credential | `Unauthenticated` | `unauthenticated` |
 | `context.Canceled`, when the RPC's own context was canceled | `Canceled` | `request canceled` |
 | `context.DeadlineExceeded`, when the RPC's own deadline passed | `DeadlineExceeded` | `deadline exceeded` |
-| `interceptors.ErrBackendUnavailable`: the backend could not answer now — it could not be reached, did not answer within the endpoint's own timeout, broke the connection before its answer was whole, or answered `429`, `502`, `503` or `504` | `Unavailable` | `authorization backend unavailable` |
-| anything else — a backend that answered outside its contract (`500`, a `3xx`, another unexpected status, a malformed body), a host the private-network check refused, a method with no descriptor, a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| `interceptors.ErrBackendUnavailable`: the backend could not answer now — its name did not resolve, the connection was refused, reset or closed before the answer was whole, it did not answer within the endpoint's own timeout, or it answered `429`, `502`, `503` or `504` | `Unavailable` | `authorization backend unavailable` |
+| anything else — a backend that answered outside its contract (`500`, a `3xx`, another unexpected status, a malformed body or one that does not decode), a TLS handshake refused over a certificate or an alert, `https` to a backend that speaks `http`, a host the private-network check refused, a method with no descriptor, a placeholder with no mapping, `field_mappings` on a stream, an interceptor chain out of order, `UnconfirmedRevisionError`, `ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
 `Unavailable` and `Internal` are both refusals: the handler does not run.
 `Unavailable` says the backend is down or overloaded for now, so a client may
@@ -409,8 +409,11 @@ outage of the verifier ends the stream with a code a client can retry on, not
 a server fault. `Internal` says
 something is misconfigured or broke a contract, which retrying does not fix.
 The statuses read as unavailable are the ones gRPC's and Connect's HTTP
-mappings read so; a `500` maps to neither and stays `Internal`. The RPC's own
-cancellation or deadline wins over both. A `VerifierEndpoint` of the service's
+mappings read so; a `500` maps to neither and stays `Internal`. A name that
+does not resolve and a refused connection cannot be told from an outage, so
+they are `Unavailable` even when the base URL is wrong. An error from a
+transport given with `With…Transport` is read the same way, by its type. The
+RPC's own cancellation or deadline wins over both. A `VerifierEndpoint` of the service's
 own may wrap `ErrBackendUnavailable` for the same failures.
 
 The full error goes to the `WithDecisionObserver` observer for every check
@@ -500,9 +503,9 @@ the bearer token on it reach only the backend that was configured.
 When the caller's context is cancelled or its deadline passes, an HTTP
 endpoint's error wraps `ctx.Err()`, so `errors.Is` finds `context.Canceled` or
 `context.DeadlineExceeded`. The endpoint's own timeout is the backend failing
-to answer, and wraps neither: like a refused connection, a broken one, or a
-`429`, `502`, `503` or `504`, it wraps `interceptors.ErrBackendUnavailable`
-(see [Errors](#errors)).
+to answer, and wraps neither: like a name that does not resolve, a refused
+or broken connection, or a `429`, `502`, `503` or `504`, it wraps
+`interceptors.ErrBackendUnavailable` (see [Errors](#errors)).
 
 For mutual TLS or a private CA, give the endpoint the transport to send over —
 `WithO3coTransport(rt)`, `WithOPATransport(rt)` or `WithCedarTransport(rt)`,

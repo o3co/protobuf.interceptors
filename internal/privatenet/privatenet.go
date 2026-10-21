@@ -68,11 +68,6 @@ func Contains(addr netip.Addr) bool {
 	return false
 }
 
-// ErrNotPrivate is wrapped by the error DialContext returns when it refuses
-// a host because an address it resolves to is not private: a refusal of
-// this package's, not a failure of the network.
-var ErrNotPrivate = errors.New("not on a private network")
-
 // Resolver looks up the addresses of a host. *net.Resolver is one.
 type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
@@ -134,7 +129,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	}
 	for _, addr := range addrs {
 		if !Contains(addr) {
-			return nil, fmt.Errorf("%s resolves to %s: %w", host, addr, ErrNotPrivate)
+			return nil, fmt.Errorf("%s resolves to %s, which is not on a private network", host, addr)
 		}
 	}
 

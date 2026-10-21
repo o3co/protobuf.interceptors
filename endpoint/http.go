@@ -16,6 +16,7 @@ package endpoint
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -294,20 +295,47 @@ func validHeaderName(name string) bool {
 // requestError reports err, which ended a request to the backend made under
 // ctx before its answer was whole. When ctx itself ended, the error wraps
 // ctx.Err(), so errors.Is finds context.Canceled or context.DeadlineExceeded.
-// Otherwise the backend could not be reached, did not answer within the
-// endpoint's own timeout, or broke the connection, and the error wraps
-// interceptors.ErrBackendUnavailable and no context error — net/http reports
-// the endpoint's own timeout as context.DeadlineExceeded, which must not read
-// as the caller's. A host the private-network check refused is this
-// service's refusal, not the backend's failure, and wraps neither.
+// Otherwise it wraps no context error — net/http reports the endpoint's own
+// timeout as context.DeadlineExceeded, which must not read as the caller's —
+// and wraps interceptors.ErrBackendUnavailable when err is transient.
 func requestError(ctx context.Context, what string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%s: %w", what, ctxErr)
 	}
-	if errors.Is(err, privatenet.ErrNotPrivate) {
-		return fmt.Errorf("%s: %v", what, err)
+	if transient(err) {
+		return fmt.Errorf("%w: %s: %v", interceptors.ErrBackendUnavailable, what, err)
 	}
-	return fmt.Errorf("%w: %s: %v", interceptors.ErrBackendUnavailable, what, err)
+	return fmt.Errorf("%s: %v", what, err)
+}
+
+// transient reports whether err, from sending a request or reading its
+// answer, says the backend could not be reached or did not answer in time: a
+// failed lookup, a connection refused, reset or closed before the answer was
+// whole, or a timeout. A TLS alert, sent or received, a certificate this side
+// refuses, a backend that does not speak the scheme asked, a body that does
+// not decode, and a host the private-network check refused are none of
+// these: retrying does not change them.
+func transient(err error) bool {
+	var (
+		alert   tls.AlertError
+		opErr   *net.OpError
+		dnsErr  *net.DNSError
+		timeout interface{ Timeout() bool }
+	)
+	switch {
+	case errors.As(err, &alert):
+		return false
+	case errors.As(err, &opErr):
+		// crypto/tls reports an alert as an *net.OpError with one of these.
+		return opErr.Op != "remote error" && opErr.Op != "local error"
+	case errors.As(err, &dnsErr):
+		return true
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return true
+	case errors.As(err, &timeout):
+		return timeout.Timeout()
+	}
+	return false
 }
 
 // statusError returns err, which reports a status the endpoint does not take

@@ -26,7 +26,7 @@ import (
 // caller is told only the code and a fixed message for it: an endpoint's
 // error can name the backend, the URL it called, or why a token was refused.
 // Canceled and DeadlineExceeded say that the RPC's own context, ctx, ended,
-// and win over every other cause. Unavailable says the backend could not
+// and win over Unavailable and Internal. Unavailable says the backend could not
 // answer now (interceptors.ErrBackendUnavailable), which a client may retry
 // with backoff; it is still a refusal. Any other failure, an endpoint that
 // was canceled while the RPC was live included, is Internal.

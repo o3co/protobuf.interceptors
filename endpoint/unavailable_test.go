@@ -16,10 +16,16 @@ package endpoint
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"syscall"
 	"testing"
 	"time"
 
@@ -163,12 +169,92 @@ func TestHTTPEndpoints_CallerContextEnded_IsNotUnavailable(t *testing.T) {
 		t.Run(b.name+"/awaiting the answer", func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(ctxWithToken("tok"), 50*time.Millisecond)
 			defer cancel()
-			assertNotUnavailable(t, b.build(t, stall(t, "").URL).Verify(ctx, "r", "a"))
+			err := b.build(t, stall(t, "").URL).Verify(ctx, "r", "a")
+			assertNotUnavailable(t, err)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("got %v, want an error wrapping context.DeadlineExceeded", err)
+			}
 		})
 		t.Run(b.name+"/reading the body", func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(ctxWithToken("tok"), 50*time.Millisecond)
 			defer cancel()
-			assertNotUnavailable(t, b.build(t, stall(t, b.allow[:5]).URL).Verify(ctx, "r", "a"))
+			err := b.build(t, stall(t, b.allow[:5]).URL).Verify(ctx, "r", "a")
+			assertNotUnavailable(t, err)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("got %v, want an error wrapping context.DeadlineExceeded", err)
+			}
 		})
 	}
 }
+
+// A failure that comes from configuration or from what the backend sent, not
+// from reaching it, is not unavailable: retrying does not fix it.
+func TestHTTPEndpoints_DeterministicTransportFailures_AreNotUnavailable(t *testing.T) {
+	for _, b := range httpBackends() {
+		t.Run(b.name+"/a certificate this side does not trust", func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(b.allow))
+			}))
+			t.Cleanup(srv.Close)
+			assertNotUnavailable(t, b.build(t, srv.URL).Verify(ctxWithToken("tok"), "r", "a"))
+		})
+		t.Run(b.name+"/https to a backend that speaks http", func(t *testing.T) {
+			srv := serve(t, http.StatusOK, b.allow)
+			assertNotUnavailable(t, b.build(t, "https://"+srv.Listener.Addr().String()).Verify(ctxWithToken("tok"), "r", "a"))
+		})
+		t.Run(b.name+"/a body that does not decode", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Encoding", "gzip")
+				_, _ = w.Write([]byte("this is not gzip at all, and long enough to read a header from"))
+			}))
+			t.Cleanup(srv.Close)
+			assertNotUnavailable(t, b.build(t, srv.URL).Verify(ctxWithToken("tok"), "r", "a"))
+		})
+	}
+}
+
+// A host whose name does not resolve cannot be told from a resolver that is
+// down: unavailable.
+func TestHTTPEndpoints_LookupFailure_IsUnavailable(t *testing.T) {
+	for _, b := range httpBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			assertUnavailable(t, b.build(t, "https://pdp.invalid").Verify(ctxWithToken("tok"), "r", "a"))
+		})
+	}
+}
+
+func TestTransient(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"a connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, true},
+		{"a connection reset", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}, true},
+		{"a failed lookup", &net.DNSError{Err: "no such host", Name: "pdp", IsNotFound: true}, true},
+		{"a connection closed before the answer", &url.Error{Op: "Post", URL: "u", Err: io.EOF}, true},
+		{"a body cut off", io.ErrUnexpectedEOF, true},
+		{"a timeout", &url.Error{Op: "Post", URL: "u", Err: timeoutError{}}, true},
+		{"a TLS alert the backend sent", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "remote error", Err: tls.AlertError(42)}}, false},
+		{"a TLS alert this side sent", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("tls: bad certificate%.0w", tls.AlertError(42))}, false},
+		{"a certificate this side refuses", &url.Error{Op: "Post", URL: "u", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
+		{"a scheme mismatch", &url.Error{Op: "Post", URL: "u", Err: http.ErrSchemeMismatch}, false},
+		{"something else", errors.New("pdp resolves to 8.8.8.8, which is not on a private network"), false},
+		{"a url.Error that is not a timeout", &url.Error{Op: "Post", URL: "u", Err: errors.New("x")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := transient(tc.err); got != tc.want {
+				t.Errorf("transient(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// timeoutError is an error that reports a timeout, as net/http's are.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
