@@ -63,7 +63,7 @@ The o3co endpoint (`endpoint/o3co.go`, `endpoint/o3co_decision.go`) asks auth.po
 | anything else, `3xx` included (no redirect is followed) | error |
 
 - **A whole envelope** has every key the contract requires of its kind, none `null` where the contract types a value, each of the right type. A body that is not one reports nothing: the decision is `nil`.
-- **Keys are case-sensitive.** A key in another case is one the contract does not define and is ignored like any other unknown key — except `restricts` in another case, which makes the rule group, and so the envelope, not whole. `restricts`, when present, must be `true`. `satisfiedBy` is present exactly on a passing group.
+- **Keys are case-sensitive.** A key in another case is one the contract does not define and is ignored like any other unknown key — except `restricts` in another case, which makes the rule group, and so the envelope, not whole. `restricts`, when present, must be `true`. `satisfiedBy` is present exactly on a passing group. `subject`, when present, must be a non-empty string; it is reported in `Decision.Subject` and decides nothing.
 - **Evaluations**: `status` is required; `completed` and `failed` carry `revision` (a string, or `null` for unknown); `loadedRevision`, `determiningPolicies` and `determiningPoliciesOmitted` are optional and never `null`. A status this library does not know is passed through.
 - **Restricting groups** (`RuleGroup.Restricts`) grant nothing: `Decision.RevisionConfirmed` skips them, and an allow whose groups all restrict is never confirmed.
 - **The request ID** is kept from the inbound request only in the shape the verifier accepts (`request.go`), so the ID sent always joins the verifier's record.

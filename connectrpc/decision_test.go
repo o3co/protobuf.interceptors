@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,7 +51,7 @@ func confirmedDecision() *interceptors.Decision {
 
 func deniedDecision() *interceptors.Decision {
 	return &interceptors.Decision{
-		Code: "cedar_deny", Message: "Denied by Cedar policy", RequestID: "req-1",
+		Code: "cedar_deny", Message: "Denied by Cedar policy", Subject: "user-7f3a", RequestID: "req-1",
 		Groups: []interceptors.RuleGroup{{
 			RuleType: "cedar",
 			Evaluated: []interceptors.RuleOutcome{{
@@ -200,7 +201,7 @@ func TestConnectChain_DecisionDoesNotReachTheCaller(t *testing.T) {
 			if !errors.As(err, &ce) {
 				t.Fatalf("expected *connect.Error, got %T", err)
 			}
-			for _, leak := range []string{"cedar_deny", "Denied by Cedar policy", "20-forbid-secret", "sha256", "req-1"} {
+			for _, leak := range []string{"cedar_deny", "Denied by Cedar policy", "20-forbid-secret", "sha256", "req-1", "user-7f3a"} {
 				if strings.Contains(ce.Message(), leak) {
 					t.Errorf("the caller's error message %q carries %q from the decision", ce.Message(), leak)
 				}
@@ -248,5 +249,43 @@ func TestConnectVerification_Streaming_DecisionReachesTheHandlerAndTheObserver(t
 	}
 	if events := rec.all(); len(events) != 1 || events[0].Decision != want {
 		t.Errorf("observer events = %+v", events)
+	}
+}
+
+// verifierAllowing serves an o3co verifier that allows every request and
+// names subject as the subject it authenticated.
+func verifierAllowing(t *testing.T, subject string) endpoint.VerifierEndpoint {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"decision": "allow", "subject": "` + subject + `", "resource": "r", "action": "a", "reason": {"groups": []}}`))
+	}))
+	t.Cleanup(srv.Close)
+	ep, err := endpoint.NewO3coEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ep
+}
+
+// The subject the verifier authenticated reaches the handler and the
+// observer with the rest of the decision.
+func TestConnectChain_O3coSubject_ReachesTheHandlerAndTheObserver(t *testing.T) {
+	impl := &decisionHandler{}
+	rec := &recorder{}
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(verifierAllowing(t, "user-7f3a"), policyconnect.WithDecisionObserver(rec.observe)),
+	)
+	defer cleanup()
+
+	if err := getResource(t, client); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d := impl.seen.Load(); d == nil || d.Subject != "user-7f3a" {
+		t.Errorf("the handler saw %+v, want Subject %q", d, "user-7f3a")
+	}
+	if events := rec.all(); len(events) != 1 || events[0].Decision == nil || events[0].Decision.Subject != "user-7f3a" {
+		t.Errorf("the observer saw %+v, want one event with Subject %q", events, "user-7f3a")
 	}
 }
