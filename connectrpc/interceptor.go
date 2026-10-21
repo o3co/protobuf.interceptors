@@ -25,6 +25,7 @@ import (
 	"connectrpc.com/connect"
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
+	"github.com/o3co/protobuf.interceptors/internal/methodset"
 	"github.com/o3co/protobuf.interceptors/internal/streamcheck"
 	pb "github.com/o3co/protobuf.interceptors/schema"
 	"google.golang.org/protobuf/proto"
@@ -190,12 +191,50 @@ func WithStreamRecheckInterval(d time.Duration) Option {
 	}
 }
 
+// WithRequirePolicy has VerificationInterceptor refuse an RPC whose method
+// declares no policy option, except a procedure exempt names, instead of
+// letting it through unchecked. The refusal is Internal, before the handler
+// runs, and wraps interceptors.ErrNoPolicy; no backend is asked and the
+// observer is not called. A method with a policy is checked as before.
+//
+// An exempt entry is a procedure, "/package.Service/Method", or a service,
+// "/package.Service/", which exempts each of its procedures. Nothing is exempt
+// unless listed. An exemption admits only a method with no policy; a method
+// with a policy is always checked. It does not admit a handler built without
+// connect.WithSchema, such as those of connectrpc.com/grpchealth and
+// connectrpc.com/grpcreflect: PolicyOptionInterceptor refuses it before this
+// option applies, so mount those handlers without these interceptors. Later
+// calls add to the exemptions of earlier ones.
+//
+// Panics if an entry is not of either form.
+func WithRequirePolicy(exempt ...string) Option {
+	set, err := methodset.Parse(exempt)
+	if err != nil {
+		panic("WithRequirePolicy: " + err.Error())
+	}
+	return func(v *verificationInterceptor) {
+		v.requirePolicy = true
+		v.exempt = v.exempt.Union(set)
+	}
+}
+
 // verificationInterceptor implements connect.Interceptor for VerificationInterceptor.
 type verificationInterceptor struct {
 	verifier        endpoint.VerifierEndpoint
 	observer        interceptors.DecisionObserver
 	recheckInterval time.Duration
 	now             func() time.Time
+	requirePolicy   bool
+	exempt          methodset.Set
+}
+
+// checkUnannotated decides an RPC to procedure, which declares no policy: an
+// error when a policy is required and the procedure is not exempt.
+func (v *verificationInterceptor) checkUnannotated(procedure string) error {
+	if !v.requirePolicy || v.exempt.Contains(procedure) {
+		return nil
+	}
+	return fmt.Errorf("procedure %s: %w", procedure, interceptors.ErrNoPolicy)
 }
 
 // VerificationInterceptor returns a ConnectRPC Interceptor that reads Policy
@@ -257,9 +296,13 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			return nil, toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
-		// No policy in context means the method has no policy — pass through.
+		// No policy in context means the method declares none: it passes
+		// through unchecked, unless WithRequirePolicy refuses it.
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
+			if err := v.checkUnannotated(req.Spec().Procedure); err != nil {
+				return nil, toConnectError(ctx, err)
+			}
 			return next(ctx, req)
 		}
 
@@ -286,9 +329,13 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return toConnectError(ctx, errors.New("PolicyOptionInterceptor must run before VerificationInterceptor"))
 		}
 
-		// No policy in context means the method has no policy — pass through.
+		// No policy in context means the method declares none: it passes
+		// through unchecked, unless WithRequirePolicy refuses it.
 		policyData, ok := interceptors.PolicyFromContext(ctx)
 		if !ok {
+			if err := v.checkUnannotated(conn.Spec().Procedure); err != nil {
+				return toConnectError(ctx, err)
+			}
 			return next(ctx, conn)
 		}
 
