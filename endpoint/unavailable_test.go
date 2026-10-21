@@ -16,6 +16,9 @@ package endpoint
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -199,6 +202,9 @@ func TestHTTPEndpoints_DeterministicTransportFailures_AreNotUnavailable(t *testi
 			t.Cleanup(srv.Close)
 			assertNotUnavailable(t, b.build(t, srv.URL).Verify(ctxWithToken("tok"), "r", "a"))
 		})
+		t.Run(b.name+"/a certificate that does not parse", func(t *testing.T) {
+			assertNotUnavailable(t, b.build(t, "https://"+malformedCertificateServer(t)).Verify(ctxWithToken("tok"), "r", "a"))
+		})
 		t.Run(b.name+"/https to a backend that speaks http", func(t *testing.T) {
 			srv := serve(t, http.StatusOK, b.allow)
 			assertNotUnavailable(t, b.build(t, "https://"+srv.Listener.Addr().String()).Verify(ctxWithToken("tok"), "r", "a"))
@@ -264,6 +270,7 @@ func TestTransient(t *testing.T) {
 		{"a TLS alert this side sent", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("tls: bad certificate%.0w", tls.AlertError(42))}, false},
 		{"a certificate this side refuses", &url.Error{Op: "Post", URL: "u", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
 		{"a backend that does not speak TLS", &url.Error{Op: "Post", URL: "u", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}, false},
+		{"crypto/tls refusing the handshake", &url.Error{Op: "Post", URL: "u", Err: errors.New("tls: failed to parse certificate from server: x509: malformed certificate")}, false},
 		{"a scheme mismatch", &url.Error{Op: "Post", URL: "u", Err: http.ErrSchemeMismatch}, false},
 		{"an address no connection can have", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.AddrError{Err: "invalid port", Addr: "65536"}}}, false},
 		{"a host the private-network check refused", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("pdp resolves to 8.8.8.8: %w", privatenet.ErrNotPrivate)}, false},
@@ -283,3 +290,32 @@ type timeoutError struct{}
 func (timeoutError) Error() string   { return "timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
+
+// malformedCertificateServer serves TLS with a certificate that is not one,
+// and returns its address. crypto/tls refuses it with an error of its own
+// that is neither an alert nor a verification error.
+func malformedCertificateServer(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte("not a certificate")}, PrivateKey: key}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.(*tls.Conn).Handshake()
+			_ = conn.Close()
+		}
+	}()
+	return lis.Addr().String()
+}

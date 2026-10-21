@@ -313,8 +313,9 @@ func requestError(ctx context.Context, what string, err error) error {
 // answer now: a failed lookup, a connection refused, reset or closed before
 // the answer was whole, a timeout — any failure but those that come from
 // configuration or from what was sent, which retrying does not change. Those
-// are a TLS alert, sent or received; a certificate this side refuses; a
-// backend that does not speak TLS, or speaks HTTP to https; an address no
+// are a TLS alert, sent or received; a certificate this side refuses; any
+// other handshake crypto/tls itself refuses (see tlsRefusal); a backend that
+// does not speak TLS, or speaks HTTP to https; an address no
 // connection can have; and a host the private-network check refused. A
 // failure this library cannot name, net/http's HTTP/2 errors among them, is
 // the backend's, as grpc-go and connect-go read a transport's failures. No
@@ -331,13 +332,28 @@ func transient(err error) bool {
 	switch {
 	case errors.As(err, &alert), errors.As(err, &certErr), errors.As(err, &recordErr),
 		errors.Is(err, http.ErrSchemeMismatch), errors.As(err, &addrErr),
-		errors.Is(err, privatenet.ErrNotPrivate):
+		errors.Is(err, privatenet.ErrNotPrivate), tlsRefusal(err):
 		return false
 	case errors.As(err, &opErr):
 		// crypto/tls reports an alert as an *net.OpError with one of these.
 		return opErr.Op != "remote error" && opErr.Op != "local error"
 	}
 	return true
+}
+
+// tlsRefusal reports whether err wraps an error of crypto/tls's own, which
+// it spells with the prefix "tls: ": a handshake it refused over what the
+// backend sent, such as a certificate that does not parse, which it reports
+// as neither an alert nor a verification error. A network failure during the
+// handshake is an *net.OpError or io.EOF, and the handshake timeout is
+// net/http's; neither carries the prefix.
+func tlsRefusal(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if strings.HasPrefix(err.Error(), "tls: ") {
+			return true
+		}
+	}
+	return false
 }
 
 // noContentCoding asks for the answer without a content coding. net/http

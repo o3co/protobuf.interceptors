@@ -27,8 +27,8 @@ import "errors"
 // The framework interceptors tell the RPC caller Unavailable with the fixed
 // message "authorization backend unavailable", which a client may retry with
 // backoff. A backend that answers outside its contract, or a failure that
-// retrying does not change — a TLS handshake refused over a certificate or an
-// alert, a body that does not decode — is not unavailable: that is Internal.
+// retrying does not change — a TLS handshake refused, an address no
+// connection can have — is not unavailable: that is Internal.
 var ErrBackendUnavailable = errors.New("authorization backend unavailable")
 
 // DeniedError indicates that the authorization check denied the request.

@@ -273,7 +273,7 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | RPC 自身のコンテキストがキャンセルされたときの `context.Canceled` | `Canceled` | `request canceled` |
 | RPC 自身のデッドラインが過ぎたときの `context.DeadlineExceeded` | `DeadlineExceeded` | `deadline exceeded` |
 | `interceptors.ErrBackendUnavailable`: バックエンドが今は答えられない — 名前が解決できない、接続が拒否・リセットされたか答えが揃う前に閉じられた、エンドポイント自身のタイムアウト内に答えない、または `429`、`502`、`503`、`504` を返した | `Unavailable` | `authorization backend unavailable` |
-| それ以外すべて — 契約の外で答えたバックエンド（`500`、`3xx`、その他の想定外のステータス、不正なボディ）、証明書やアラートで拒否された TLS ハンドシェイク、TLS を話さないバックエンドへの `https`、接続できないアドレス（不正なポート）、プライベートネットワーク検査が拒否したホスト、ディスクリプターの無いメソッド、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
+| それ以外すべて — 契約の外で答えたバックエンド（`500`、`3xx`、その他の想定外のステータス、不正なボディ）、拒否された TLS ハンドシェイク（信頼できない・パースできない証明書、アラート）、TLS を話さないバックエンドへの `https`、接続できないアドレス（不正なポート）、プライベートネットワーク検査が拒否したホスト、ディスクリプターの無いメソッド、マッピングの無いプレースホルダー、ストリームの `field_mappings`、順序の誤ったインターセプターチェーン、`UnconfirmedRevisionError`、`ErrCallerUnauthenticated` | `Internal` | `authorization check failed` |
 
 `Unavailable` も `Internal` も拒否であり、ハンドラーは実行されない。`Unavailable` はバックエンドが今は停止しているか過負荷であることを示すので、gRPC のステータスコードの指針や一般的なリトライポリシーが想定するとおり、クライアントはバックオフ付きでリトライしてよい。メッセージごとに再検査するストリームでは、verifier の短い停止はサーバーの故障ではなく、クライアントがリトライできるコードでストリームを終える。`Internal` は設定の誤りか契約違反を示し、リトライでは直らない。unavailable と読むステータスは gRPC と Connect の HTTP 変換表がそう読むものであり、`500` はどちらにも当たらないので `Internal` のままである。解決できない名前や拒否された接続は停止と区別できないので、ベース URL の誤りであっても `Unavailable` になる。このライブラリが名指せないトランスポートの失敗も、grpc-go や connect-go と同じく `Unavailable` である。`With…Transport` で渡したトランスポートのエラーも、同じくその型で読む。RPC 自身のキャンセルやデッドラインはどちらよりも優先する。サービス独自の `VerifierEndpoint` も、同じ失敗について `ErrBackendUnavailable` をラップしてよい。
 
