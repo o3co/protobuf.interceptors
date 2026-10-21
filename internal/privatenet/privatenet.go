@@ -16,9 +16,10 @@
 // connects only to those.
 //
 // The private networks are 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12,
-// 192.168.0.0/16 and fc00::/7. The cloud metadata addresses inside them are
-// not private. An IPv4 address mapped into IPv6 is judged as the IPv4 address
-// a connection reaches; no other IPv6 form that carries an IPv4 address is.
+// 192.168.0.0/16 and fc00::/7. The cloud metadata and credential addresses
+// inside them are not private. An IPv4 address mapped into IPv6 is judged as
+// the IPv4 address a connection reaches; no other IPv6 form that carries an
+// IPv4 address is.
 package privatenet
 
 import (
@@ -39,17 +40,22 @@ var privateRanges = []netip.Prefix{
 	netip.MustParsePrefix("fc00::/7"),
 }
 
-// metadataAddresses are the cloud metadata services that sit inside
-// privateRanges: Alibaba Cloud's, AWS's over IPv6 and Google Cloud's over
-// IPv6. The others sit in link-local, which is not private.
+// metadataAddresses are the cloud metadata and credential services that sit
+// inside privateRanges, as each cloud documents them: Alibaba Cloud's
+// instance metadata; over IPv6, AWS's instance metadata and its EKS Pod
+// Identity Agent, Google Cloud's metadata server, and Akamai Cloud's
+// (Linode's) metadata service. The others sit in link-local, which is not
+// private.
 var metadataAddresses = []netip.Addr{
 	netip.MustParseAddr("100.100.100.200"),
 	netip.MustParseAddr("fd00:ec2::254"),
+	netip.MustParseAddr("fd00:ec2::23"),
 	netip.MustParseAddr("fd20:ce::254"),
+	netip.MustParseAddr("fd00:a9fe:a9fe::1"),
 }
 
 // Contains reports whether addr is on a private network and is not a cloud
-// metadata address. A zoned address is not, an IPv4-mapped one included:
+// metadata or credential address. A zoned address is not, an IPv4-mapped one included:
 // the zone names a link, and unmapping drops it, which would reach another
 // address than the one written.
 func Contains(addr netip.Addr) bool {

@@ -217,6 +217,29 @@ func TestWireContract_EveryRuleGroupKeyDecodes(t *testing.T) {
 	}
 }
 
+// An allow carrying every key the contract allows decodes, and subject, one
+// of them, is the subject the verifier authenticated.
+func TestWireContract_DecisionSubjectDecodes(t *testing.T) {
+	c := wirecontract.Load(t)
+	if !slices.Contains(c.Decision.Optional, "subject") {
+		t.Fatalf("the wire contract no longer lists subject on a decision: %v", c.Decision.Optional)
+	}
+	keys := append(append([]string{}, c.Decision.Required...), c.Decision.Optional...)
+	decision := fill(t, "an allow", keys, map[string]any{
+		"resource": "r", "action": "a", "decision": "allow", "reason": map[string]any{"groups": []any{}},
+		"subject": "user-7f3a",
+	})
+
+	e := newTestEndpoint(t, serve(t, c.Status["allow"], mustJSON(t, decision)).URL)
+	d, err := e.VerifyDecision(ctxWithToken("tok"), "r", "a")
+	if err != nil || d == nil {
+		t.Fatalf("VerifyDecision = (%+v, %v)", d, err)
+	}
+	if d.Subject != "user-7f3a" {
+		t.Errorf("Subject = %q, want %q", d.Subject, "user-7f3a")
+	}
+}
+
 func TestWireContract_DenyCarriesItsCode(t *testing.T) {
 	c := wirecontract.Load(t)
 	values := map[string]any{

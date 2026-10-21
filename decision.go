@@ -21,9 +21,9 @@ import (
 )
 
 // Decision is what an authorization backend reported behind one verdict: the
-// deny code and message, and the reason — every rule group it evaluated, how
-// each rule came out, and, where a rule reported one, the evaluation behind
-// that answer.
+// subject it was about, the deny code and message, and the reason — every
+// rule group it evaluated, how each rule came out, and, where a rule reported
+// one, the evaluation behind that answer.
 //
 // It is for the service, never for the RPC caller. Policy revisions and
 // evaluation statuses say when a policy set changed and whether a denial was
@@ -43,6 +43,9 @@ type Decision struct {
 	// evaluation order. A deny made without a policy evaluation — a collector
 	// timeout, or no applicable rule — has none.
 	Groups []RuleGroup
+	// Subject is the subject the backend authenticated, empty when it
+	// reported none. It is reported only: no verdict rests on it.
+	Subject string
 	// RequestID is the request ID sent with the verify request, empty when
 	// none was. The backend's own record of the decision carries the same ID,
 	// so the service's record joins it on this.

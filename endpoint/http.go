@@ -39,18 +39,27 @@ type reachConfig struct {
 	// plainInternal holds the listed host:port pairs, each as
 	// plainInternalPair spells it.
 	plainInternal map[string]struct{}
-	transport     http.RoundTripper
+	// refusedEntries holds why each entry plainInternalPair refused was
+	// refused; the constructor returns them.
+	refusedEntries []error
+	transport      http.RoundTripper
 	// privateDialer resolves and connects for a listed pair. Its zero value
 	// uses the system resolver and a net.Dialer.
 	privateDialer privatenet.Dialer
 }
 
-// addPlainInternal lists pairs, each already spelled by plainInternalPair.
-func (r *reachConfig) addPlainInternal(pairs []string) {
-	if r.plainInternal == nil {
-		r.plainInternal = make(map[string]struct{}, len(pairs))
-	}
-	for _, pair := range pairs {
+// addPlainInternal lists entries, each spelled by plainInternalPair, and
+// records why each one it refuses was refused.
+func (r *reachConfig) addPlainInternal(entries []string) {
+	for _, entry := range entries {
+		pair, err := plainInternalPair(entry)
+		if err != nil {
+			r.refusedEntries = append(r.refusedEntries, err)
+			continue
+		}
+		if r.plainInternal == nil {
+			r.plainInternal = make(map[string]struct{})
+		}
 		r.plainInternal[pair] = struct{}{}
 	}
 }
@@ -58,6 +67,8 @@ func (r *reachConfig) addPlainInternal(pairs []string) {
 // client parses raw, the URL an endpoint asks its backend at, and returns it
 // with the client that asks it. kind names the endpoint's options:
 // With{kind}AllowInsecure, With{kind}AllowPlainInternal, With{kind}Transport.
+// It returns an error naming every entry With{kind}AllowPlainInternal
+// refused, whatever raw is.
 //
 // Every request carries the subject's bearer token or what was resolved from
 // it, so plaintext is refused unless the host is loopback, the host and port
@@ -67,6 +78,9 @@ func (r *reachConfig) addPlainInternal(pairs []string) {
 // no proxy. That holds under With{kind}AllowInsecure too, and a listed pair
 // is refused over a caller's transport, which the check would not run in.
 func (r *reachConfig) client(raw string, timeout time.Duration, kind string) (*url.URL, *http.Client, error) {
+	if len(r.refusedEntries) > 0 {
+		return nil, nil, fmt.Errorf("With%sAllowPlainInternal: %w", kind, errors.Join(r.refusedEntries...))
+	}
 	u, err := parseBaseURL(raw)
 	if err != nil {
 		return nil, nil, err
@@ -124,7 +138,12 @@ func parseBaseURL(raw string) (*url.URL, error) {
 // a host and port, whose port is not a decimal from 1 to 65535 without a
 // leading zero, whose name is not a host name (see validHostName), or whose
 // address is not on a private network: such an entry is never reached.
+// An entry that holds a user, a path, a query or a fragment is a URL given in
+// place of a host and port, and is named only as redactedEntry spells it.
 func plainInternalPair(entry string) (string, error) {
+	if strings.ContainsAny(entry, "@/?#") {
+		return "", fmt.Errorf("plain-internal entry %q is not a host and port: it is a URL or names a user", redactedEntry(entry))
+	}
 	host, port, err := net.SplitHostPort(entry)
 	if err != nil {
 		return "", fmt.Errorf("plain-internal entry %q is not a host and port: %w", entry, err)
@@ -143,6 +162,49 @@ func plainInternalPair(entry string) (string, error) {
 		return "", fmt.Errorf("plain-internal entry %q: the host is neither an address nor a host name", entry)
 	}
 	return net.JoinHostPort(name, port), nil
+}
+
+// redactedEntry returns entry with what can carry a credential replaced by
+// "…": a user and password before an '@' in the authority, and the path,
+// query and fragment after it. A scheme is kept only at the start, where a
+// URL puts it. An '@' after the authority makes the entry ambiguous — a
+// password can hold the '/' that seems to end the authority — and the entry
+// is replaced whole.
+func redactedEntry(entry string) string {
+	var scheme string
+	rest := entry
+	if i := strings.Index(rest, "://"); i > 0 && validScheme(rest[:i]) {
+		scheme, rest = rest[:i+3], rest[i+3:]
+	}
+	authority, after := rest, ""
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority, after = rest[:i], rest[i:]
+	}
+	if strings.Contains(after, "@") {
+		return "…"
+	}
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = "…@" + authority[i+1:]
+	}
+	if after != "" {
+		authority += "…"
+	}
+	return scheme + authority
+}
+
+// validScheme reports whether s is a URL scheme: a letter, then letters,
+// digits, '+', '-' and '.' (RFC 3986 §3.1).
+func validScheme(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // urlPair returns u's host and port spelled as plainInternalPair spells an
@@ -231,15 +293,21 @@ func validHostName(name string) bool {
 // privateTransport returns the transport a listed pair is reached over: it
 // connects through d, and uses no proxy, since a proxy would carry the
 // request on in plaintext and resolve the host itself. Each endpoint has its
-// own, and so its own pool of idle connections.
+// own, and so its own pool of idle connections; it reaches one host and port,
+// so the whole pool is for that host.
 func privateTransport(d *privatenet.Dialer) *http.Transport {
 	return &http.Transport{
 		DialContext:           d.DialContext,
-		MaxIdleConns:          100,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConns,
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
 }
+
+// maxIdleConns bounds a private transport's idle connections: the total
+// http.DefaultTransport keeps, and here the bound for its one host too.
+const maxIdleConns = 100
 
 // isLoopback reports whether host is localhost, in any case, or a literal
 // address in 127.0.0.0/8 or ::1. localhost is taken by name, and resolves
@@ -436,18 +504,4 @@ func newHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Cli
 			return http.ErrUseLastResponse
 		},
 	}
-}
-
-// mustBePlainInternalPairs returns entries each spelled by plainInternalPair,
-// and panics on the first it refuses.
-func mustBePlainInternalPairs(entries []string) []string {
-	pairs := make([]string, len(entries))
-	for i, entry := range entries {
-		pair, err := plainInternalPair(entry)
-		if err != nil {
-			panic(err.Error())
-		}
-		pairs[i] = pair
-	}
-	return pairs
 }

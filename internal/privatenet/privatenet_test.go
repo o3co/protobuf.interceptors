@@ -47,7 +47,8 @@ func TestContains(t *testing.T) {
 		// carry one are not reached at it.
 		"::10.0.0.1", "64:ff9b::a00:1", "2002:a00:1::",
 		// Cloud metadata addresses inside the private ranges.
-		"100.100.100.200", "::ffff:100.100.100.200", "fd00:ec2::254", "fd20:ce::254",
+		"100.100.100.200", "::ffff:100.100.100.200", "fd00:ec2::254", "fd00:ec2::23",
+		"fd20:ce::254", "fd00:a9fe:a9fe::1",
 		// A zoned address is never private, mapped or not: the zone names a
 		// link, and dropping it would reach another address.
 		"fd00::1%eth0", "::ffff:10.0.0.5%eth0", "::ffff:192.168.1.1%0",

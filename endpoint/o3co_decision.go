@@ -46,6 +46,9 @@ type wireDecision struct {
 	Decision string
 	Code     string
 	Message  string
+	// Subject is the subject the verifier authenticated, empty when it sent
+	// none.
+	Subject string
 	// Groups are the reason's rule groups, nil in an error envelope.
 	Groups []interceptors.RuleGroup
 }
@@ -139,6 +142,14 @@ func readDecision(obj map[string]any) (*wireDecision, bool) {
 		}
 	default:
 		return nil, false
+	}
+	// subject is optional and, when sent, a non-empty string: the verifier
+	// omits it for a token without one rather than send null or "".
+	if subject, has := obj["subject"]; has {
+		var ok bool
+		if w.Subject, ok = subject.(string); !ok || w.Subject == "" {
+			return nil, false
+		}
 	}
 	reason, ok := obj["reason"].(map[string]any)
 	if !ok {
@@ -304,5 +315,5 @@ func (w *wireDecision) toDecision(requestID string) *interceptors.Decision {
 	if w == nil {
 		return nil
 	}
-	return &interceptors.Decision{Code: w.Code, Message: w.Message, Groups: w.Groups, RequestID: requestID}
+	return &interceptors.Decision{Code: w.Code, Message: w.Message, Subject: w.Subject, Groups: w.Groups, RequestID: requestID}
 }
