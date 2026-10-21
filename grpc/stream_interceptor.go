@@ -172,6 +172,11 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			return handler(srv, wrapped)
 		}
 
+		// Copied once: the policy on the context is shared with the handler and
+		// inner interceptors, and every check of the stream must ask about the
+		// target it opened for.
+		resource, action := policyData.Resource, policyData.Action
+
 		// Authorize before the handler runs, as the ConnectRPC streaming
 		// interceptor does: a handler may act before it sends or receives any
 		// message, or never do either, so checks made only per message would
@@ -181,7 +186,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		var decision *interceptors.Decision
 		err := gate.Check(func() error {
 			var err error
-			decision, err = cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
+			decision, err = cfg.verify(ctx, verifier, resource, action, credErr)
 			return err
 		})
 		if err != nil {
@@ -194,7 +199,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			ctx:          hctx,
 			gate:         gate,
 			check: func() error {
-				if _, err := cfg.verify(hctx, verifier, policyData.Resource, policyData.Action, nil); err != nil {
+				if _, err := cfg.verify(hctx, verifier, resource, action, nil); err != nil {
 					return toGRPCError(hctx, err)
 				}
 				return nil

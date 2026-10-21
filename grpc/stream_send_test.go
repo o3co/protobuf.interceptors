@@ -352,3 +352,32 @@ func TestStreamChain_RevokedBeforeTheResponse_ResponseIsNotSent(t *testing.T) {
 		t.Errorf("handler received %q, want the one message", got)
 	}
 }
+
+// A stream's resource and action are fixed when it opens: a handler that
+// changes the policy on its context does not change what is re-checked.
+func TestVerificationStreamInterceptor_Recheck_UsesThePolicyTheStreamOpenedWith(t *testing.T) {
+	var checked [][2]string
+	interceptor := policygrpc.VerificationStreamInterceptor(endpointtest.Func(
+		func(_ context.Context, resource, action string) error {
+			checked = append(checked, [2]string{resource, action})
+			return nil
+		},
+	))
+	stream := &fakeServerStream{ctx: policyStreamCtx()}
+
+	err := interceptor(nil, stream, streamInfo(), func(_ any, ss grpc.ServerStream) error {
+		p, _ := interceptors.PolicyFromContext(ss.Context())
+		p.Resource, p.Action = "another-resource", "delete"
+		if err := ss.SendMsg("out"); err != nil {
+			return err
+		}
+		return ss.RecvMsg(new(string))
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := [][2]string{{"resource", "read"}, {"resource", "read"}, {"resource", "read"}}
+	if !slices.Equal(checked, want) {
+		t.Errorf("checked %v, want %v", checked, want)
+	}
+}

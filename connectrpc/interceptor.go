@@ -292,11 +292,16 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			return next(ctx, conn)
 		}
 
+		// Copied once: the policy on the context is shared with the handler and
+		// inner interceptors, and every check of the stream must ask about the
+		// target it opened for.
+		resource, action := policyData.Resource, policyData.Action
+
 		// The opening check is the gate's first, so an interval runs from it.
 		gate := streamcheck.New(v.recheckInterval, v.now)
 		err := gate.Check(func() error {
 			var err error
-			ctx, err = v.verify(ctx, policyData.Resource, policyData.Action, credErr)
+			ctx, err = v.verify(ctx, resource, action, credErr)
 			return err
 		})
 		if err != nil {
@@ -307,7 +312,7 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			StreamingHandlerConn: conn,
 			gate:                 gate,
 			check: func() error {
-				if _, err := v.verify(ctx, policyData.Resource, policyData.Action, nil); err != nil {
+				if _, err := v.verify(ctx, resource, action, nil); err != nil {
 					return toConnectError(ctx, err)
 				}
 				return nil

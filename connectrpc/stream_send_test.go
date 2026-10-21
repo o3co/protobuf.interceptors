@@ -318,3 +318,30 @@ func TestConnectStreamChain_RevokedBeforeTheResponse_ResponseIsNotSent(t *testin
 		t.Errorf("handler received %q, want the one message", got)
 	}
 }
+
+// A stream's resource and action are fixed when it opens: a handler that
+// changes the policy on its context does not change what is re-checked.
+func TestConnectVerification_Recheck_UsesThePolicyTheStreamOpenedWith(t *testing.T) {
+	var checked [][2]string
+	handler := policyconnect.VerificationInterceptor(endpointtest.Func(
+		func(_ context.Context, resource, action string) error {
+			checked = append(checked, [2]string{resource, action})
+			return nil
+		},
+	)).WrapStreamingHandler(func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		p, _ := interceptors.PolicyFromContext(ctx)
+		p.Resource, p.Action = "another-resource", "delete"
+		if err := conn.Send("out"); err != nil {
+			return err
+		}
+		return conn.Receive(new(string))
+	})
+
+	if err := handler(policyStreamCtx(), &sendingConn{fakeStreamingConn: fakeStreamingConn{header: http.Header{}}}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := [][2]string{{"resource", "write"}, {"resource", "write"}, {"resource", "write"}}
+	if !slices.Equal(checked, want) {
+		t.Errorf("checked %v, want %v", checked, want)
+	}
+}
