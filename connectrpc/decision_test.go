@@ -214,11 +214,14 @@ func TestConnectChain_DecisionDoesNotReachTheCaller(t *testing.T) {
 type fakeStreamingConn struct {
 	connect.StreamingHandlerConn
 	header http.Header
+	spec   connect.Spec
 	// recv, when set, is what the transport does on Receive.
 	recv func(msg any) error
 }
 
 func (c *fakeStreamingConn) RequestHeader() http.Header { return c.header }
+
+func (c *fakeStreamingConn) Spec() connect.Spec { return c.spec }
 
 func (c *fakeStreamingConn) Receive(msg any) error {
 	if c.recv != nil {

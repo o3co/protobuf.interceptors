@@ -448,6 +448,8 @@ if d, ok := interceptors.DecisionFromContext(ctx); ok {
 
 ```go
 observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
+    // ev.Procedure ("/pkg.Svc/Method"); ev.Phase (CheckOpen, CheckSend,
+    // CheckReceive); ev.Duration (the endpoint call, 0 when none was made);
     // ev.Resource, ev.Action; ev.Decision (nil when nothing was reported);
     // ev.Err (nil when allowed; errors.As finds *interceptors.DeniedError)
 }
@@ -455,7 +457,11 @@ policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(obs
 policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserver(observe))
 ```
 
-ストリームの再検査は、それを行った送信または受信の中でオブザーバーを呼び、その送信または受信はオブザーバーが戻るのを待つ。ストリームのクライアントが去った後は、組み込みエンドポイントでは次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。
+- **`Procedure`** は RPC の完全なメソッド名で、両フレームワークで同じ形である。
+- **`Phase`** は、ハンドラーが動く前の検査 — unary RPC の唯一の検査、またはストリームを開く検査 — なら `CheckOpen`、ストリームの送信前・受信後の再検査なら `CheckSend` または `CheckReceive` である。`CheckOpen` 以外はすべて再検査である。
+- **`Duration`** はエンドポイントの呼び出しにかかった時間である。インターセプターが呼び出しをしなかったとき — インターセプター自身が拒否した不正な形のクレデンシャル（[Bearer トークンとリクエスト ID](#bearer-トークンとリクエスト-id) を参照）— は `0` になる。トークンの無いリクエストを拒否するのはエンドポイントなので、その呼び出しはどれほど短くても計られる。
+
+**オブザーバーは軽く、ブロックしないものにする。** オブザーバーは同期的に呼ばれる: ハンドラーはそれが戻ってから始まる。ストリームの再検査は、検査を行った送信または受信の中でオブザーバーを呼び、ストリームの検査は直列化されているので、それが戻るまでその送信または受信は待ち、ストリーム上の他の送受信も、向きにかかわらず待つ — `WithStreamRecheckInterval` があっても、自分の再検査の時期が来ているかどうかにかかわらず待つ。遅い処理 — リモートの監査ストアへの書き込みなど — は別のゴルーチンに渡すこと。ストリームのクライアントが去った後は、組み込みエンドポイントでは次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。
 
 拒否のときは、判定は `DeniedError.Decision` にもあり、verifier の deny `code` は `Decision.Code` に入る。
 

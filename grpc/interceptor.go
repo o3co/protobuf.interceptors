@@ -96,25 +96,35 @@ func WithStreamRecheckInterval(d time.Duration) Option {
 
 // WithDecisionObserver has a verification interceptor hand every
 // authorization check it makes to fn, allowed or not (see
-// interceptors.DecisionObserver). A stream's re-check calls fn on the send or
-// receive that made it, which waits for fn to return.
+// interceptors.DecisionObserver). A stream's re-check calls fn inside the
+// SendMsg or RecvMsg that made it, while the stream's checks are serialized,
+// so a slow fn stalls the stream in both directions: keep it cheap and
+// non-blocking.
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(c *config) {
 		c.observer = fn
 	}
 }
 
-// verify runs one authorization check and hands it to the observer, if any.
-// A credential the interceptor could not read (credErr) refuses the check
-// without asking the verifier.
-func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, resource, action string, credErr error) (*interceptors.Decision, error) {
-	var decision *interceptors.Decision
+// verify runs one authorization check of procedure, made at phase, and hands
+// it to the observer, if any. A credential the interceptor could not read
+// (credErr) refuses the check without asking the verifier.
+func (c *config) verify(ctx context.Context, verifier endpoint.VerifierEndpoint, procedure string, phase interceptors.CheckPhase, resource, action string, credErr error) (*interceptors.Decision, error) {
+	var (
+		decision *interceptors.Decision
+		took     time.Duration
+	)
 	err := credErr
 	if err == nil {
+		start := c.now()
 		decision, err = endpoint.VerifyWithDecision(ctx, verifier, resource, action)
+		took = c.now().Sub(start)
 	}
 	if c.observer != nil {
-		c.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
+		c.observer(ctx, interceptors.DecisionEvent{
+			Procedure: procedure, Phase: phase, Duration: took,
+			Resource: resource, Action: action, Decision: decision, Err: err,
+		})
 	}
 	return decision, err
 }
@@ -129,7 +139,7 @@ func withDecision(ctx context.Context, d *interceptors.Decision) context.Context
 }
 
 func newConfig(opts []Option) *config {
-	c := &config{}
+	c := &config{now: time.Now}
 	for _, o := range opts {
 		o(c)
 	}
@@ -236,7 +246,7 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 		}
 
 		// Call the verifier endpoint.
-		decision, err := cfg.verify(ctx, verifier, policyData.Resource, policyData.Action, credErr)
+		decision, err := cfg.verify(ctx, verifier, info.FullMethod, interceptors.CheckOpen, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return nil, toGRPCError(ctx, err)
 		}

@@ -167,8 +167,9 @@ type Option func(*verificationInterceptor)
 
 // WithDecisionObserver has VerificationInterceptor hand every authorization
 // check it makes to fn, allowed or not (see interceptors.DecisionObserver). A
-// stream's re-check calls fn on the send or receive that made it, which waits
-// for fn to return.
+// stream's re-check calls fn inside the Send or Receive that made it, while
+// the stream's checks are serialized, so a slow fn stalls the stream in both
+// directions: keep it cheap and non-blocking.
 func WithDecisionObserver(fn interceptors.DecisionObserver) Option {
 	return func(v *verificationInterceptor) {
 		v.observer = fn
@@ -254,24 +255,33 @@ func VerificationInterceptor(verifier endpoint.VerifierEndpoint, opts ...Option)
 	if verifier == nil {
 		panic("VerificationInterceptor: verifier must not be nil")
 	}
-	v := &verificationInterceptor{verifier: verifier}
+	v := &verificationInterceptor{verifier: verifier, now: time.Now}
 	for _, opt := range opts {
 		opt(v)
 	}
 	return v
 }
 
-// verify runs one authorization check, hands it to the observer, if any, and
-// returns the context the handler runs with. A credential the interceptor
-// could not read (credErr) refuses the check without asking the verifier.
-func (v *verificationInterceptor) verify(ctx context.Context, resource, action string, credErr error) (context.Context, error) {
-	var decision *interceptors.Decision
+// verify runs one authorization check of procedure, made at phase, hands it
+// to the observer, if any, and returns the context the handler runs with. A
+// credential the interceptor could not read (credErr) refuses the check
+// without asking the verifier.
+func (v *verificationInterceptor) verify(ctx context.Context, procedure string, phase interceptors.CheckPhase, resource, action string, credErr error) (context.Context, error) {
+	var (
+		decision *interceptors.Decision
+		took     time.Duration
+	)
 	err := credErr
 	if err == nil {
+		start := v.now()
 		decision, err = endpoint.VerifyWithDecision(ctx, v.verifier, resource, action)
+		took = v.now().Sub(start)
 	}
 	if v.observer != nil {
-		v.observer(ctx, interceptors.DecisionEvent{Resource: resource, Action: action, Decision: decision, Err: err})
+		v.observer(ctx, interceptors.DecisionEvent{
+			Procedure: procedure, Phase: phase, Duration: took,
+			Resource: resource, Action: action, Decision: decision, Err: err,
+		})
 	}
 	if err != nil {
 		return ctx, err
@@ -306,7 +316,7 @@ func (v *verificationInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 			return next(ctx, req)
 		}
 
-		ctx, err := v.verify(ctx, policyData.Resource, policyData.Action, credErr)
+		ctx, err := v.verify(ctx, req.Spec().Procedure, interceptors.CheckOpen, policyData.Resource, policyData.Action, credErr)
 		if err != nil {
 			return nil, toConnectError(ctx, err)
 		}
@@ -343,12 +353,13 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 		// inner interceptors, and every check of the stream must ask about the
 		// target it opened for.
 		resource, action := policyData.Resource, policyData.Action
+		procedure := conn.Spec().Procedure
 
 		// The opening check is the gate's first, so an interval runs from it.
 		gate := streamcheck.New(v.recheckInterval, v.now)
 		err := gate.Check(func() error {
 			var err error
-			ctx, err = v.verify(ctx, resource, action, credErr)
+			ctx, err = v.verify(ctx, procedure, interceptors.CheckOpen, resource, action, credErr)
 			return err
 		})
 		if err != nil {
@@ -359,8 +370,8 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 			StreamingHandlerConn: conn,
 			ctx:                  ctx,
 			gate:                 gate,
-			check: func() error {
-				if _, err := v.verify(ctx, resource, action, nil); err != nil {
+			check: func(phase interceptors.CheckPhase) error {
+				if _, err := v.verify(ctx, procedure, phase, resource, action, nil); err != nil {
 					return toConnectError(ctx, err)
 				}
 				return nil
@@ -390,13 +401,14 @@ func (v *verificationInterceptor) WrapStreamingHandler(next connect.StreamingHan
 // the verifier or using the transport.
 type authStreamingHandlerConn struct {
 	connect.StreamingHandlerConn
-	ctx   context.Context
-	gate  *streamcheck.Gate
-	check func() error
+	ctx  context.Context
+	gate *streamcheck.Gate
+	// check re-checks the stream, made at phase.
+	check func(phase interceptors.CheckPhase) error
 }
 
 func (c *authStreamingHandlerConn) Send(msg any) error {
-	if err := c.gate.Check(c.check); err != nil {
+	if err := c.gate.Check(func() error { return c.check(interceptors.CheckSend) }); err != nil {
 		return gateError(c.ctx, err)
 	}
 	return c.StreamingHandlerConn.Send(msg)
@@ -415,7 +427,7 @@ func (c *authStreamingHandlerConn) Receive(msg any) error {
 			clearMessage(msg)
 		}
 	}()
-	if err := c.gate.Check(c.check); err != nil {
+	if err := c.gate.Check(func() error { return c.check(interceptors.CheckReceive) }); err != nil {
 		return gateError(c.ctx, err)
 	}
 	allowed = true

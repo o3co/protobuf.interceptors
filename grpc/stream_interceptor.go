@@ -55,15 +55,16 @@ func (s *contextServerStream) Context() context.Context { return s.ctx }
 // the verifier or using the transport.
 type authServerStream struct {
 	grpc.ServerStream
-	ctx   context.Context
-	gate  *streamcheck.Gate
-	check func() error
+	ctx  context.Context
+	gate *streamcheck.Gate
+	// check re-checks the stream, made at phase.
+	check func(phase interceptors.CheckPhase) error
 }
 
 func (s *authServerStream) Context() context.Context { return s.ctx }
 
 func (s *authServerStream) SendMsg(m any) error {
-	if err := s.gate.Check(s.check); err != nil {
+	if err := s.gate.Check(func() error { return s.check(interceptors.CheckSend) }); err != nil {
 		return gateError(s.ctx, err)
 	}
 	return s.ServerStream.SendMsg(m)
@@ -82,7 +83,7 @@ func (s *authServerStream) RecvMsg(m any) error {
 			clearMessage(m)
 		}
 	}()
-	if err := s.gate.Check(s.check); err != nil {
+	if err := s.gate.Check(func() error { return s.check(interceptors.CheckReceive) }); err != nil {
 		return gateError(s.ctx, err)
 	}
 	allowed = true
@@ -208,7 +209,7 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 		var decision *interceptors.Decision
 		err := gate.Check(func() error {
 			var err error
-			decision, err = cfg.verify(ctx, verifier, resource, action, credErr)
+			decision, err = cfg.verify(ctx, verifier, info.FullMethod, interceptors.CheckOpen, resource, action, credErr)
 			return err
 		})
 		if err != nil {
@@ -220,8 +221,8 @@ func VerificationStreamInterceptor(verifier endpoint.VerifierEndpoint, opts ...O
 			ServerStream: ss,
 			ctx:          hctx,
 			gate:         gate,
-			check: func() error {
-				if _, err := cfg.verify(hctx, verifier, resource, action, nil); err != nil {
+			check: func(phase interceptors.CheckPhase) error {
+				if _, err := cfg.verify(hctx, verifier, info.FullMethod, phase, resource, action, nil); err != nil {
 					return toGRPCError(hctx, err)
 				}
 				return nil

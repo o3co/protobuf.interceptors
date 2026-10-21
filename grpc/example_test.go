@@ -67,7 +67,8 @@ func ExampleWithDecisionObserver() {
 
 	observe := func(ctx context.Context, ev interceptors.DecisionEvent) {
 		requestID := interceptors.RequestIDFromContext(ctx)
-		log.Printf("authz %s %s request_id=%s err=%v", ev.Action, ev.Resource, requestID, ev.Err)
+		log.Printf("authz %s phase=%s %s %s took=%s request_id=%s err=%v",
+			ev.Procedure, ev.Phase, ev.Action, ev.Resource, ev.Duration, requestID, ev.Err)
 	}
 
 	srv := grpc.NewServer(
