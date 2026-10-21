@@ -30,6 +30,7 @@ import (
 	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
+	"github.com/o3co/protobuf.interceptors/internal/privatenet"
 )
 
 // assertUnavailable fails unless err refuses and wraps
@@ -202,14 +203,30 @@ func TestHTTPEndpoints_DeterministicTransportFailures_AreNotUnavailable(t *testi
 			srv := serve(t, http.StatusOK, b.allow)
 			assertNotUnavailable(t, b.build(t, "https://"+srv.Listener.Addr().String()).Verify(ctxWithToken("tok"), "r", "a"))
 		})
-		t.Run(b.name+"/a body that does not decode", func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Content-Encoding", "gzip")
-				_, _ = w.Write([]byte("this is not gzip at all, and long enough to read a header from"))
-			}))
-			t.Cleanup(srv.Close)
-			assertNotUnavailable(t, b.build(t, srv.URL).Verify(ctxWithToken("tok"), "r", "a"))
+		// The endpoints ask for no content coding, so a coded body is read
+		// as it came, never decoded, and a decoder's error is never mistaken
+		// for a broken connection.
+		for name, body := range map[string]string{
+			"a body that does not decode": "this is not gzip at all, and long enough to read a header from",
+			"a gzip body cut short":       "\x1f",
+		} {
+			t.Run(b.name+"/"+name, func(t *testing.T) {
+				var acceptEncoding string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					acceptEncoding = r.Header.Get("Accept-Encoding")
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Content-Encoding", "gzip")
+					_, _ = w.Write([]byte(body))
+				}))
+				t.Cleanup(srv.Close)
+				assertNotUnavailable(t, b.build(t, srv.URL).Verify(ctxWithToken("tok"), "r", "a"))
+				if acceptEncoding != "identity" {
+					t.Errorf("Accept-Encoding = %q, want identity", acceptEncoding)
+				}
+			})
+		}
+		t.Run(b.name+"/a port no address can have", func(t *testing.T) {
+			assertNotUnavailable(t, b.build(t, "http://127.0.0.1:65536").Verify(ctxWithToken("tok"), "r", "a"))
 		})
 	}
 }
@@ -224,6 +241,9 @@ func TestHTTPEndpoints_LookupFailure_IsUnavailable(t *testing.T) {
 	}
 }
 
+// Every failure to send a request or read its answer is transient but the
+// ones that come from configuration or from what was sent, which retrying
+// does not change.
 func TestTransient(t *testing.T) {
 	cases := []struct {
 		name string
@@ -236,12 +256,17 @@ func TestTransient(t *testing.T) {
 		{"a connection closed before the answer", &url.Error{Op: "Post", URL: "u", Err: io.EOF}, true},
 		{"a body cut off", io.ErrUnexpectedEOF, true},
 		{"a timeout", &url.Error{Op: "Post", URL: "u", Err: timeoutError{}}, true},
+		// net/http's HTTP/2 errors, a GOAWAY among them, are of types it
+		// does not export: a failure this library cannot name is the
+		// backend's.
+		{"a failure this library cannot name", &url.Error{Op: "Post", URL: "u", Err: errors.New("http2: server sent GOAWAY and closed the connection")}, true},
 		{"a TLS alert the backend sent", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "remote error", Err: tls.AlertError(42)}}, false},
 		{"a TLS alert this side sent", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("tls: bad certificate%.0w", tls.AlertError(42))}, false},
 		{"a certificate this side refuses", &url.Error{Op: "Post", URL: "u", Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}}, false},
+		{"a backend that does not speak TLS", &url.Error{Op: "Post", URL: "u", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}, false},
 		{"a scheme mismatch", &url.Error{Op: "Post", URL: "u", Err: http.ErrSchemeMismatch}, false},
-		{"something else", errors.New("pdp resolves to 8.8.8.8, which is not on a private network"), false},
-		{"a url.Error that is not a timeout", &url.Error{Op: "Post", URL: "u", Err: errors.New("x")}, false},
+		{"an address no connection can have", &url.Error{Op: "Post", URL: "u", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.AddrError{Err: "invalid port", Addr: "65536"}}}, false},
+		{"a host the private-network check refused", &url.Error{Op: "Post", URL: "u", Err: fmt.Errorf("pdp resolves to 8.8.8.8: %w", privatenet.ErrNotPrivate)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

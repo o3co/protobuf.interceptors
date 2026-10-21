@@ -329,6 +329,7 @@ func (e *o3coEndpoint) VerifyDecision(ctx context.Context, resource, action stri
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	var requestID string

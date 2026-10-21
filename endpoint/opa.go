@@ -232,6 +232,7 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 
 	var requestID string
 	if e.requestIDHeaderKey != "" {

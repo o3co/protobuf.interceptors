@@ -312,6 +312,7 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	noContentCoding(req)
 
 	var requestID string
 	if e.requestIDHeaderKey != "" {

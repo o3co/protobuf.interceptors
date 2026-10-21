@@ -309,33 +309,44 @@ func requestError(ctx context.Context, what string, err error) error {
 }
 
 // transient reports whether err, from sending a request or reading its
-// answer, says the backend could not be reached or did not answer in time: a
-// failed lookup, a connection refused, reset or closed before the answer was
-// whole, or a timeout. A TLS alert, sent or received, a certificate this side
-// refuses, a backend that does not speak the scheme asked, a body that does
-// not decode, and a host the private-network check refused are none of
-// these: retrying does not change them.
+// answer while the caller's context is live, says the backend could not
+// answer now: a failed lookup, a connection refused, reset or closed before
+// the answer was whole, a timeout — any failure but those that come from
+// configuration or from what was sent, which retrying does not change. Those
+// are a TLS alert, sent or received; a certificate this side refuses; a
+// backend that does not speak TLS, or speaks HTTP to https; an address no
+// connection can have; and a host the private-network check refused. A
+// failure this library cannot name, net/http's HTTP/2 errors among them, is
+// the backend's, as grpc-go and connect-go read a transport's failures. No
+// body is decoded on the way (see noContentCoding), so a body that does not
+// parse is never a read error.
 func transient(err error) bool {
 	var (
-		alert   tls.AlertError
-		opErr   *net.OpError
-		dnsErr  *net.DNSError
-		timeout interface{ Timeout() bool }
+		alert     tls.AlertError
+		opErr     *net.OpError
+		certErr   *tls.CertificateVerificationError
+		recordErr tls.RecordHeaderError
+		addrErr   *net.AddrError
 	)
 	switch {
-	case errors.As(err, &alert):
+	case errors.As(err, &alert), errors.As(err, &certErr), errors.As(err, &recordErr),
+		errors.Is(err, http.ErrSchemeMismatch), errors.As(err, &addrErr),
+		errors.Is(err, privatenet.ErrNotPrivate):
 		return false
 	case errors.As(err, &opErr):
 		// crypto/tls reports an alert as an *net.OpError with one of these.
 		return opErr.Op != "remote error" && opErr.Op != "local error"
-	case errors.As(err, &dnsErr):
-		return true
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return true
-	case errors.As(err, &timeout):
-		return timeout.Timeout()
 	}
-	return false
+	return true
+}
+
+// noContentCoding asks for the answer without a content coding. net/http
+// decodes a gzip answer only when it asked for one itself, and a decoder's
+// error would read as the connection breaking.
+func noContentCoding(req *http.Request) {
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
 }
 
 // statusError returns err, which reports a status the endpoint does not take
