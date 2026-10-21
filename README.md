@@ -843,6 +843,13 @@ stream that only sends included.
   the status — `PermissionDenied: access denied` for a denial, `Internal` when
   the verifier failed (see [Errors](#errors)) — on gRPC in the trailers, on
   ConnectRPC at the end of the stream.
+- **A re-check that does not complete ends the stream too.** When the
+  observer or the endpoint panics during a re-check, the panic reaches the
+  handler through the send or receive that made it. The message that send was
+  to carry is not sent, and the message that receive checked is cleared even
+  if the handler recovers the panic. A handler that recovers it and goes on
+  finds every later send and receive refused, and the stream ends with
+  `Internal`; a panic the handler does not recover leaves the interceptor.
 
 Each re-check is one verifier call, and the send or receive waits for it. To
 bound that on a stream that carries many messages, give the verification
