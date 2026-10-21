@@ -267,7 +267,7 @@ func TestO3coVerifyDecision_EvaluationShapesAreDistinguishable(t *testing.T) {
 // which the verifier extends in minor releases.
 func TestO3coVerifyDecision_IgnoresUnknownKeys(t *testing.T) {
 	body := `{
-	  "decision": "allow", "resource": "r", "action": "a", "subject": { "sub": "u1" }, "future": 1,
+	  "decision": "allow", "resource": "r", "action": "a", "subject": "u1", "Subject": { "sub": "u1" }, "future": 1,
 	  "reason": { "future": true, "groups": [ { "ruleType": "cedar", "passed": true, "future": [],
 	    "evaluated": [ { "code": "c", "message": "m", "passed": true, "future": "x",
 	      "evaluation": { "status": "completed", "revision": "` + testDigest + `", "future": { "nested": 1 } } } ],
@@ -716,5 +716,71 @@ func TestO3coVerifyDecision_PassedAndSatisfiedByInAnotherCase_AreIgnored(t *test
 	}
 	if g := d.Groups[0]; g.Passed || g.SatisfiedBy != nil {
 		t.Errorf("group = %+v, want failing with no satisfying rule", g)
+	}
+}
+
+// subjectEnvelope is a decision envelope of verdict carrying subjectJSON as its
+// subject key, or no subject key when subjectJSON is empty.
+func subjectEnvelope(verdict, subjectJSON string) string {
+	var deny, subject string
+	if verdict == "deny" {
+		deny = `"code": "cedar_deny", "message": "Denied",`
+	}
+	if subjectJSON != "" {
+		subject = `"subject": ` + subjectJSON + `,`
+	}
+	return `{ "decision": "` + verdict + `", ` + deny + subject + ` "resource": "posts:1", "action": "read",
+  "reason": { "groups": [ {
+    "ruleType": "rbac", "passed": ` + map[string]string{"allow": "true", "deny": "false"}[verdict] + `,
+    "evaluated": [ { "code": "role_granted", "message": "Granted", "passed": ` + map[string]string{"allow": "true", "deny": "false"}[verdict] + ` } ]` +
+		map[string]string{"allow": `, "satisfiedBy": { "code": "role_granted", "message": "Granted", "passed": true }`, "deny": ""}[verdict] + `
+  } ] } }`
+}
+
+// The subject the verifier authenticated is reported, and its absence is no
+// subject. It is reported only: it never makes an allow.
+func TestO3coVerifyDecision_Subject(t *testing.T) {
+	t.Run("present on an allow", func(t *testing.T) {
+		e := newTestEndpoint(t, serve(t, http.StatusOK, subjectEnvelope("allow", `"user-7f3a"`)).URL)
+		d, err := e.VerifyDecision(ctxWithToken("tok"), "posts:1", "read")
+		if err != nil || d == nil || d.Subject != "user-7f3a" {
+			t.Errorf("VerifyDecision = (%+v, %v), want Subject %q", d, err, "user-7f3a")
+		}
+	})
+	t.Run("absent on an allow", func(t *testing.T) {
+		e := newTestEndpoint(t, serve(t, http.StatusOK, subjectEnvelope("allow", "")).URL)
+		d, err := e.VerifyDecision(ctxWithToken("tok"), "posts:1", "read")
+		if err != nil || d == nil || d.Subject != "" {
+			t.Errorf("VerifyDecision = (%+v, %v), want no subject", d, err)
+		}
+	})
+	t.Run("present on a deny", func(t *testing.T) {
+		e := newTestEndpoint(t, serve(t, http.StatusForbidden, subjectEnvelope("deny", `"user-7f3a"`)).URL)
+		d, err := e.VerifyDecision(ctxWithToken("tok"), "posts:1", "read")
+		var denied *interceptors.DeniedError
+		if !errors.As(err, &denied) || d == nil || d.Subject != "user-7f3a" {
+			t.Errorf("VerifyDecision = (%+v, %v), want a denial with Subject %q", d, err, "user-7f3a")
+		}
+	})
+	// The verifier omits the key rather than sending null or "": a subject
+	// that is not a non-empty string is not the contract's, so the envelope
+	// is not whole and reports nothing.
+	for name, subject := range map[string]string{"null": "null", "empty": `""`, "a number": "42", "an object": `{"id": "u"}`, "a list": `["u"]`} {
+		t.Run(name+" on an allow fails closed", func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, http.StatusOK, subjectEnvelope("allow", subject)).URL)
+			d, err := e.VerifyDecision(ctxWithToken("tok"), "posts:1", "read")
+			var denied *interceptors.DeniedError
+			if err == nil || errors.As(err, &denied) || d != nil {
+				t.Errorf("VerifyDecision = (%+v, %v), want an error and no decision", d, err)
+			}
+		})
+		t.Run(name+" on a deny is still a denial", func(t *testing.T) {
+			e := newTestEndpoint(t, serve(t, http.StatusForbidden, subjectEnvelope("deny", subject)).URL)
+			d, err := e.VerifyDecision(ctxWithToken("tok"), "posts:1", "read")
+			var denied *interceptors.DeniedError
+			if !errors.As(err, &denied) || d != nil {
+				t.Errorf("VerifyDecision = (%+v, %v), want a denial and no decision", d, err)
+			}
+		})
 	}
 }

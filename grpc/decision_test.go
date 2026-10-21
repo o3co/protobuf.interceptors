@@ -16,6 +16,8 @@ package grpc_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,7 +53,7 @@ func confirmedDecision(code string) *interceptors.Decision {
 
 func deniedDecision() *interceptors.Decision {
 	return &interceptors.Decision{
-		Code: "cedar_deny", Message: "Denied by Cedar policy", RequestID: "req-1",
+		Code: "cedar_deny", Message: "Denied by Cedar policy", Subject: "user-7f3a", RequestID: "req-1",
 		Groups: []interceptors.RuleGroup{{
 			RuleType: "cedar",
 			Evaluated: []interceptors.RuleOutcome{{
@@ -198,7 +200,7 @@ func TestChain_DecisionDoesNotReachTheCaller(t *testing.T) {
 			if st.Code() != tc.code {
 				t.Errorf("code = %v, want %v", st.Code(), tc.code)
 			}
-			for _, leak := range []string{"cedar_deny", "Denied by Cedar policy", "20-forbid-secret", "sha256", "req-1"} {
+			for _, leak := range []string{"cedar_deny", "Denied by Cedar policy", "20-forbid-secret", "sha256", "req-1", "user-7f3a"} {
 				if strings.Contains(st.Message(), leak) {
 					t.Errorf("the caller's status message %q carries %q from the decision", st.Message(), leak)
 				}
@@ -259,5 +261,43 @@ func TestVerificationStreamInterceptor_DecisionObserver_SeesADenialBeforeTheHand
 	}
 	if events := rec.all(); len(events) != 1 || events[0].Decision != denied {
 		t.Errorf("observer events = %+v", events)
+	}
+}
+
+// verifierAllowing serves an o3co verifier that allows every request and
+// names subject as the subject it authenticated.
+func verifierAllowing(t *testing.T, subject string) endpoint.VerifierEndpoint {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"decision": "allow", "subject": "` + subject + `", "resource": "r", "action": "a", "reason": {"groups": []}}`))
+	}))
+	t.Cleanup(srv.Close)
+	ep, err := endpoint.NewO3coEndpoint(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ep
+}
+
+// The subject the verifier authenticated reaches the handler and the
+// observer with the rest of the decision.
+func TestChain_O3coSubject_ReachesTheHandlerAndTheObserver(t *testing.T) {
+	impl := &decisionServer{}
+	rec := &recorder{}
+	client, cleanup := startServerWithImpl(t, impl,
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(verifierAllowing(t, "user-7f3a"), policygrpc.WithDecisionObserver(rec.observe)),
+	)
+	defer cleanup()
+
+	if _, err := client.GetResource(bearerCtx("tok"), &testpb.GetResourceRequest{Id: "1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d := impl.seen.Load(); d == nil || d.Subject != "user-7f3a" {
+		t.Errorf("the handler saw %+v, want Subject %q", d, "user-7f3a")
+	}
+	if events := rec.all(); len(events) != 1 || events[0].Decision == nil || events[0].Decision.Subject != "user-7f3a" {
+		t.Errorf("the observer saw %+v, want one event with Subject %q", events, "user-7f3a")
 	}
 }

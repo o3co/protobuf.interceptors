@@ -672,6 +672,14 @@ a denial.
 On a denial the decision is also on `DeniedError.Decision`, with the verifier's
 deny `code` in `Decision.Code`.
 
+**Who it was about.** `Decision.Subject` is the subject the verifier
+authenticated, on an allow and on a denial. It is empty when the verifier sent
+none, which it does for a token without a subject; the OPA and Cedar endpoints
+report no decision at all. It is reported only: no verdict rests on it. When
+the verifier sends the `subject` key it must be a non-empty string; `null`,
+`""` or another type makes the envelope not whole, so a `200` carrying it fails
+closed.
+
 **Nothing of it reaches the RPC caller.** Revisions and evaluation statuses say
 when a policy set changed and whether a denial was the engine failing. The
 caller still gets `PermissionDenied: access denied`, and no error this library

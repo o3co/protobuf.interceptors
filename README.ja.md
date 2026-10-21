@@ -426,6 +426,8 @@ policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserv
 
 拒否のときは、判定は `DeniedError.Decision` にもあり、verifier の deny `code` は `Decision.Code` に入る。
 
+**誰についての判定か。** `Decision.Subject` は verifier が認証したサブジェクトであり、allow にも拒否にも入る。verifier がそれを送らなかったとき — サブジェクトを持たないトークンでは送らない — は空である。OPA と Cedar のエンドポイントは判定そのものを報告しない。これは報告のためだけのもので、どの判定もこれに依らない。verifier が `subject` キーを送るときは空でない文字列でなければならない: `null`、`""`、その他の型はエンベロープを不完全にするので、それを持つ `200` はフェイルクローズする。
+
 **そのどれも RPC の呼び出し元には届かない。** リビジョンと評価ステータスは、ポリシーセットがいつ変わったか、拒否がエンジンの失敗だったかを語る。呼び出し元が受け取るのは引き続き `PermissionDenied: access denied` であり、このライブラリが返すどのエラーもメッセージに判定を含まない。どのエンドポイントも、デフォルトのレベルではレスポンスボディをログしない — エラー行が示すのはステータス、リクエスト ID、（o3co では）code であり、ボディは `Debug` に出る。
 
 **各ルールが報告したもの。** ポリシーに基づくルールの結果は `Evaluation` を持つが、それは verifier が `verify.evaluationInResponse = "include"` を設定している場合に限られる:

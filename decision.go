@@ -42,6 +42,9 @@ type Decision struct {
 	// evaluation order. A deny made without a policy evaluation — a collector
 	// timeout, or no applicable rule — has none.
 	Groups []RuleGroup
+	// Subject is the subject the backend authenticated, empty when it
+	// reported none. It is reported only: no verdict rests on it.
+	Subject string
 	// RequestID is the request ID sent with the verify request, empty when
 	// none was. The backend's own record of the decision carries the same ID,
 	// so the service's record joins it on this.
