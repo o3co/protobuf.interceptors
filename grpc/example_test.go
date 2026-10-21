@@ -18,6 +18,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"time"
 
 	interceptors "github.com/o3co/protobuf.interceptors"
 	"github.com/o3co/protobuf.interceptors/endpoint"
@@ -58,7 +59,10 @@ func Example() {
 }
 
 // The observer sees every check, denials included, with the endpoint's error
-// before it is mapped for the caller.
+// before it is mapped for the caller. Pass one set of options to the unary and
+// the stream interceptor, so streams are observed too; an option that applies
+// only to streams, such as WithStreamRecheckInterval, is ignored by the unary
+// one.
 func ExampleWithDecisionObserver() {
 	verifier, err := endpoint.NewO3coEndpoint("https://verifier.internal:3000")
 	if err != nil {
@@ -71,10 +75,37 @@ func ExampleWithDecisionObserver() {
 			ev.Procedure, ev.Phase, ev.Action, ev.Resource, ev.Duration, requestID, ev.Err)
 	}
 
+	opts := []policygrpc.Option{
+		policygrpc.WithDecisionObserver(observe),
+		policygrpc.WithStreamRecheckInterval(30 * time.Second),
+	}
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			policygrpc.PolicyOptionInterceptor(),
-			policygrpc.VerificationInterceptor(verifier, policygrpc.WithDecisionObserver(observe)),
+			policygrpc.VerificationInterceptor(verifier, opts...),
+		),
+		grpc.ChainStreamInterceptor(
+			policygrpc.PolicyOptionStreamInterceptor(),
+			policygrpc.VerificationStreamInterceptor(verifier, opts...),
+		),
+	)
+	_ = srv
+}
+
+// A stream is re-checked before each message it sends and after each message
+// it receives. To bound what that costs on a stream that carries many
+// messages, re-check it at most once per interval; a revoked grant then still
+// lets messages through for up to the interval.
+func ExampleWithStreamRecheckInterval() {
+	verifier, err := endpoint.NewO3coEndpoint("https://verifier.internal:3000")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	srv := grpc.NewServer(
+		grpc.ChainStreamInterceptor(
+			policygrpc.PolicyOptionStreamInterceptor(),
+			policygrpc.VerificationStreamInterceptor(verifier, policygrpc.WithStreamRecheckInterval(10*time.Second)),
 		),
 	)
 	_ = srv
