@@ -110,11 +110,12 @@ func withInbound(ctx context.Context) (context.Context, error) {
 // PolicyOptionInterceptor returns a gRPC UnaryServerInterceptor that reads
 // proto method options and injects the resolved Policy into context.
 //
-// It resolves with interceptors.ResolveResource, so extracted field_mappings
-// values fill the resource template and are then discarded, unlike
-// connectrpc.PolicyOptionInterceptor, which forwards them. A field mapping
-// whose placeholder the template does not use therefore never reaches the
-// verifier. See README, "Extracted field forwarding".
+// It resolves with interceptors.ResolveResourceWithFields and attaches the
+// extracted values with interceptors.WithExtractedFields, as
+// connectrpc.PolicyOptionInterceptor does, so a field mapping whose
+// placeholder is absent from the resource template still reaches an endpoint
+// that reads them (in package endpoint, the o3co and OPA endpoints). See
+// README, "Extracted field forwarding".
 func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 	var cache sync.Map
 
@@ -139,7 +140,11 @@ func PolicyOptionInterceptor() grpc.UnaryServerInterceptor {
 			if !ok {
 				return nil, toGRPCError(ctx, errors.New("request does not implement proto.Message"))
 			}
-			resource, action, err = interceptors.ResolveResource(policy, msg)
+			var fields map[string]string
+			resource, action, fields, err = interceptors.ResolveResourceWithFields(policy, msg)
+			if err == nil && len(fields) > 0 {
+				ctx = interceptors.WithExtractedFields(ctx, fields)
+			}
 		} else {
 			resource, action, err = interceptors.ResolveResource(policy, nil)
 		}

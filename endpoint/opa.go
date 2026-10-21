@@ -159,6 +159,10 @@ type opaInput struct {
 	Resource string `json:"resource"`
 	Action   string `json:"action"`
 	Token    string `json:"token"`
+	// Context holds the extracted field_mappings values on the context
+	// (interceptors.ExtractedFieldsFromContext), keyed by placeholder. They
+	// come from the request, so a policy reads them as the caller's claims.
+	Context map[string]string `json:"context,omitempty"`
 }
 
 // NewOPAEndpoint constructs a VerifierEndpoint that calls OPA's REST data API.
@@ -218,6 +222,9 @@ func (e *opaEndpoint) Verify(ctx context.Context, resource, action string) error
 			Action:   action,
 			Token:    token,
 		},
+	}
+	if fields, ok := interceptors.ExtractedFieldsFromContext(ctx); ok && len(fields) > 0 {
+		reqBody.Input.Context = fields
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
