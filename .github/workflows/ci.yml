@@ -62,7 +62,7 @@ jobs:
       # each flag forward when a run does not upload it.
       - name: Upload coverage to Codecov (${{ matrix.module.name }})
         if: matrix.go == 'minimum'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ matrix.module.dir }}/cover.out
