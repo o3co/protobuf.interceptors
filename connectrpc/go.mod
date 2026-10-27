@@ -5,7 +5,7 @@ go 1.26.0
 replace github.com/o3co/protobuf.interceptors => ../
 
 require (
-	connectrpc.com/connect v1.21.0
+	connectrpc.com/connect v1.21.1
 	github.com/o3co/protobuf.interceptors v0.6.0
 	google.golang.org/protobuf v1.36.12
 )
