@@ -261,7 +261,7 @@ func TestCedarVerify_PrincipalWithAQuote_IsEscapedOnTheWire(t *testing.T) {
 // An answer whose object repeats a key, at any depth, has no reading: it is
 // not taken as a decision, whichever value comes last.
 func TestCedarVerify_RepeatedKey_IsNotADecision(t *testing.T) {
-	for _, body := range []string{`{"decision": "Deny", "decision": "Allow"}`, `{"decision": "Allow", "diagnostics": {"reason": [], "reason": []}}`} {
+	for _, body := range []string{`{"decision": "Deny", "decision": "Allow"}`, `{"decision": "Allow", "decision": "Deny"}`, `{"decision": "Allow", "diagnostics": {"reason": [], "reason": []}}`} {
 		t.Run(body, func(t *testing.T) {
 			ep, _ := NewCedarEndpoint(serve(t, http.StatusOK, body).URL, WithCedarPrincipalResolver(tokenAsPrincipal))
 			err := ep.Verify(ctxWithToken("tok"), "resource", "read")

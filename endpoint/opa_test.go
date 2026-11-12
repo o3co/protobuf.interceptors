@@ -200,7 +200,7 @@ func TestOPAVerify_WithExtractedFields_SendsInputContext(t *testing.T) {
 // An answer whose object repeats a key, at any depth, has no reading: it is
 // not taken as a decision, whichever value comes last.
 func TestOPAVerify_RepeatedKey_IsNotADecision(t *testing.T) {
-	for _, body := range []string{`{"result": false, "result": true}`, `{"result": true, "explanation": {"rule": "a", "rule": "b"}}`} {
+	for _, body := range []string{`{"result": false, "result": true}`, `{"result": true, "result": false}`, `{"result": true, "explanation": {"rule": "a", "rule": "b"}}`} {
 		t.Run(body, func(t *testing.T) {
 			ep, _ := NewOPAEndpoint(serve(t, http.StatusOK, body).URL, "authz/allow")
 			err := ep.Verify(ctxWithToken("tok"), "resource", "read")

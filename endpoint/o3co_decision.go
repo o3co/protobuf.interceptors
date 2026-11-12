@@ -65,22 +65,20 @@ const (
 )
 
 // decodeObject decodes body as a JSON object, and reports whether it is one.
-// An object that names a key twice, at any depth, is not one: which of the
-// two values a reader takes is the reader's choice, so the body has no one
-// reading.
+// A body in which an object names a key twice, at any depth, is reported as
+// not one: which of the two values a reader takes is the reader's choice, so
+// the body has no single reading.
 func decodeObject(body []byte) (map[string]any, bool) {
-	if repeatsAKey(body) {
-		return nil, false
-	}
 	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil || repeatsAKey(body) {
 		return nil, false
 	}
 	return obj, true
 }
 
-// repeatsAKey reports whether an object in body names a key twice. It reads
-// body as far as it is JSON; what is not is json.Unmarshal's to refuse.
+// repeatsAKey reports whether an object in body names a key twice, comparing
+// keys as json.Unmarshal decodes them. body is a JSON value json.Unmarshal
+// accepted, so its depth is within json.Unmarshal's bound.
 func repeatsAKey(body []byte) bool {
 	type level struct {
 		keys    map[string]bool // nil in an array
