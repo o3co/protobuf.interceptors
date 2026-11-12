@@ -278,6 +278,30 @@ func TestChain_CedarResolverUnavailable_IsUnavailable(t *testing.T) {
 	assertFixedMessage(t, err, codes.Unavailable, "authorization backend unavailable")
 }
 
+// A Cedar resolver error that is an UnauthenticatedError as well as an
+// unavailable backend is reported as Unauthenticated: the interceptors read a
+// refusal of the caller before an unavailable backend.
+func TestChain_CedarResolverUnauthenticatedAndUnavailable_IsUnauthenticated(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"decision": "Allow"}`))
+	}))
+	defer agent.Close()
+	verifier, err := endpoint.NewCedarEndpoint(agent.URL, endpoint.WithCedarPrincipalResolver(func(context.Context, string) (string, error) {
+		return "", errors.Join(&interceptors.UnauthenticatedError{Reason: "token"}, interceptors.ErrBackendUnavailable)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, cleanup := startServerWithImpl(t, &failingServer{t: t},
+		policygrpc.PolicyOptionInterceptor(),
+		policygrpc.VerificationInterceptor(verifier),
+	)
+	defer cleanup()
+
+	_, err = client.GetResource(bearerCtx("tok"), &testpb.GetResourceRequest{Id: "1"})
+	assertFixedMessage(t, err, codes.Unauthenticated, "unauthenticated")
+}
+
 // failingServer fails the test if any handler runs.
 type failingServer struct {
 	testServer

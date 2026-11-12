@@ -294,6 +294,33 @@ func TestConnectChain_CedarResolverUnavailable_IsUnavailable(t *testing.T) {
 	}
 }
 
+// A Cedar resolver error that is an UnauthenticatedError as well as an
+// unavailable backend is reported as Unauthenticated: the interceptors read a
+// refusal of the caller before an unavailable backend.
+func TestConnectChain_CedarResolverUnauthenticatedAndUnavailable_IsUnauthenticated(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"decision": "Allow"}`))
+	}))
+	defer agent.Close()
+	verifier, err := endpoint.NewCedarEndpoint(agent.URL, endpoint.WithCedarPrincipalResolver(func(context.Context, string) (string, error) {
+		return "", errors.Join(&interceptors.UnauthenticatedError{Reason: "token"}, interceptors.ErrBackendUnavailable)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	impl := &countingHandler{}
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(verifier),
+	)
+	defer cleanup()
+
+	assertFixedMessage(t, getResource(t, client), connect.CodeUnauthenticated, "unauthenticated")
+	if impl.calls.Load() != 0 {
+		t.Error("the handler must not run")
+	}
+}
+
 // countingHandler counts the GetResource calls that reach it.
 type countingHandler struct {
 	testServiceHandler

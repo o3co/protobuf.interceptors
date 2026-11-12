@@ -117,8 +117,9 @@ func WithCedarResourcePrefix(prefix string) CedarOption {
 // error that wraps interceptors.ErrBackendUnavailable: a resolver that cannot
 // answer now (the issuer's key set unreachable, say) refuses the request with
 // that error, which the framework interceptors report as Unavailable, as for
-// an agent that cannot answer. Neither error reaches the RPC caller. Panics if
-// fn is nil.
+// an agent that cannot answer, unless it is also an UnauthenticatedError or a
+// DeniedError, or the RPC's own context has ended. Neither error reaches the
+// RPC caller. Panics if fn is nil.
 func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) (string, error)) CedarOption {
 	if fn == nil {
 		panic("principalResolver must not be nil")
@@ -283,8 +284,9 @@ func NewCedarEndpoint(baseURL string, opts ...CedarOption) (VerifierEndpoint, er
 }
 
 // Verify calls the Cedar agent is_authorized API and returns nil if the decision is "Allow",
-// *DeniedError for any other decision, *UnauthenticatedError if no token is present,
-// and a wrapped error on HTTP or marshaling failures.
+// *DeniedError for any other decision, *UnauthenticatedError if no token is present or
+// the principal resolver refuses it, the resolver's error if it wraps
+// ErrBackendUnavailable, and a wrapped error on HTTP or marshaling failures.
 func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) error {
 	// Retrieve the bearer token from context.
 	token, err := getBearerToken(ctx)
