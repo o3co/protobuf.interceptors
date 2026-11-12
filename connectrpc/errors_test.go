@@ -268,6 +268,32 @@ func TestConnectChain_BackendDown_IsUnavailable(t *testing.T) {
 	}
 }
 
+// A real Cedar endpoint whose principal resolver cannot answer now: the
+// caller is told Unavailable and the handler never runs.
+func TestConnectChain_CedarResolverUnavailable_IsUnavailable(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"decision": "Allow"}`))
+	}))
+	defer agent.Close()
+	verifier, err := endpoint.NewCedarEndpoint(agent.URL, endpoint.WithCedarPrincipalResolver(func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("%w: key set unreachable", interceptors.ErrBackendUnavailable)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	impl := &countingHandler{}
+	client, cleanup := startConnectServerWithImpl(t, impl,
+		policyconnect.PolicyOptionInterceptor(),
+		policyconnect.VerificationInterceptor(verifier),
+	)
+	defer cleanup()
+
+	assertFixedMessage(t, getResource(t, client), connect.CodeUnavailable, "authorization backend unavailable")
+	if impl.calls.Load() != 0 {
+		t.Error("the handler must not run")
+	}
+}
+
 // countingHandler counts the GetResource calls that reach it.
 type countingHandler struct {
 	testServiceHandler
