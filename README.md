@@ -1,6 +1,6 @@
 # protobuf.interceptors
 
-Last updated: 2026-10-21
+Last updated: 2026-11-13
 
 [日本語](README.ja.md)
 
@@ -515,7 +515,11 @@ whatever principal it is asked about, and is never shown the bearer token, so
 verifies the token — for a JWT its signature, expiry, issuer and audience — and
 returns the principal's id. A resolver that only decodes the token lets any
 caller name any principal. An error or an empty id is an
-`UnauthenticatedError`, and the agent is not asked. The id is escaped as a
+`UnauthenticatedError`, and the agent is not asked. An error that wraps
+`interceptors.ErrBackendUnavailable` — a resolver that cannot answer now, its
+issuer's key set unreachable, say — is returned as it is instead, and the
+interceptors report `Unavailable`, as for an agent that cannot answer. The
+id is escaped as a
 Cedar string literal, so a quote or backslash in it cannot change the entity
 it names.
 

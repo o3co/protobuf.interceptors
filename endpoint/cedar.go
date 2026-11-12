@@ -113,8 +113,12 @@ func WithCedarResourcePrefix(prefix string) CedarOption {
 // authenticates nothing, so the resolver is where the token is checked, and
 // must verify it — a JWT's signature, expiry, issuer and audience — rather
 // than only read it. An error or an empty id refuses the request as
-// *interceptors.UnauthenticatedError before the agent is asked; the error
-// does not reach the RPC caller. Panics if fn is nil.
+// *interceptors.UnauthenticatedError before the agent is asked, except an
+// error that wraps interceptors.ErrBackendUnavailable: a resolver that cannot
+// answer now (the issuer's key set unreachable, say) refuses the request with
+// that error, which the framework interceptors report as Unavailable, as for
+// an agent that cannot answer. Neither error reaches the RPC caller. Panics if
+// fn is nil.
 func WithCedarPrincipalResolver(fn func(ctx context.Context, token string) (string, error)) CedarOption {
 	if fn == nil {
 		panic("principalResolver must not be nil")
@@ -289,6 +293,10 @@ func (e *cedarEndpoint) Verify(ctx context.Context, resource, action string) err
 	}
 
 	principalID, err := e.principalResolver(ctx, token)
+	if errors.Is(err, interceptors.ErrBackendUnavailable) {
+		e.logger.Debug("principal resolver could not answer", "error", err, "x-request-id", getRequestID(ctx))
+		return fmt.Errorf("cedar principal resolver: %w", err)
+	}
 	if err != nil || principalID == "" {
 		e.logger.Debug("principal resolver refused the bearer token", "error", err, "x-request-id", getRequestID(ctx))
 		return &interceptors.UnauthenticatedError{Reason: "invalid or expired token"}

@@ -1,6 +1,6 @@
 # protobuf.interceptors
 
-最終更新: 2026-10-21
+最終更新: 2026-11-13
 
 [English](README.md)
 
@@ -327,7 +327,7 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | ローカルで評価 |
 
-**Cedar エンドポイントは認証をしない。** Cedar エージェントは問われた principal について何であれ判定し、Bearer トークンは見せられないので、`NewCedarEndpoint` は `WithCedarPrincipalResolver` を必須とする: トークンを検証し — JWT なら署名、有効期限、issuer、audience — principal の id を返す関数である。トークンをデコードするだけのリゾルバーでは、どの呼び出し元もどの principal でも名乗れてしまう。エラーまたは空の id は `UnauthenticatedError` になり、エージェントには問い合わせない。id は Cedar の文字列リテラルとしてエスケープされるので、引用符やバックスラッシュが含まれても、指すエンティティは変わらない。
+**Cedar エンドポイントは認証をしない。** Cedar エージェントは問われた principal について何であれ判定し、Bearer トークンは見せられないので、`NewCedarEndpoint` は `WithCedarPrincipalResolver` を必須とする: トークンを検証し — JWT なら署名、有効期限、issuer、audience — principal の id を返す関数である。トークンをデコードするだけのリゾルバーでは、どの呼び出し元もどの principal でも名乗れてしまう。エラーまたは空の id は `UnauthenticatedError` になり、エージェントには問い合わせない。ただし `interceptors.ErrBackendUnavailable` を包むエラー — 今は答えられないリゾルバー、たとえば issuer の鍵集合に届かないもの — はそのまま返り、インターセプターは、答えられないエージェントと同じく `Unavailable` とする。id は Cedar の文字列リテラルとしてエスケープされるので、引用符やバックスラッシュが含まれても、指すエンティティは変わらない。
 
 ベース URL はスキーム（`http` または `https`）とホストを指定する。どちらかを欠くものは、推測されずに構築時に拒否される。o3co や OPA へのリクエストはサブジェクトの Bearer トークンを、Cedar へのリクエストはそこから解決した principal を運ぶので、`http://` はループバック — `localhost`、`127.0.0.0/8`、`::1` — にのみ許される。ただしエンドポイントに `WithO3coAllowInsecure()`、`WithOPAAllowInsecure()`、`WithCedarAllowInsecure()` を与えた場合は別である。それ以外では `https://` を使うこと。`localhost` は大文字小文字を問わず名前で受け付け、他のホストと同じく `/etc/hosts` と DNS で解決される。リテラルのアドレスは 127.0.0.0/8 内のもの、または `::1`（IPv4 射影の `::ffff:127.x.y.z` を含む）として書かれた場合にのみ受け付けるので、`localhost.`、`foo.localhost`、`127.1`、`2130706433`、`0.0.0.0`、ゾーン付きの `::1%lo0` はループバックではない。
 
