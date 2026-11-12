@@ -327,6 +327,8 @@ func TestO3coVerify_BodyThatIsNotAWholeDecision(t *testing.T) {
 		{"allow that is not JSON", http.StatusOK, "<html>ok</html>"},
 		{"allow with no decision key", http.StatusOK, `{"ok": true}`},
 		{"allow whose reason is malformed", http.StatusOK, `{"decision": "allow", "reason": {"groups": "nope"}}`},
+		{"allow whose decision key repeats", http.StatusOK, strings.Replace(allowWithoutEvaluation, `"decision": "allow"`, `"decision": "deny", "decision": "allow"`, 1)},
+		{"allow with a key repeated in a group", http.StatusOK, strings.Replace(allowWithoutEvaluation, `"passed": true,`, `"passed": false, "passed": true,`, 1)},
 		{"empty deny", http.StatusForbidden, ""},
 		{"deny that is not JSON", http.StatusForbidden, "<html>forbidden</html>"},
 		{"deny whose revision is a number", http.StatusForbidden, `{"decision": "deny", "code": "x", "message": "m", "reason": {"groups": [{"ruleType": "cedar", "passed": false, "evaluated": [{"code": "x", "message": "m", "passed": false, "evaluation": {"status": "completed", "revision": 7}}]}]}}`},
