@@ -801,3 +801,28 @@ func TestO3coVerifyDecision_Subject(t *testing.T) {
 		})
 	}
 }
+
+// A key repeats only within one object: the same key in sibling objects, in
+// the objects of an array, or at another depth is not a repeat.
+func TestRepeatsAKey(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"a": 1, "a": 2}`, true},
+		{`{"a": {"b": 1, "b": 2}}`, true},
+		{`{"a": [{"b": 1}, {"c": 1, "c": 2}]}`, true},
+		{`[{"a": 1, "a": 1}]`, true},
+		{`{"a": {"x": 1}, "b": {"x": 2}}`, false},
+		{`{"a": [{"x": 1}, {"x": 2}], "x": 3}`, false},
+		{`{"a": {"a": {"a": 1}}}`, false},
+		{`{"a": [], "b": {}, "c": [[], {}]}`, false},
+		{`not json`, false},
+		{``, false},
+	}
+	for _, tc := range cases {
+		if got := repeatsAKey([]byte(tc.body)); got != tc.want {
+			t.Errorf("repeatsAKey(%s) = %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}

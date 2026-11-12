@@ -15,6 +15,7 @@
 package endpoint
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"math"
@@ -64,12 +65,65 @@ const (
 )
 
 // decodeObject decodes body as a JSON object, and reports whether it is one.
+// An object that names a key twice, at any depth, is not one: which of the
+// two values a reader takes is the reader's choice, so the body has no one
+// reading.
 func decodeObject(body []byte) (map[string]any, bool) {
+	if repeatsAKey(body) {
+		return nil, false
+	}
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
 		return nil, false
 	}
 	return obj, true
+}
+
+// repeatsAKey reports whether an object in body names a key twice. It reads
+// body as far as it is JSON; what is not is json.Unmarshal's to refuse.
+func repeatsAKey(body []byte) bool {
+	type level struct {
+		keys    map[string]bool // nil in an array
+		wantKey bool
+	}
+	var levels []level
+	valueDone := func() {
+		if n := len(levels); n > 0 && levels[n-1].keys != nil {
+			levels[n-1].wantKey = true
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if n := len(levels); n > 0 && levels[n-1].wantKey {
+			if tok == json.Delim('}') {
+				levels = levels[:n-1]
+				valueDone()
+				continue
+			}
+			key, _ := tok.(string)
+			if levels[n-1].keys[key] {
+				return true
+			}
+			levels[n-1].keys[key] = true
+			levels[n-1].wantKey = false
+			continue
+		}
+		switch tok {
+		case json.Delim('{'):
+			levels = append(levels, level{keys: map[string]bool{}, wantKey: true})
+		case json.Delim('['):
+			levels = append(levels, level{})
+		case json.Delim(']'):
+			levels = levels[:len(levels)-1]
+			valueDone()
+		default:
+			valueDone()
+		}
+	}
 }
 
 // parseEnvelope reads obj as an envelope of kind. It returns nil unless every

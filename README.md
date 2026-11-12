@@ -1,6 +1,6 @@
 # protobuf.interceptors
 
-Last updated: 2026-10-21
+Last updated: 2026-11-13
 
 [日本語](README.ja.md)
 
@@ -663,8 +663,9 @@ values, when the RPC has any (see
 [Extracted field forwarding](#extracted-field-forwarding)). It allows only when
 the response's `result` key, in exactly that case, holds JSON `true`. An absent
 `result` (OPA's undefined), `null` or `false` is a deny; a `result` that is not
-a boolean, a body that is not a JSON object, one larger than the size bound,
-and any non-`2xx` status are errors. An empty `policyPath` is refused at
+a boolean, a body that is not a JSON object (one that names a key twice in
+an object is not one), one larger than the size bound, and any non-`2xx`
+status are errors. An empty `policyPath` is refused at
 construction.
 
 | Option | Effect |
@@ -686,8 +687,9 @@ with the default prefixes), and an empty context: extracted `field_mappings`
 values are not sent (see
 [Extracted field forwarding](#extracted-field-forwarding)). It allows only when
 the response's `decision` key, in exactly that case, is `"Allow"`; any other
-decision is a deny, and a body that is not a JSON object, one larger than the
-size bound, and any non-`2xx` status are errors. Without
+decision is a deny, and a body that is not a JSON object (one that names a
+key twice in an object is not one), one larger than the size bound, and any
+non-`2xx` status are errors. Without
 `WithCedarPrincipalResolver` the constructor returns an error.
 
 | Option | Effect |
@@ -863,7 +865,9 @@ ignored like any other, so it cannot stand in for the key it resembles. The
 exception is `restricts` in another case, which is refused rather than
 ignored: the envelope is then not whole, and a `200` carrying it fails closed.
 OPA's `result` and the Cedar agent's `decision` are likewise read only by
-their exact key.
+their exact key. A body that names a key twice in one object, at any depth,
+has no one reading, so it is read as a body that is not a JSON object: no
+envelope from the verifier, and an error from OPA or the Cedar agent.
 
 ### Requiring a confirmed revision
 
