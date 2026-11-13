@@ -197,6 +197,21 @@ func TestOPAVerify_WithExtractedFields_SendsInputContext(t *testing.T) {
 	}
 }
 
+// An answer whose object repeats a key, at any depth, has no reading: it is
+// not taken as a decision, whichever value comes last.
+func TestOPAVerify_RepeatedKey_IsNotADecision(t *testing.T) {
+	for _, body := range []string{`{"result": false, "result": true}`, `{"result": true, "result": false}`, `{"result": true, "explanation": {"rule": "a", "rule": "b"}}`} {
+		t.Run(body, func(t *testing.T) {
+			ep, _ := NewOPAEndpoint(serve(t, http.StatusOK, body).URL, "authz/allow")
+			err := ep.Verify(ctxWithToken("tok"), "resource", "read")
+			var denied *interceptors.DeniedError
+			if err == nil || errors.As(err, &denied) {
+				t.Fatalf("got %T: %v, want an error that is not a denial", err, err)
+			}
+		})
+	}
+}
+
 // OPA's keys are case-sensitive: a key in another case is not result, and
 // cannot allow.
 func TestOPAVerify_ResultInAnotherCase_DoesNotAllow(t *testing.T) {

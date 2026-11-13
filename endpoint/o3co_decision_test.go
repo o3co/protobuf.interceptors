@@ -327,8 +327,11 @@ func TestO3coVerify_BodyThatIsNotAWholeDecision(t *testing.T) {
 		{"allow that is not JSON", http.StatusOK, "<html>ok</html>"},
 		{"allow with no decision key", http.StatusOK, `{"ok": true}`},
 		{"allow whose reason is malformed", http.StatusOK, `{"decision": "allow", "reason": {"groups": "nope"}}`},
+		{"allow whose decision key repeats", http.StatusOK, strings.Replace(allowWithoutEvaluation, `"decision": "allow"`, `"decision": "deny", "decision": "allow"`, 1)},
+		{"allow with a key repeated in a group", http.StatusOK, strings.Replace(allowWithoutEvaluation, `"passed": true,`, `"passed": false, "passed": true,`, 1)},
 		{"empty deny", http.StatusForbidden, ""},
 		{"deny that is not JSON", http.StatusForbidden, "<html>forbidden</html>"},
+		{"deny whose decision key repeats", http.StatusForbidden, `{"decision": "deny", "decision": "deny", "code": "x", "message": "m"}`},
 		{"deny whose revision is a number", http.StatusForbidden, `{"decision": "deny", "code": "x", "message": "m", "reason": {"groups": [{"ruleType": "cedar", "passed": false, "evaluated": [{"code": "x", "message": "m", "passed": false, "evaluation": {"status": "completed", "revision": 7}}]}]}}`},
 	}
 	for _, tc := range cases {
@@ -559,6 +562,19 @@ func TestO3coVerify_401CallerUnauthenticated_IsNotTheSubjectsFault(t *testing.T)
 	var unauth *interceptors.UnauthenticatedError
 	if errors.As(err, &unauth) {
 		t.Fatal("a refused caller credential must not tell the RPC caller its token is invalid")
+	}
+}
+
+// A 401 whose envelope repeats a key is not a whole error envelope, so it is
+// any other 401: the caller's token is refused, whatever code it repeats.
+func TestO3coVerify_401WithARepeatedKey_IsUnauthenticated(t *testing.T) {
+	body := `{"decision": "deny", "code": "caller_unauthenticated", "code": "caller_unauthenticated", "message": "Caller credential required"}`
+	e := newTestEndpoint(t, serve(t, http.StatusUnauthorized, body).URL)
+
+	err := e.Verify(ctxWithToken("tok"), "r", "a")
+	var unauth *interceptors.UnauthenticatedError
+	if !errors.As(err, &unauth) || errors.Is(err, ErrCallerUnauthenticated) {
+		t.Fatalf("expected *UnauthenticatedError, got %T: %v", err, err)
 	}
 }
 
@@ -797,5 +813,34 @@ func TestO3coVerifyDecision_Subject(t *testing.T) {
 				t.Errorf("VerifyDecision = (%+v, %v), want a denial and no decision", d, err)
 			}
 		})
+	}
+}
+
+// A key repeats only within one object: the same key in sibling objects, in
+// the objects of an array, or at another depth is not a repeat.
+func TestRepeatsAKey(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"a": 1, "a": 2}`, true},
+		{`{"a": {"b": 1, "b": 2}}`, true},
+		{`{"a": [{"b": 1}, {"c": 1, "c": 2}]}`, true},
+		{`[{"a": 1, "a": 1}]`, true},
+		{`{"a": 1, "\u0061": 2}`, true},
+		{"{\"\xff\": 1, \"\xfe\": 2}", true},
+		{`{"\ud800": 1, "\udc00": 2}`, true},
+		{`{"a": 1, "A": 2}`, false},
+		{`{"a": {"x": 1}, "b": {"x": 2}}`, false},
+		{`{"a": [{"x": 1}, {"x": 2}], "x": 3}`, false},
+		{`{"a": {"a": {"a": 1}}}`, false},
+		{`{"a": [], "b": {}, "c": [[], {}]}`, false},
+		{`not json`, false},
+		{``, false},
+	}
+	for _, tc := range cases {
+		if got := repeatsAKey([]byte(tc.body)); got != tc.want {
+			t.Errorf("repeatsAKey(%s) = %v, want %v", tc.body, got, tc.want)
+		}
 	}
 }

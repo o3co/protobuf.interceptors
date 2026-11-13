@@ -258,6 +258,21 @@ func TestCedarVerify_PrincipalWithAQuote_IsEscapedOnTheWire(t *testing.T) {
 	}
 }
 
+// An answer whose object repeats a key, at any depth, has no reading: it is
+// not taken as a decision, whichever value comes last.
+func TestCedarVerify_RepeatedKey_IsNotADecision(t *testing.T) {
+	for _, body := range []string{`{"decision": "Deny", "decision": "Allow"}`, `{"decision": "Allow", "decision": "Deny"}`, `{"decision": "Allow", "diagnostics": {"reason": [], "reason": []}}`} {
+		t.Run(body, func(t *testing.T) {
+			ep, _ := NewCedarEndpoint(serve(t, http.StatusOK, body).URL, WithCedarPrincipalResolver(tokenAsPrincipal))
+			err := ep.Verify(ctxWithToken("tok"), "resource", "read")
+			var denied *interceptors.DeniedError
+			if err == nil || errors.As(err, &denied) {
+				t.Fatalf("got %T: %v, want an error that is not a denial", err, err)
+			}
+		})
+	}
+}
+
 // The Cedar agent's keys are case-sensitive: a key in another case is not
 // decision, and cannot allow.
 func TestCedarVerify_DecisionInAnotherCase_DoesNotAllow(t *testing.T) {
