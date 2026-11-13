@@ -651,7 +651,7 @@ O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/confor
 | gRPC | `grpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/grpc@vX.Y.Z` |
 | ConnectRPC | `connectrpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/connectrpc@vX.Y.Z` |
 
-- **3 つのモジュールで 1 つのバージョン。** `grpc/vX.Y.Z` と `connectrpc/vX.Y.Z` は、コアの `vX.Y.Z` と同じコミットから一緒にリリースされる。1 つのモジュールだけの修正も、3 つすべてのパッチリリースになる。`v0.7.0` より前は各モジュールが別々に番号付けされていたので、それより古いフレームワークのバージョンはコアのバージョンについて何も示さない。
+- **3 つのモジュールで 1 つのバージョン。** `grpc/vX.Y.Z` と `connectrpc/vX.Y.Z` は、コアの `vX.Y.Z` と一緒にリリースされる。1 つのモジュールだけの修正も、3 つすべてのパッチリリースになる。`v0.7.0` より後は、1 つのバージョンの 3 つのタグが同じコミットを指す。`v0.7.0` より前は各モジュールが別々に番号付けされていたので、それより古いフレームワークのバージョンはコアのバージョンについて何も示さない。
 - **フレームワークモジュールは同じバージョンのコアを require する。** `grpc@vX.Y.Z` を `go get` するとコアの `vX.Y.Z` が入る。利用者のモジュールがより新しいものを require していれば、そちらになる。
 - **メジャーバージョンが `0` の間は、マイナーリリースで API が壊れることがある。** パッチリリースでは壊れない。マイナーを上げる前にリリースノートを読むこと。
 - **リリースノート**は [GitHub Releases](https://github.com/o3co/protobuf.interceptors/releases) で、タグごとに 1 つある。CHANGELOG は無い。

@@ -17,11 +17,9 @@ on:
 permissions:
   contents: read
 
-# One release at a time; a release in progress is never cancelled.
-concurrency:
-  group: release
-  cancel-in-progress: false
-
+# No concurrency group: a group keeps one pending run and cancels the others,
+# which would leave a core tag public with no framework tags. Releases of two
+# versions may run at once; each touches only its own tags and Releases.
 env:
   FRAMEWORKS: grpc connectrpc
 
@@ -36,6 +34,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.tag.outputs.commit }}
       path: ${{ steps.tag.outputs.path }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
       latest: ${{ steps.previous.outputs.latest }}
@@ -46,7 +45,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          echo "::error::$TAG: a framework tag is created by the core release, on the core tag's commit. Delete this tag at once (git push origin :refs/tags/$TAG) and push the core tag instead."
+          echo "::error::$TAG: a framework tag is created by the core release, on the core tag's commit. Unless that release has already published this tag, delete it at once (git push origin :refs/tags/$TAG) and push the core tag instead."
           exit 1
 
       - uses: actions/checkout@v7
@@ -86,9 +85,13 @@ jobs:
 
           path="$(awk '$1 == "module" { print $2; exit }' go.mod)"
           if [[ "$VERSION" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          # The commit the tag names, whether the tag is lightweight or
+          # annotated: the framework tags go on this commit.
+          commit="$(git rev-parse --verify "$GITHUB_SHA^{commit}")"
 
           {
             echo "version=$VERSION"
+            echo "commit=$commit"
             echo "path=$path"
             echo "prerelease=$prerelease"
             echo "semver=$semver"
@@ -97,13 +100,15 @@ jobs:
       # Releases are cut from develop. The checkout above fetched every branch,
       # so origin/develop is the remote's develop at the time of this run.
       - name: Check that the tagged commit is on develop
+        env:
+          COMMIT: ${{ steps.tag.outputs.commit }}
         run: |
           if ! git rev-parse --verify --quiet refs/remotes/origin/develop > /dev/null; then
             echo "::error::origin/develop was not fetched"
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/develop; then
-            echo "::error::$GITHUB_SHA is not on develop: tag a commit of develop"
+          if ! git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/develop; then
+            echo "::error::$COMMIT is not on develop: tag a commit of develop"
             exit 1
           fi
 
@@ -124,7 +129,7 @@ jobs:
               echo "::error file=$dir/go.mod::$dir has go $go, and the core go $core_go: keep the three go directives equal"
               refused=true
             fi
-            required="$(cd "$dir" && go mod edit -json | jq -r --arg core "$CORE" '.Require[] | select(.Path == $core) | .Version')"
+            required="$(cd "$dir" && go mod edit -json | jq -r --arg core "$CORE" '(.Require // [])[] | select(.Path == $core) | .Version')"
             if [ "$required" != "$VERSION" ]; then
               echo "::error file=$dir/go.mod::$dir requires core ${required:-nothing}, not $VERSION: delete the tag, raise the require in a pull request (go mod edit -require=$CORE@$VERSION in $FRAMEWORKS), then tag again"
               refused=true
@@ -138,17 +143,18 @@ jobs:
       - name: Check the framework tags
         env:
           VERSION: ${{ steps.tag.outputs.version }}
+          COMMIT: ${{ steps.tag.outputs.commit }}
         run: |
           for dir in $FRAMEWORKS; do
             tag="$dir/$VERSION"
             if at="$(git rev-parse --verify --quiet "refs/tags/$tag^{commit}")"; then
-              if [ "$at" != "$GITHUB_SHA" ]; then
-                echo "::error::$tag already names $at, not $GITHUB_SHA"
+              if [ "$at" != "$COMMIT" ]; then
+                echo "::error::$tag already names $at, not $COMMIT"
                 exit 1
               fi
               echo "$tag already names this commit"
             else
-              git tag "$tag" "$GITHUB_SHA"
+              git tag "$tag" "$COMMIT"
             fi
           done
 
@@ -227,21 +233,61 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.validate.outputs.version }}
+      COMMIT: ${{ needs.validate.outputs.commit }}
     steps:
+      # The tags are read again here, not taken from validate: the core tag
+      # may have been deleted since, or this may be a re-run. A framework tag
+      # is created only while the core tag still names this commit, and only
+      # once every tag has been read, so a refusal writes nothing.
       - name: Tag the framework modules
         run: |
+          # tag_commit prints the commit a tag names, following an annotated
+          # tag to its commit, and nothing if there is no such tag. Any other
+          # failure of the API is a failure of the step, not an absent tag.
+          tag_commit() {
+            local out type sha
+            if ! out="$(gh api "repos/$GH_REPO/git/ref/tags/$1" --jq '.object.type + " " + .object.sha' 2>&1)"; then
+              if [[ "$out" == *"HTTP 404"* ]]; then return 0; fi
+              echo "::error::reading the tag $1: $out" >&2
+              return 1
+            fi
+            read -r type sha <<< "$out"
+            while [ "$type" = tag ]; do
+              out="$(gh api "repos/$GH_REPO/git/tags/$sha" --jq '.object.type + " " + .object.sha')" || return 1
+              read -r type sha <<< "$out"
+            done
+            if [ "$type" != commit ]; then
+              echo "::error::the tag $1 names a $type, not a commit" >&2
+              return 1
+            fi
+            echo "$sha"
+          }
+
+          core="$(tag_commit "$VERSION")"
+          if [ -z "$core" ]; then
+            echo "::error::the core tag $VERSION no longer exists: no framework tag is created"
+            exit 1
+          fi
+          if [ "$core" != "$COMMIT" ]; then
+            echo "::error::the core tag $VERSION names $core, not $COMMIT: no framework tag is created"
+            exit 1
+          fi
+          create=()
           for dir in $FRAMEWORKS; do
             tag="$dir/$VERSION"
-            if at="$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.sha 2> /dev/null)"; then
-              if [ "$at" != "$GITHUB_SHA" ]; then
-                echo "::error::$tag already names $at, not $GITHUB_SHA"
-                exit 1
-              fi
-              echo "$tag already names this commit"
+            at="$(tag_commit "$tag")"
+            if [ -z "$at" ]; then
+              create+=("$tag")
+            elif [ "$at" != "$COMMIT" ]; then
+              echo "::error::$tag already names $at, not $COMMIT"
+              exit 1
             else
-              gh api "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" > /dev/null
-              echo "created $tag"
+              echo "$tag already names this commit"
             fi
+          done
+          for tag in "${create[@]}"; do
+            gh api "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$COMMIT" > /dev/null
+            echo "created $tag"
           done
 
       # A tag with a SemVer prerelease suffix (vX.Y.Z-rc.1) is a prerelease,
@@ -269,33 +315,46 @@ jobs:
             gh release create "$tag" "${args[@]}"
           done
 
+  # Asks the module proxy for each version, so consumers and pkg.go.dev see
+  # it without waiting for the first `go get`. A job of its own, so that the
+  # wait runs with read-only access and no token.
+  warm:
+    name: Warm the module proxy for ${{ github.ref_name }}
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
 
-      # Ask the module proxy for each version, so consumers and pkg.go.dev see
-      # it without waiting for the first `go get`. The proxy may answer "not
-      # found" for a while for a tag it looked up just before it existed, so
-      # it is asked again for up to 30 minutes. A version it still has not
-      # seen is a warning, not a failure: it is valid, and the first `go get`
-      # fetches it.
-      - name: Warm the module proxy
+      # The proxy may answer "not found" for a while for a tag it looked up
+      # just before it existed, so it is asked again for up to 30 minutes. A
+      # version it still has not seen is a warning, not a failure: it is
+      # valid, and the first `go get` fetches it.
+      - name: Ask the module proxy
         working-directory: ${{ runner.temp }}
         env:
           GOPROXY: proxy.golang.org
+          VERSION: ${{ needs.validate.outputs.version }}
           CORE: ${{ needs.validate.outputs.path }}
         run: |
+          attempts=30
           pending=("$CORE@$VERSION")
           for dir in $FRAMEWORKS; do pending+=("$CORE/$dir@$VERSION"); done
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 "$attempts"); do
             left=()
             for module in "${pending[@]}"; do
-              if go list -m "$module" > /dev/null 2>&1; then echo "proxy has $module"; else left+=("$module"); fi
+              if out="$(go list -m "$module" 2>&1)"; then
+                echo "proxy has $module"
+              elif [ "$attempt" -eq "$attempts" ]; then
+                echo "::warning::the module proxy does not have $module yet (${out//$'\n'/ }); ask again with: GOPROXY=proxy.golang.org go list -m $module"
+              else
+                left+=("$module")
+              fi
             done
             pending=("${left[@]}")
             if [ "${#pending[@]}" -eq 0 ]; then exit 0; fi
-            if [ "$attempt" -lt 30 ]; then sleep 60; fi
-          done
-          for module in "${pending[@]}"; do
-            echo "::warning::the module proxy does not have $module yet; ask again with: GOPROXY=proxy.golang.org go list -m $module"
+            sleep 60
           done

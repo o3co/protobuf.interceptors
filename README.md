@@ -1170,10 +1170,10 @@ tag:
 | ConnectRPC | `connectrpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/connectrpc@vX.Y.Z` |
 
 - **One version for the three modules.** `grpc/vX.Y.Z` and
-  `connectrpc/vX.Y.Z` are released with the core's `vX.Y.Z`, from the same
-  commit; a fix to one module is a patch release of all three. Before
-  `v0.7.0` the modules were numbered on their own, so an older framework
-  version says nothing about the core's.
+  `connectrpc/vX.Y.Z` are released with the core's `vX.Y.Z`; a fix to one
+  module is a patch release of all three. After `v0.7.0` the three tags of a
+  version name one commit. Before `v0.7.0` the modules were numbered on their
+  own, so an older framework version says nothing about the core's.
 - **A framework module requires the core of its own version**: `go get` of
   `grpc@vX.Y.Z` brings core `vX.Y.Z` in, or a newer one if your module
   requires it.
