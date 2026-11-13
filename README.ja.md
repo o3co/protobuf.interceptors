@@ -327,7 +327,7 @@ mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 | o3co policy-verifier | `endpoint.NewO3coEndpoint(baseURL)` | `POST /verify` |
 | Static rules | `endpoint.NewStaticEndpoint(rules)` | ローカルで評価 |
 
-**Cedar エンドポイントは認証をしない。** Cedar エージェントは問われた principal について何であれ判定し、Bearer トークンは見せられないので、`NewCedarEndpoint` は `WithCedarPrincipalResolver` を必須とする: トークンを検証し — JWT なら署名、有効期限、issuer、audience — principal の id を返す関数である。トークンをデコードするだけのリゾルバーでは、どの呼び出し元もどの principal でも名乗れてしまう。エラーまたは空の id は `UnauthenticatedError` になり、エージェントには問い合わせない。id は Cedar の文字列リテラルとしてエスケープされるので、引用符やバックスラッシュが含まれても、指すエンティティは変わらない。
+**Cedar エンドポイントは認証をしない。** Cedar エージェントは問われた principal について何であれ判定し、Bearer トークンは見せられないので、`NewCedarEndpoint` は `WithCedarPrincipalResolver` を必須とする: トークンを検証し — JWT なら署名、有効期限、issuer、audience — principal の id を返す関数である。トークンをデコードするだけのリゾルバーでは、どの呼び出し元もどの principal でも名乗れてしまう。エラーまたは空の id は `UnauthenticatedError` になり、エージェントには問い合わせない。ただし `interceptors.ErrBackendUnavailable` を包むエラー — 今は答えられないリゾルバー、たとえば issuer の鍵集合に届かないもの — はそのまま返り、インターセプターは、答えられないエージェントと同じく `Unavailable` とする。`UnauthenticatedError` や `DeniedError` でもあるエラーはそちらとして報告され、RPC 自身のキャンセルは `Unavailable` より優先される。どのバックエンドでも同じである。id は Cedar の文字列リテラルとしてエスケープされるので、引用符やバックスラッシュが含まれても、指すエンティティは変わらない。
 
 ベース URL はスキーム（`http` または `https`）とホストを指定する。どちらかを欠くものは、推測されずに構築時に拒否される。o3co や OPA へのリクエストはサブジェクトの Bearer トークンを、Cedar へのリクエストはそこから解決した principal を運ぶので、`http://` はループバック — `localhost`、`127.0.0.0/8`、`::1` — にのみ許される。ただしエンドポイントに `WithO3coAllowInsecure()`、`WithOPAAllowInsecure()`、`WithCedarAllowInsecure()` を与えた場合は別である。それ以外では `https://` を使うこと。`localhost` は大文字小文字を問わず名前で受け付け、他のホストと同じく `/etc/hosts` と DNS で解決される。リテラルのアドレスは 127.0.0.0/8 内のもの、または `::1`（IPv4 射影の `::ffff:127.x.y.z` を含む）として書かれた場合にのみ受け付けるので、`localhost.`、`foo.localhost`、`127.1`、`2130706433`、`0.0.0.0`、ゾーン付きの `::1%lo0` はループバックではない。
 
@@ -471,7 +471,7 @@ policyconnect.VerificationInterceptor(verifier, policyconnect.WithDecisionObserv
 
 **オブザーバーは軽く、ブロックしないものにする。** オブザーバーは同期的に呼ばれる: ハンドラーはそれが戻ってから始まる。ストリームの再検査は、検査を行った送信または受信の中でオブザーバーを呼び、ストリームの検査は直列化されているので、それが戻るまでその送信または受信は待ち、ストリーム上の他の送受信も、向きにかかわらず待つ — `WithStreamRecheckInterval` があっても、自分の再検査の時期が来ているかどうかにかかわらず待つ。遅い処理 — リモートの監査ストアへの書き込みなど — は別のゴルーチンに渡すこと。
 
-ストリームのクライアントが去った後は、HTTP エンドポイント（o3co、OPA、Cedar）では次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。Cedar でこれが成り立つのは principal リゾルバーが答えた後である: コンテキストを使って I/O をするリゾルバーは先に失敗し、そのエラーは `UnauthenticatedError` になる。static エンドポイントはコンテキストのキャンセルを見ない: その再検査はそれまでと同じ答えを返し、オブザーバーはその答えを見て、送信はその後トランスポートで失敗する。
+ストリームのクライアントが去った後は、HTTP エンドポイント（o3co、OPA、Cedar）では次の送信の再検査が RPC のコンテキストのエラーで失敗する — オブザーバーが見るのは拒否ではなく `context.Canceled` または `context.DeadlineExceeded` である。Cedar でこれが成り立つのは principal リゾルバーが答えた後である: コンテキストを使って I/O をするリゾルバーは先に失敗し、そのエラーは `UnauthenticatedError` になる。ただし `interceptors.ErrBackendUnavailable` を包むエラーはそのまま返り、それでも RPC 自身のキャンセルのほうが優先される。static エンドポイントはコンテキストのキャンセルを見ない: その再検査はそれまでと同じ答えを返し、オブザーバーはその答えを見て、送信はその後トランスポートで失敗する。
 
 拒否のときは、判定は `DeniedError.Decision` にもあり、verifier の deny `code` は `Decision.Code` に入る。
 
@@ -547,7 +547,7 @@ N 個のレスポンスを返すサーバーストリームは N + 2 回 — 開
 |---|---|---|
 | o3co（auth.policy-verifier） | `Unauthenticated`（verifier が `401` で答える） | `PermissionDenied`（`403`） |
 | OPA | ポリシーの判定どおり: deny なら `PermissionDenied` | `PermissionDenied` |
-| Cedar | principal リゾルバーがトークンを拒否したとき `Unauthenticated`。リゾルバーは検査のたびに呼ばれる | `PermissionDenied` |
+| Cedar | principal リゾルバーがトークンを拒否したとき `Unauthenticated`、答えられないとき `Unavailable`。リゾルバーは検査のたびに呼ばれる | `PermissionDenied` |
 | static | 起きない: トークンがあることしか検査しない | 起きない: 規則は固定である |
 
 再検査に答えられないバックエンド — 到達できない、エンドポイント自身のタイムアウトより遅い、過負荷（`429`、`502`、`503`、`504`）— は、`Unavailable: authorization backend unavailable` でストリームを終わらせる。契約の外で答えたバックエンドは `Internal` で終わらせる（[エラー](#エラー)を参照）。

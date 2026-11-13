@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -211,6 +212,44 @@ func TestCedarVerify_ResolverRefusal_IsUnauthenticatedAndAsksNothing(t *testing.
 			}
 			if strings.Contains(unauth.Reason, "resolver detail") {
 				t.Errorf("the reason %q carries the resolver's error to the RPC caller", unauth.Reason)
+			}
+			if n := asked.Load(); n != 0 {
+				t.Errorf("the Cedar agent was asked %d times, want never", n)
+			}
+		})
+	}
+}
+
+// A resolver that cannot answer now — its error wraps
+// interceptors.ErrBackendUnavailable — is reported as a backend that cannot
+// answer, not as an invalid token, and the Cedar agent is never asked.
+func TestCedarVerify_ResolverUnavailable_IsUnavailableAndAsksNothing(t *testing.T) {
+	cases := map[string]func(context.Context, string) (string, error){
+		"an error": func(context.Context, string) (string, error) {
+			return "", fmt.Errorf("%w: key set unreachable", interceptors.ErrBackendUnavailable)
+		},
+		"an error and an id": func(context.Context, string) (string, error) {
+			return "alice", fmt.Errorf("%w: key set unreachable", interceptors.ErrBackendUnavailable)
+		},
+	}
+	for name, resolve := range cases {
+		t.Run(name, func(t *testing.T) {
+			var asked atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				asked.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]string{"decision": "Allow"})
+			}))
+			defer srv.Close()
+
+			ep, err := NewCedarEndpoint(srv.URL, WithCedarPrincipalResolver(resolve))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			err = ep.Verify(ctxWithToken("tok"), "r", "a")
+			assertUnavailable(t, err)
+			var unauth *interceptors.UnauthenticatedError
+			if errors.As(err, &unauth) {
+				t.Errorf("got an UnauthenticatedError %v, want the resolver's unavailable error", err)
 			}
 			if n := asked.Load(); n != 0 {
 				t.Errorf("the Cedar agent was asked %d times, want never", n)

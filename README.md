@@ -515,7 +515,13 @@ whatever principal it is asked about, and is never shown the bearer token, so
 verifies the token — for a JWT its signature, expiry, issuer and audience — and
 returns the principal's id. A resolver that only decodes the token lets any
 caller name any principal. An error or an empty id is an
-`UnauthenticatedError`, and the agent is not asked. The id is escaped as a
+`UnauthenticatedError`, and the agent is not asked. An error that wraps
+`interceptors.ErrBackendUnavailable` — a resolver that cannot answer now, its
+issuer's key set unreachable, say — is returned as it is instead, and the
+interceptors report `Unavailable`, as for an agent that cannot answer. An
+error that is also an `UnauthenticatedError` or a `DeniedError` is reported
+as that, and the RPC's own cancellation outranks `Unavailable`, as for every
+backend. The id is escaped as a
 Cedar string literal, so a quote or backslash in it cannot change the entity
 it names.
 
@@ -798,7 +804,9 @@ Once a stream's client has gone away, the next send's re-check on an HTTP
 endpoint (o3co, OPA, Cedar) fails with the RPC's context error — the observer
 sees `context.Canceled` or `context.DeadlineExceeded`, not a denial. On Cedar
 that holds once the principal resolver has answered: a resolver that does I/O
-with the context fails first, and its error is an `UnauthenticatedError`. The
+with the context fails first, and its error is an `UnauthenticatedError`,
+unless it wraps `interceptors.ErrBackendUnavailable`, which the RPC's own
+cancellation still outranks. The
 static endpoint does not watch the context's cancellation: its re-check
 answers as before, the observer sees that answer, and the send then fails on
 the transport.
@@ -1008,7 +1016,7 @@ sent before the refusal:
 |---|---|---|
 | o3co (auth.policy-verifier) | `Unauthenticated` (the verifier answers `401`) | `PermissionDenied` (`403`) |
 | OPA | what the policy decides: a deny is `PermissionDenied` | `PermissionDenied` |
-| Cedar | `Unauthenticated` when the principal resolver refuses the token; the resolver is called on every check | `PermissionDenied` |
+| Cedar | `Unauthenticated` when the principal resolver refuses the token, `Unavailable` when it cannot answer; the resolver is called on every check | `PermissionDenied` |
 | static | never: it checks only that a token is present | never: its rules are fixed |
 
 A backend that cannot answer a re-check — unreachable, slower than the
