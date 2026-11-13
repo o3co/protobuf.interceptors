@@ -22,6 +22,12 @@ permissions:
 # versions may run at once; each touches only its own tags and Releases, except
 # the repository's latest mark, which publish decides from the tags it reads
 # just before creating the core Release.
+# bash with -e and pipefail: a failure anywhere in a pipeline fails the step.
+# Without a shell named, a run step has no pipefail.
+defaults:
+  run:
+    shell: bash
+
 env:
   FRAMEWORKS: grpc connectrpc
 
@@ -305,8 +311,10 @@ jobs:
             fi
             latest=false
             if [ "$tag" = "$VERSION" ] && [ "$PRERELEASE" = false ]; then
-              newest="$(gh api "repos/$GH_REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref' \
-                | sed 's|^refs/tags/||' | { grep -E "$full" || true; } | sort -V | tail -n 1)"
+              # Read first, so that a failed request fails the step instead of
+              # reading as no tag.
+              refs="$(gh api "repos/$GH_REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref')"
+              newest="$(sed 's|^refs/tags/||' <<< "$refs" | { grep -E "$full" || true; } | sort -V | tail -n 1)"
               if [ "$newest" = "$VERSION" ]; then latest=true; fi
               echo "newest full core release: ${newest:-none}; latest: $latest"
             fi
