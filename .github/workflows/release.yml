@@ -19,7 +19,9 @@ permissions:
 
 # No concurrency group: a group keeps one pending run and cancels the others,
 # which would leave a core tag public with no framework tags. Releases of two
-# versions may run at once; each touches only its own tags and Releases.
+# versions may run at once; each touches only its own tags and Releases, except
+# the repository's latest mark, which publish decides from the tags it reads
+# just before creating the core Release.
 env:
   FRAMEWORKS: grpc connectrpc
 
@@ -37,7 +39,6 @@ jobs:
       commit: ${{ steps.tag.outputs.commit }}
       path: ${{ steps.tag.outputs.path }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
-      latest: ${{ steps.previous.outputs.latest }}
       previous: ${{ steps.previous.outputs.previous }}
     steps:
       - name: Refuse a framework tag
@@ -45,7 +46,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          echo "::error::$TAG: a framework tag is created by the core release, on the core tag's commit. Unless that release has already published this tag, delete it at once (git push origin :refs/tags/$TAG) and push the core tag instead."
+          echo "::error::$TAG: a framework tag is created by the core release, on the core tag's commit. Unless that release has already published this tag (gh release view $TAG shows a Release), delete it at once (git push origin :refs/tags/$TAG) and push the core tag instead."
           exit 1
 
       - uses: actions/checkout@v7
@@ -159,15 +160,12 @@ jobs:
           done
 
       # Each module's release notes start at its previous full release: the
-      # first valid tag with no prerelease suffix that sorts below this one.
-      # Only the newest full core release is marked as the repository's
-      # latest, so neither a framework release nor a patch to an older minor
-      # line takes that mark.
+      # first valid tag with no prerelease suffix that sorts below this one,
+      # among the tags fetched by this run.
       - name: Find each module's previous release
         id: previous
         env:
           VERSION: ${{ steps.tag.outputs.version }}
-          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
           SEMVER: ${{ steps.tag.outputs.semver }}
         run: |
           valid() { [[ "$1" =~ $SEMVER ]] && [[ "${BASH_REMATCH[1]}" =~ ^[01]$ ]]; }
@@ -181,14 +179,8 @@ jobs:
             found="$(awk -v tag="$tag" 'seen && $0 !~ /-/ { print; exit } $0 == tag { seen = 1 }' <<< "$tags")"
             echo "$tag: previous release ${found:-none}"
             previous+=("$tag=$found")
-            if [ -z "$prefix" ]; then newest="$(grep -v -- '-' <<< "$tags" | head -n 1)"; fi
           done
-          if [ "$PRERELEASE" = false ] && [ "$newest" = "$VERSION" ]; then latest=true; else latest=false; fi
-          echo "latest: $latest"
-          {
-            echo "previous=${previous[*]}"
-            echo "latest=$latest"
-          } >> "$GITHUB_OUTPUT"
+          echo "previous=${previous[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Vet and test
         run: |
@@ -290,16 +282,20 @@ jobs:
             echo "created $tag"
           done
 
-      # A tag with a SemVer prerelease suffix (vX.Y.Z-rc.1) is a prerelease,
-      # and only the core's full release may be marked as the latest: a
-      # framework release says --latest=false, or the last created would take
-      # the mark.
+      # A tag with a SemVer prerelease suffix (vX.Y.Z-rc.1) is a prerelease.
+      # Only the newest full core release is marked as the repository's
+      # latest, so neither a framework release nor a patch to an older minor
+      # line takes that mark: a framework release says --latest=false, or the
+      # last created would take it. The newest is read from the remote's tags
+      # just before the core Release is created, so a release of a newer
+      # version pushed meanwhile keeps the mark.
       - name: Create the GitHub Releases
         env:
           PREVIOUS: ${{ needs.validate.outputs.previous }}
           PRERELEASE: ${{ needs.validate.outputs.prerelease }}
-          LATEST: ${{ needs.validate.outputs.latest }}
         run: |
+          # A full release: v + MAJOR.MINOR.PATCH, major 0 or 1, no suffix.
+          full='^v[01]\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           for entry in $PREVIOUS; do
             tag="${entry%%=*}"
             previous="${entry#*=}"
@@ -308,7 +304,12 @@ jobs:
               continue
             fi
             latest=false
-            if [ "$tag" = "$VERSION" ]; then latest="$LATEST"; fi
+            if [ "$tag" = "$VERSION" ] && [ "$PRERELEASE" = false ]; then
+              newest="$(gh api "repos/$GH_REPO/git/matching-refs/tags/v" --paginate --jq '.[].ref' \
+                | sed 's|^refs/tags/||' | { grep -E "$full" || true; } | sort -V | tail -n 1)"
+              if [ "$newest" = "$VERSION" ]; then latest=true; fi
+              echo "newest full core release: ${newest:-none}; latest: $latest"
+            fi
             args=(--verify-tag --title "$tag" --generate-notes "--latest=$latest")
             if [ -n "$previous" ]; then args+=(--notes-start-tag "$previous"); fi
             if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
