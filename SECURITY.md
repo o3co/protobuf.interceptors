@@ -25,9 +25,9 @@ advisory's publication are coordinated with you there.
 
 ## Supported versions
 
-Fixes are released as a new version of each affected module, on its newest
-minor line. While the major version is `0`, earlier minor lines are not
-patched; upgrade to the newest release of the module.
+The three modules share one version, so a fix is released as a new version
+of all three, on the newest minor line. While the major version is `0`,
+earlier minor lines are not patched; upgrade to the newest release.
 
 ## Scope
 

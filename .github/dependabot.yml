@@ -20,8 +20,8 @@ updates:
     ignore:
       # The gRPC and ConnectRPC modules require the core module and build
       # against the checkout's own copy (replace => ../). The require is
-      # raised by the release process, in the pull request that follows a core
-      # release (see AGENTS.md, "Release process"), not by a weekly bump.
+      # raised by the release process, in the release-cut pull request before
+      # the core tag (see AGENTS.md, "Release Process"), not by a weekly bump.
       - dependency-name: "github.com/o3co/protobuf.interceptors"
 
   - package-ecosystem: "github-actions"

@@ -1,6 +1,6 @@
 # protobuf.interceptors
 
-最終更新: 2026-11-13
+最終更新: 2026-11-14
 
 [English](README.md)
 
@@ -189,7 +189,7 @@ unary のポリシーインターセプター `policygrpc.PolicyOptionIntercepto
 
 ## モジュール
 
-3 つの Go モジュールがあり、それぞれ独立にバージョン付けされリリースされる（[バージョンとリリース](#バージョンとリリース)を参照）:
+3 つの Go モジュールがあり、1 つのバージョンでまとめてリリースされる（[バージョンとリリース](#バージョンとリリース)を参照）:
 
 | モジュール | インポートパス | ビルドでコンパイルされるもの |
 |---|---|---|
@@ -643,7 +643,7 @@ O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/confor
 
 ## バージョンとリリース
 
-各モジュールはそれぞれのバージョンとタグを持つ:
+3 つのモジュールは 1 つのバージョンでまとめてリリースされ、それぞれのタグを持つ:
 
 | モジュール | タグ | インストール |
 |---|---|---|
@@ -651,8 +651,8 @@ O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/confor
 | gRPC | `grpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/grpc@vX.Y.Z` |
 | ConnectRPC | `connectrpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/connectrpc@vX.Y.Z` |
 
-- **バージョン番号は独立している。** `grpc/v0.4.0` と `v0.4.0` は別のモジュールの別のリリースであり、フレームワークモジュールのバージョンはコアのバージョンについて何も示さない。
-- **フレームワークモジュールは、それをリリースしたときのコアのリリース**、つまり当時の最新を require する。フレームワークモジュールを `go get` するとそのコアのバージョンが入る。利用者のモジュールがより新しいものを require していれば、そちらになる。
+- **3 つのモジュールで 1 つのバージョン。** `grpc/vX.Y.Z` と `connectrpc/vX.Y.Z` は、コアの `vX.Y.Z` と一緒にリリースされる。1 つのモジュールだけの修正も、3 つすべてのパッチリリースになる。`v0.7.0` より後は、1 つのバージョンの 3 つのタグが同じコミットを指す。`v0.7.0` より前は各モジュールが別々に番号付けされていたので、それより古いフレームワークのバージョンはコアのバージョンについて何も示さない。
+- **フレームワークモジュールは同じバージョンのコアを require する。** `grpc@vX.Y.Z` を `go get` するとコアの `vX.Y.Z` が入る。利用者のモジュールがより新しいものを require していれば、そちらになる。
 - **メジャーバージョンが `0` の間は、マイナーリリースで API が壊れることがある。** パッチリリースでは壊れない。マイナーを上げる前にリリースノートを読むこと。
 - **リリースノート**は [GitHub Releases](https://github.com/o3co/protobuf.interceptors/releases) で、タグごとに 1 つある。CHANGELOG は無い。
 - **撤回（retract）されたバージョン** — `grpc/v0.1.0`、`connectrpc/v0.1.0`、`connectrpc/v0.2.0` は存在しないコアのバージョンを require しており、ビルドも require もできない。撤回を記したそのモジュールの次のリリース（プレリリースではないもの）が公開されると、`go get` は撤回されたバージョンを選ばなくなり、それを require している箇所では警告を出す。

@@ -45,7 +45,7 @@ The repository holds three Go modules:
 
 - **Dependencies point one way**: the framework modules depend on the core; the core never imports them. Inside the core, `endpoint` depends on the root package, never the reverse. What the two framework modules share — resolution, credential parsing, the error types — lives in the core, so the two cannot drift; what is framework-specific stays in its module.
 - **`internal/streamcheck` and `internal/methodset` are contracts between modules.** Both framework modules import them, and a consumer may pair a released framework module with any later core release, so their exported API only grows: nothing in it is removed, renamed, or changes meaning.
-- **The framework modules build against the checkout's core.** Each `go.mod` has `replace github.com/o3co/protobuf.interceptors => ../`, so a change to the core and its use in a framework module land in one pull request and are tested together. Its `require` names a **published** core version, and that is what a consumer gets: a `replace` applies only in the module where it is written. So the `require` must name a core version that has every API the module uses. Between a core change and the next core release it does not; `release.yml` fails the run, and creates no GitHub Release, for a framework tag whose `require` lags (see [Release Process](#release-process)).
+- **The framework modules build against the checkout's core.** Each `go.mod` has `replace github.com/o3co/protobuf.interceptors => ../`, so a change to the core and its use in a framework module land in one pull request and are tested together. Its `require` names a core **release**, and that is what a consumer gets: a `replace` applies only in the module where it is written. The three modules are released together at one version, so the `require` names the release it is cut for: the release-cut pull request sets it to the coming version, published only once the core tag is pushed, and `release.yml` refuses a core tag that the framework modules do not require exactly (see [Release Process](#release-process)).
 - **`testproto/` is in the core module** so the core and both framework modules test against one service. That is why the core's `go.mod` requires `google.golang.org/grpc` and `connectrpc.com/connect`; no other core package imports either, so a consumer that imports only the core compiles neither.
 
 ## Wire Contract with auth.policy-verifier
@@ -113,33 +113,37 @@ The interceptors refuse rather than guess. Each rule holds on both frameworks:
 
 ## Release Process
 
-Each module is versioned and released on its own, by a tag on `develop`:
+The three modules share one version, `vX.Y.Z`, and are released together by one tag on `develop`, the core's:
 
 | Module | Tag |
 | --- | --- |
-| core | `vX.Y.Z` |
-| gRPC | `grpc/vX.Y.Z` |
-| ConnectRPC | `connectrpc/vX.Y.Z` |
+| core | `vX.Y.Z` (pushed by hand) |
+| gRPC | `grpc/vX.Y.Z` (created by the release run) |
+| ConnectRPC | `connectrpc/vX.Y.Z` (created by the release run) |
+
+A fix to one module alone is released as a patch of all three.
 
 ### Flow
 
-A release that changes the core takes two stages, because the framework modules' `require` must name the published core:
+1. **Cut the release** in a pull request: `go mod edit -require=github.com/o3co/protobuf.interceptors@vX.Y.Z` in `grpc/` and `connectrpc/`. The version is not published yet; the `replace` builds the framework modules against the checkout's core, so `go mod tidy -diff`, the build and CI pass. Merge it.
+2. **Tag the core** on that merge commit, promptly: until the tag, `develop`'s framework modules require a core version that does not exist, and a pseudo-version of them cannot be built. `git tag vX.Y.Z <merge commit> && git push origin vX.Y.Z`.
 
-1. Tag the core on `develop`: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-2. In a pull request, raise the framework modules' requirement: `go mod edit -require=github.com/o3co/protobuf.interceptors@vX.Y.Z && go mod tidy` in `grpc/` and `connectrpc/`. Merge it.
-3. Tag the framework modules on that merge commit: `grpc/vA.B.C` and `connectrpc/vD.E.F`.
+`.github/workflows/release.yml` runs on the core tag, in three jobs. It has no concurrency group: a group keeps one pending run and cancels the others, which would leave a core tag with no framework tags.
 
-A framework module released without a core change skips stages 1 and 2, as long as it already requires the newest core release.
+- **`validate`**, with read-only access, does everything that can refuse the release, and nothing that makes a version visible. It refuses a version that is not `v` + SemVer without build metadata or whose major would need a `/vN` module path; a tag whose commit is not on `develop`; a framework `go.mod` that does not require exactly `vX.Y.Z`, or whose `go` directive is not the core's; and a `grpc/vX.Y.Z` or `connectrpc/vX.Y.Z` already on another commit. It vets and tests the three modules, then drops each framework module's `replace` and builds, vets and tests it against the tagged core, which is what a consumer gets. That core is fetched from the repository (`GOPRIVATE`), not through `proxy.golang.org`, which would make the version permanent before the release is accepted.
+- **`publish`**, the one job that may write, runs only when `validate` passes. It reads the tags again: it creates `grpc/vX.Y.Z` and `connectrpc/vX.Y.Z` on the commit the core tag names (an annotated tag followed to its commit) only while the core tag still names it and no framework tag names another commit, and creates none if either check fails. Then it creates the three GitHub Releases — notes generated from each module's previous full release, a prerelease for a version with a `-` suffix, the latest mark only for the newest full core release, judged from the remote's tags just before the core Release is created, so that two releases running at once leave it on the newer. Each step skips what is already done, so a failed `publish` is finished by re-running it.
+- **`warm`**, read-only and without a token, asks `proxy.golang.org` for the three versions, again for up to 30 minutes while it answers "not found"; one it still lacks is a warning with the proxy's last answer, since the first `go get` fetches it.
 
-`.github/workflows/release.yml` runs on each tag, in two jobs. `validate`, with read-only access, reads the module and version from the tag; refuses a version that is not `v` + SemVer without build metadata or whose major would need a `/vN` module path; refuses a tag whose commit is not on `develop`; and vets and tests the module. For a framework module it also refuses a `go.mod` that does not require the newest valid core tag — the newest full release for a full release, the newest version, prereleases included, for a prerelease — then drops the `replace` and builds, vets and tests against the published core, which is what a consumer gets. Only when `validate` passes does `publish`, the one job that may write, create the GitHub Release with `gh release create`: notes generated from the module's previous full release, a prerelease for a version with a `-` suffix, and marked latest only for the newest full core release. It then asks `proxy.golang.org` for the version.
+A framework tag pushed by hand still starts `release.yml`, which refuses it. The tags `publish` creates do not: a tag created with `GITHUB_TOKEN` starts no workflow.
 
 ### Rules
 
 - **There is no CHANGELOG.** The GitHub Release notes are the record. Pull request titles follow Conventional Commits, with `!` on a breaking change, so the generated notes show it.
 - **While the major version is `0`, a breaking change bumps the minor** (`v0.4.x` → `v0.5.0`), never the patch; a feature bumps the minor; a fix alone bumps the patch.
 - **A published version is permanent**: the module proxy serves it once fetched, whatever happens to the tag. A broken one is not deleted but retracted, with a `retract` directive and a rationale comment in that module's `go.mod`; the retraction takes effect when the module's next release (not a prerelease) is published, and that release's notes call the retraction out.
-- **A failed release run creates no GitHub Release, but the tag is already a version**: the module proxy fetches a tag on first request, whatever the run said. Delete a refused tag at once (`git push origin :refs/tags/<tag>`), fix the cause and tag again; a tag that may already have been fetched is not reused — retract it and release the next patch.
-- **Agents never push a tag without the user's explicit approval.** Propose the tag commands, and after a tag is pushed, watch the run (`gh run list --workflow=release.yml`, `gh run watch`).
+- **A tag `validate` refused is already a version** to the module proxy, which fetches a tag on first request, whatever the run said. Delete it at once (`git push origin :refs/tags/<tag>`), fix the cause and tag again; a tag that may already have been fetched is not reused — retract it and release the next patch. A hand-pushed framework tag is refused the same way, and deleted unless a core release has already published it (`gh release view <tag>` shows a Release; `publish` accepts a framework tag already on the core tag's commit). A tag deleted after all is recreated, on the same commit, by re-running that release's `publish`.
+- **A failed `publish` is re-run, never deleted**: its tags and Releases may already be public. Re-running skips what exists.
+- **Agents never push a tag without the user's explicit approval.** Propose the core tag command, and after it is pushed, watch the run (`gh run list --workflow=release.yml`, `gh run watch`). The framework tags follow from that run, not from an agent.
 
 ## Tooling
 

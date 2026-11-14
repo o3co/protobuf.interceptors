@@ -1,6 +1,6 @@
 # protobuf.interceptors
 
-Last updated: 2026-11-13
+Last updated: 2026-11-14
 
 [日本語](README.ja.md)
 
@@ -318,7 +318,7 @@ client or bidirectional stream has no single one.
 
 ## Modules
 
-Three Go modules, each versioned and released on its own (see
+Three Go modules, released together at one version (see
 [Versioning and releases](#versioning-and-releases)):
 
 | Module | Import Path | What your build compiles |
@@ -1160,7 +1160,8 @@ O3CO_VERIFIER_WIRE_CONTRACT=../auth.policy-verifier/tests/integration/src/confor
 
 ## Versioning and releases
 
-Each module has its own version and its own tags:
+The three modules are released together, at one version, each with its own
+tag:
 
 | Module | Tags | Install |
 |---|---|---|
@@ -1168,12 +1169,14 @@ Each module has its own version and its own tags:
 | gRPC | `grpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/grpc@vX.Y.Z` |
 | ConnectRPC | `connectrpc/vX.Y.Z` | `go get github.com/o3co/protobuf.interceptors/connectrpc@vX.Y.Z` |
 
-- **The version numbers are independent.** `grpc/v0.4.0` and `v0.4.0` are
-  different releases of different modules; a framework module's version says
-  nothing about the core's.
-- **A framework module requires the core release it was released against**, the
-  newest at that time. `go get` of the framework module brings that core
-  version in, or a newer one if your module requires it.
+- **One version for the three modules.** `grpc/vX.Y.Z` and
+  `connectrpc/vX.Y.Z` are released with the core's `vX.Y.Z`; a fix to one
+  module is a patch release of all three. After `v0.7.0` the three tags of a
+  version name one commit. Before `v0.7.0` the modules were numbered on their
+  own, so an older framework version says nothing about the core's.
+- **A framework module requires the core of its own version**: `go get` of
+  `grpc@vX.Y.Z` brings core `vX.Y.Z` in, or a newer one if your module
+  requires it.
 - **While the major version is `0`, a minor release may break the API**; a
   patch release does not. Read the release notes before raising a minor.
 - **Release notes** are the [GitHub Releases](https://github.com/o3co/protobuf.interceptors/releases),
